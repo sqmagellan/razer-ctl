@@ -132,7 +132,11 @@ impl DeviceState {
         })
     }
 
-    fn apply(&self, device: &device::Device) -> Result<()> {
+    /// Perf mode + fan + logo -- the settings shared by `apply()` (full write) and
+    /// `enforce_to()` (the Synapse tug-of-war reassert). Kept in one place so the two
+    /// can't drift. Fan failures are logged but non-fatal (manual RPM can be rejected
+    /// depending on mode); a logo/perf failure propagates.
+    fn apply_perf_fan_logo(&self, device: &device::Device) -> Result<()> {
         match self.perf_mode {
             PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
@@ -151,15 +155,14 @@ impl DeviceState {
             FanSpeed::Manual(rpm) => command::set_fan_mode(device, librazer::types::FanMode::Manual)
                 .and_then(|_| command::set_fan_rpm(device, rpm, false)),
         } {
-            log::warn!("fan speed command failed: {:?}", e);
+            log::warn!("fan command failed: {:?}", e);
         }
 
-        match self.lights_mode.logo_mode {
-            LogoMode::Static => command::set_logo_mode(device, LogoMode::Static),
-            LogoMode::Breathing => command::set_logo_mode(device, LogoMode::Breathing),
-            LogoMode::Off => command::set_logo_mode(device, LogoMode::Off),
-        }?;
+        command::set_logo_mode(device, self.lights_mode.logo_mode)
+    }
 
+    fn apply(&self, device: &device::Device) -> Result<()> {
+        self.apply_perf_fan_logo(device)?;
         command::set_lights_always_on(device, self.lights_mode.always_on)?;
         command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness)?;
         command::set_battery_care(device, self.battery_care)
@@ -170,35 +173,9 @@ impl DeviceState {
     /// This is what the opt-in Enforce mode uses to win a tug-of-war with Synapse.
     /// Brightness is excluded so it stays on the adopt path (Fn keys keep working);
     /// always-on is excluded because it's owned by the display-state gate (it gets
-    /// dropped while the display is off). Mirrors apply() minus those two writes.
+    /// dropped while the display is off). It's exactly apply() minus those two writes.
     fn enforce_to(&self, device: &device::Device) -> Result<()> {
-        match self.perf_mode {
-            PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
-            PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
-            PerfMode::Balanced => command::set_perf_mode(device, librazer::types::PerfMode::Balanced),
-            PerfMode::Performance => command::set_perf_mode(device, librazer::types::PerfMode::Performance),
-            PerfMode::Hyperboost => command::set_perf_mode(device, librazer::types::PerfMode::Hyperboost),
-            PerfMode::Custom(cpu_boost, gpu_boost) => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Custom)?;
-                command::set_cpu_boost(device, cpu_boost)?;
-                command::set_gpu_boost(device, gpu_boost)
-            }
-        }?;
-
-        if let Err(e) = match self.fan_speed {
-            FanSpeed::Auto => command::set_fan_mode(device, librazer::types::FanMode::Auto),
-            FanSpeed::Manual(rpm) => command::set_fan_mode(device, librazer::types::FanMode::Manual)
-                .and_then(|_| command::set_fan_rpm(device, rpm, false)),
-        } {
-            log::warn!("enforce: fan command failed: {:?}", e);
-        }
-
-        match self.lights_mode.logo_mode {
-            LogoMode::Static => command::set_logo_mode(device, LogoMode::Static),
-            LogoMode::Breathing => command::set_logo_mode(device, LogoMode::Breathing),
-            LogoMode::Off => command::set_logo_mode(device, LogoMode::Off),
-        }?;
-
+        self.apply_perf_fan_logo(device)?;
         command::set_battery_care(device, self.battery_care)
     }
 
@@ -294,11 +271,11 @@ struct ProgramState {
 impl ProgramState {
     fn new(device_state: DeviceState, fan_last : FanRpm, enforce: bool) -> Result<Self> {
         let (menu, event_handlers) = Self::create_menu_and_handlers(&device_state, enforce)?;
-        let fan_actual = fan_last.clone();
+        let fan_actual = fan_last;
         let ac_power = true;
-        let ac_state = device_state.clone();
-        let battery_state = device_state.clone();
-        let observed = device_state.clone();
+        let ac_state = device_state;
+        let battery_state = device_state;
+        let observed = device_state;
         Ok(Self {
             device_state,
             observed,
@@ -322,81 +299,31 @@ impl ProgramState {
 
         // perf
         let perf_modes = Submenu::new("Performance", true);
-        // Battery
-        perf_modes.append(&CheckMenuItem::with_id(
-            format!("{:?}", PerfMode::Battery),
-            "Battery",
-            dstate.perf_mode != PerfMode::Battery,
-            dstate.perf_mode == PerfMode::Battery,
-            None,
-        ))?;
-        event_handlers.insert(
-            format!("{:?}", PerfMode::Battery),
-            DeviceState {
-                perf_mode: PerfMode::Battery,
-                ..*dstate
-            },
-        );
-        // silent
-        perf_modes.append(&CheckMenuItem::with_id(
-            format!("{:?}", PerfMode::Silent),
-            "Silent",
-            dstate.perf_mode != PerfMode::Silent,
-            dstate.perf_mode == PerfMode::Silent,
-            None,
-        ))?;
-        event_handlers.insert(
-            format!("{:?}", PerfMode::Silent),
-            DeviceState {
-                perf_mode: PerfMode::Silent,
-                ..*dstate
-            },
-        );
-        // balanced
-        perf_modes.append(&CheckMenuItem::with_id(
-            format!("{:?}", PerfMode::Balanced),
-            "Balanced",
-            dstate.perf_mode != PerfMode::Balanced,
-            dstate.perf_mode == PerfMode::Balanced,
-            None,
-        ))?;
-        event_handlers.insert(
-            format!("{:?}", PerfMode::Balanced),
-            DeviceState {
-                perf_mode: PerfMode::Balanced,
-                ..*dstate
-            },
-        );
-        // performance
-        perf_modes.append(&CheckMenuItem::with_id(
-            format!("{:?}", PerfMode::Performance),
-            "Performance",
-            dstate.perf_mode != PerfMode::Performance,
-            dstate.perf_mode == PerfMode::Performance,
-            None,
-        ))?;
-        event_handlers.insert(
-            format!("{:?}", PerfMode::Performance),
-            DeviceState {
-                perf_mode: PerfMode::Performance,
-                ..*dstate
-            },
-        );
-        // Hyperboost
-        perf_modes.append(&CheckMenuItem::with_id(
-            format!("{:?}", PerfMode::Hyperboost),
-            "Hyperboost",
-            dstate.perf_mode != PerfMode::Hyperboost,
-            dstate.perf_mode == PerfMode::Hyperboost,
-            None,
-        ))?;
-        event_handlers.insert(
-            format!("{:?}", PerfMode::Hyperboost),
-            DeviceState {
-                perf_mode: PerfMode::Hyperboost,
-                ..*dstate
-            },
-        );
+        // The simple (non-Custom) modes are uniform: id == Debug name, enabled when
+        // not current, checked when current. Custom is built separately below.
+        for (mode, label) in [
+            (PerfMode::Battery, "Battery"),
+            (PerfMode::Silent, "Silent"),
+            (PerfMode::Balanced, "Balanced"),
+            (PerfMode::Performance, "Performance"),
+            (PerfMode::Hyperboost, "Hyperboost"),
+        ] {
+            let id = format!("{:?}", mode);
+            perf_modes.append(&CheckMenuItem::with_id(
+                id.clone(),
+                label,
+                dstate.perf_mode != mode,
+                dstate.perf_mode == mode,
+                None,
+            ))?;
+            event_handlers.insert(
+                id,
+                DeviceState {
+                    perf_mode: mode,
+                    ..*dstate
+                },
+            );
+        }
 
         // custom
         let cpu_boosts: Vec<CheckMenuItem> = CpuBoost::iter()
@@ -660,6 +587,22 @@ impl ProgramState {
         Ok((menu, event_handlers))
     }
 
+    /// Persist the current AC/battery profiles + enforce flag. Single source of truth
+    /// so a future ConfigState field can't be silently dropped by one of the call
+    /// sites (there used to be three inline `confy::store` literals).
+    fn persist(&self) -> Result<()> {
+        confy::store(
+            PKG_NAME,
+            None,
+            ConfigState {
+                ac_state: self.ac_state,
+                battery_state: self.battery_state,
+                enforce: self.enforce,
+            },
+        )?;
+        Ok(())
+    }
+
     fn handle_event(&self, event_id: &str) -> Result<DeviceState> {
         let next_state = self.event_handlers.get(event_id).ok_or(anyhow::anyhow!(
             "No event handler found for event_id: {}",
@@ -751,29 +694,39 @@ impl ProgramState {
     }
 
     fn icon(&self) -> tray_icon::Icon {
-        let razer_red = include_bytes!("../icons/razer-red.png");
-        let razer_blue = include_bytes!("../icons/razer-blue.png");
-        let razer_brown = include_bytes!("../icons/razer-brown.png");
-        let razer_yellow = include_bytes!("../icons/razer-yellow.png");
-        let razer_green = include_bytes!("../icons/razer-green.png");
-        let razer_violet = include_bytes!("../icons/razer-violet.png");
+        use std::sync::OnceLock;
+        // Decode the embedded PNGs once per process. icon() runs on every Mirror
+        // refresh (and every update), so re-decoding a PNG each call was wasted work.
+        // Indexed by perf mode; the decoded RGBA is cheap to clone for from_rgba.
+        static ICONS: OnceLock<[(Vec<u8>, u32, u32); 6]> = OnceLock::new();
+        let icons = ICONS.get_or_init(|| {
+            let decode = |bytes: &[u8]| {
+                let img = image::load_from_memory(bytes)
+                    .expect("embedded icon failed to decode")
+                    .into_rgba8();
+                let (w, h) = img.dimensions();
+                (img.into_raw(), w, h)
+            };
+            [
+                decode(include_bytes!("../icons/razer-blue.png")),   // 0 Battery
+                decode(include_bytes!("../icons/razer-yellow.png")), // 1 Silent
+                decode(include_bytes!("../icons/razer-green.png")),  // 2 Balanced
+                decode(include_bytes!("../icons/razer-red.png")),    // 3 Performance
+                decode(include_bytes!("../icons/razer-violet.png")), // 4 Hyperboost
+                decode(include_bytes!("../icons/razer-brown.png")),  // 5 Custom
+            ]
+        });
 
-        let image = match self.observed.perf_mode {
-            PerfMode::Battery => image::load_from_memory(razer_blue),
-            PerfMode::Silent => image::load_from_memory(razer_yellow),
-            PerfMode::Balanced => image::load_from_memory(razer_green),
-            PerfMode::Performance => image::load_from_memory(razer_red),
-            PerfMode::Hyperboost => image::load_from_memory(razer_violet),
-            PerfMode::Custom(_, _) => image::load_from_memory(razer_brown),
+        let idx = match self.observed.perf_mode {
+            PerfMode::Battery => 0,
+            PerfMode::Silent => 1,
+            PerfMode::Balanced => 2,
+            PerfMode::Performance => 3,
+            PerfMode::Hyperboost => 4,
+            PerfMode::Custom(_, _) => 5,
         };
-
-        let (icon_rgba, icon_width, icon_height) = {
-            let image = image.expect("Failed to open icon").into_rgba8();
-            let (width, height) = image.dimensions();
-            let rgba = image.into_raw();
-            (rgba, width, height)
-        };
-        tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon")
+        let (rgba, width, height) = &icons[idx];
+        tray_icon::Icon::from_rgba(rgba.clone(), *width, *height).expect("failed to build tray icon")
     }
 
     fn update(
@@ -782,19 +735,19 @@ impl ProgramState {
         new_device_state: DeviceState,
         device: &device::Device
     ) -> Result<()> {
-        self.device_state = new_device_state.clone();
+        self.device_state = new_device_state;
         self.device_state.apply(device)?;
         // A user-driven change is the new ground truth until Mirror reads again,
         // so the tooltip/icon (which render from `observed`) reflect it immediately.
-        self.observed = self.device_state.clone();
+        self.observed = self.device_state;
         (self.menu, self.event_handlers) = Self::create_menu_and_handlers(&self.device_state, self.enforce)?;
         self.fan_actual = get_fan_rpm(device)?;
         if self.ac_power {
-            self.ac_state = self.device_state.clone()
+            self.ac_state = self.device_state
         } else {
-            self.battery_state = self.device_state.clone()
+            self.battery_state = self.device_state
         }
-        confy::store(PKG_NAME, None, &ConfigState {ac_state : self.ac_state,battery_state :  self.battery_state, enforce: self.enforce})?;
+        self.persist()?;
         tray_icon.set_icon(Some(self.icon()))?;
         tray_icon.set_tooltip(Some(self.tooltip()?))?;
         tray_icon.set_menu(Some(Box::new(self.menu.clone())));
@@ -900,7 +853,7 @@ fn gpu_taskkill() -> Result<()> {
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = match procCommand::new("nvidia-smi")
-        .args(&["--query-compute-apps=name,pid", "--format=csv,noheader"])
+        .args(["--query-compute-apps=name,pid", "--format=csv,noheader"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
@@ -1049,10 +1002,10 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
     let fan_actual = get_fan_rpm(device)?;
     let mut state = ProgramState::new(config.ac_state, fan_actual, config.enforce)?;
     state.ac_power = get_power_state()?;
-    state.ac_state = config.ac_state.clone();
-    state.battery_state = config.battery_state.clone();
-    if state.ac_power == false {
-        state.device_state = state.battery_state.clone()
+    state.ac_state = config.ac_state;
+    state.battery_state = config.battery_state;
+    if !state.ac_power {
+        state.device_state = state.battery_state
     }
     state.update(tray_icon, state.device_state, device)?;
     Ok(state)
@@ -1321,15 +1274,7 @@ fn main() -> Result<()> {
                     gpu_taskkill()?;
                 } else if event.id == MenuId("toggle_enforce".to_string()) {
                     state.enforce = !state.enforce;
-                    if let Err(e) = confy::store(
-                        PKG_NAME,
-                        None,
-                        &ConfigState {
-                            ac_state: state.ac_state,
-                            battery_state: state.battery_state,
-                            enforce: state.enforce,
-                        },
-                    ) {
+                    if let Err(e) = state.persist() {
                         log::warn!("Failed to persist enforce flag: {:?}", e);
                     }
                     // Rebuild the menu so the checkmark reflects the new state.
@@ -1366,11 +1311,11 @@ fn main() -> Result<()> {
 
             state.ac_power = get_power_state()?;
             if state.ac_power && state.device_state != state.ac_state {
-                let new_device_state = state.ac_state.clone();
+                let new_device_state = state.ac_state;
                 log::info!("new_device_state 3 {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, &device)?;
-            } else if state.ac_power == false && state.device_state != state.battery_state {
-                let new_device_state = state.battery_state.clone();
+            } else if !state.ac_power && state.device_state != state.battery_state {
+                let new_device_state = state.battery_state;
                 log::info!("new_device_state 3 {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, &device)?;
             }
@@ -1459,15 +1404,7 @@ fn main() -> Result<()> {
                         } else {
                             state.battery_state.lights_mode.keyboard_brightness = observed_brightness;
                         }
-                        if let Err(e) = confy::store(
-                            PKG_NAME,
-                            None,
-                            &ConfigState {
-                                ac_state: state.ac_state,
-                                battery_state: state.battery_state,
-                                enforce: state.enforce,
-                            },
-                        ) {
+                        if let Err(e) = state.persist() {
                             log::warn!("failed to persist adopted brightness: {:?}", e);
                         }
                         if let Ok((menu, handlers)) =

@@ -301,7 +301,7 @@ fn enumerate() -> Result<()> {
 fn taskkill() -> Result<()> {
     // Run nvidia-smi to get PIDs of GPU processes
     let output = match procCommand::new("nvidia-smi")
-        .args(&["--query-compute-apps=pid", "--format=csv,noheader"])
+        .args(["--query-compute-apps=pid", "--format=csv,noheader"])
         .output()
     {
         Ok(o) => o,

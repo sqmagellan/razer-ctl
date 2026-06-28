@@ -62,7 +62,7 @@ impl Device {
         for info in candidates {
             let device = api.open_path(info.path())?;
             let probe: Vec<u8> = std::iter::once(0u8)
-                .chain(Into::<Vec<u8>>::into(&Packet::new(0x0084, &[0, 0])).into_iter())
+                .chain(Into::<Vec<u8>>::into(&Packet::new(0x0084, &[0, 0])))
                 .collect();
             if device.send_feature_report(&probe).is_ok() {
                 return Ok(Device {
@@ -89,7 +89,7 @@ impl Device {
                     [0_u8; 1] // report id
                         .iter()
                         .copied()
-                        .chain(Into::<Vec<u8>>::into(&report).into_iter())
+                        .chain(Into::<Vec<u8>>::into(&report))
                         .collect::<Vec<_>>()
                         .as_slice(),
                 )
