@@ -28,13 +28,20 @@ enum CommandStatus {
 }
 
 impl Packet {
+    /// Transaction id placed in every outgoing packet. Razer firmware uses this
+    /// field to route responses, and the reference drivers use a FIXED id per
+    /// device family (razer-laptop-control: 0x1F; OpenRazer: 0xFF) rather than a
+    /// random one. A fixed id matches the reference and tends to reduce the retries
+    /// in `Device::send`. Set to `None` to restore the original random-id behavior.
+    const TRANSACTION_ID: Option<u8> = Some(0x1f);
+
     pub fn new(command: u16, args: &[u8]) -> Packet {
         let mut args_buffer = [0x00; 80];
         args_buffer[..args.len()].copy_from_slice(args);
 
         Packet {
             status: CommandStatus::New as u8,
-            id: rand::thread_rng().gen(),
+            id: Self::TRANSACTION_ID.unwrap_or_else(|| rand::thread_rng().gen()),
             remaining_packets: 0x0000,
             protocol_type: 0x00,
             data_size: args.len() as u8,
@@ -101,3 +108,56 @@ impl TryFrom<&[u8]> for Packet {
         Ok(bincode::deserialize::<Packet>(data)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_id_constant_is_fixed_0x1f() {
+        // Reference drivers (razer-laptop-control 0x1F, OpenRazer 0xFF) use a fixed
+        // id; we standardized on 0x1F. Flip TRANSACTION_ID to None to restore random.
+        assert_eq!(Packet::TRANSACTION_ID, Some(0x1f));
+    }
+
+    #[test]
+    fn wire_layout_matches_protocol() {
+        let pkt = Packet::new(0x0d02, &[0x01, 0x02, 0x00, 0x00]);
+        let bytes: Vec<u8> = (&pkt).into();
+
+        // Fixed 90-byte report (matches the size Device::send relies on).
+        assert_eq!(bytes.len(), std::mem::size_of::<Packet>());
+        assert_eq!(bytes.len(), 90);
+
+        assert_eq!(bytes[0], 0x00, "status = New");
+        if let Some(id) = Packet::TRANSACTION_ID {
+            assert_eq!(bytes[1], id, "transaction id is wired into the packet");
+        }
+        // bytes[2..4] = remaining_packets (u16 LE) = 0
+        assert_eq!(&bytes[2..4], &[0x00, 0x00]);
+        assert_eq!(bytes[4], 0x00, "protocol_type");
+        assert_eq!(bytes[5], 4, "data_size = args.len()");
+        assert_eq!(bytes[6], 0x0d, "command_class = high byte of command");
+        assert_eq!(bytes[7], 0x02, "command_id = low byte of command");
+        assert_eq!(&bytes[8..12], &[0x01, 0x02, 0x00, 0x00], "args copied verbatim");
+        assert_eq!(bytes[88], 0x00, "crc");
+        assert_eq!(bytes[89], 0x00, "reserved");
+    }
+
+    #[test]
+    fn data_size_tracks_args_len() {
+        let pkt = Packet::new(0x0084, &[0, 0]);
+        let bytes: Vec<u8> = (&pkt).into();
+        assert_eq!(bytes[5], 2);
+    }
+
+    #[test]
+    fn roundtrips_through_bytes() {
+        let pkt = Packet::new(0x0d82, &[0, 1, 0, 0]);
+        let bytes: Vec<u8> = (&pkt).into();
+        let back: Packet = bytes.as_slice().try_into().unwrap();
+        let rebytes: Vec<u8> = (&back).into();
+        assert_eq!(bytes, rebytes);
+    }
+}
+

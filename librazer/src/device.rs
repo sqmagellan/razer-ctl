@@ -43,13 +43,28 @@ impl Device {
     pub fn new(descriptor: Descriptor) -> Result<Device> {
         let api = hidapi::HidApi::new().context("Failed to create hid api")?;
 
-        // there are multiple devices with the same pid, pick first that support feature report
-        for info in api.device_list().filter(|info| {
-            (info.vendor_id(), info.product_id()) == (Device::RAZER_VID, descriptor.pid)
-        }) {
-            let path = info.path();
-            let device = api.open_path(path)?;
-            if device.send_feature_report(&[0, 0]).is_ok() {
+        // Identify the Razer control interface. razer-laptop-control/OpenRazer
+        // pick it deterministically (interface 0 / vendor-defined usage page
+        // 0xFF00) rather than guessing, so we try those first. We still *confirm*
+        // each candidate by probing with a full-sized GET report (0x0084, read
+        // device mode -- side-effect free; the keyboard interface rejects 91-byte
+        // reports on Windows), and we fall back to the remaining interfaces. So if
+        // Windows reports interface_number as -1 / usage_page as 0 (which it can),
+        // the sort is a no-op and behavior is exactly as before.
+        let mut candidates: Vec<_> = api
+            .device_list()
+            .filter(|info| {
+                (info.vendor_id(), info.product_id()) == (Device::RAZER_VID, descriptor.pid)
+            })
+            .collect();
+        candidates.sort_by_key(|info| (info.interface_number() != 0, info.usage_page() != 0xff00));
+
+        for info in candidates {
+            let device = api.open_path(info.path())?;
+            let probe: Vec<u8> = std::iter::once(0u8)
+                .chain(Into::<Vec<u8>>::into(&Packet::new(0x0084, &[0, 0])).into_iter())
+                .collect();
+            if device.send_feature_report(&probe).is_ok() {
                 return Ok(Device {
                     device,
                     info: descriptor.clone(),
@@ -127,10 +142,7 @@ impl Device {
     pub fn detect() -> Result<Device> {
         let (pid_list, model_number_prefix) = Device::enumerate()?;
 
-        match SUPPORTED
-            .iter()
-            .find(|supported| model_number_prefix == supported.model_number_prefix)
-        {
+        match crate::matching::find_descriptor(&model_number_prefix, SUPPORTED) {
             Some(supported) => Device::new(supported.clone()),
             None => anyhow::bail!(
                 "Model {} with PIDs {:0>4x?} is not supported",

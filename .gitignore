@@ -1,4 +1,5 @@
 /target
+.DS_Store
 data/Blade 16 pid and model no.txt
 data/annotations1.csv
 data/wireshark_dump_raw1.csv
@@ -28,6 +29,7 @@ COMPARISON_WITH*.md
 SYSTEM_CONFIGURATION*.md
 RAZER_TRAY*.md
 FINAL_STATUS.md
+.local-notes/
 
 # Helper scripts (local development)
 *.env
