@@ -319,6 +319,7 @@ fn about() -> tray_icon::menu::AboutMetadata {
             env!("CARGO_PKG_HOMEPAGE"),
             crate::get_logging_file_path().display()
         )),
+        website_label: Some("Original website".into()),
         comments: Some(env!("CARGO_PKG_DESCRIPTION").into()),
         ..Default::default()
     }

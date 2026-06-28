@@ -1,11 +1,11 @@
 [package]
 name = "razer-tray"
-version = "0.8.6"
+version = "0.9.0"
 edition = "2021"
 
-authors = ["blauzim <original author Tarek Dakhran>"]
+authors = ["sqmagellan, forked from blauzim and Tarek Dakhran"]
 homepage = "https://github.com/blauzim/razer-ctl"
-description = "A tray icon for controlling Razer Blade"
+description = "A tray icon for controlling Razer Blade features without Synapse. Current version developed with help from McClaude (Claude Opus 4.8)."
 
 [dependencies]
 anyhow = "1.0.80"
