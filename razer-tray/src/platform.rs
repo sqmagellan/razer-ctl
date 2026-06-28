@@ -302,20 +302,48 @@ unsafe extern "system" fn power_wnd_proc(
     use windows::Win32::System::Power::POWERBROADCAST_SETTING;
     use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST,
+        DefWindowProcW, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST,
     };
 
-    if msg == WM_POWERBROADCAST && wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
-        // SAFETY: for a PBT_POWERSETTINGCHANGE message Windows guarantees lparam points
-        // to a POWERBROADCAST_SETTING valid for the duration of this call; we only read it.
-        let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
-        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
-            // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
-            let on = setting.Data[0] != 0;
-            DISPLAY_ON.store(on, Ordering::Relaxed);
-            log::info!("console display state: {}", if on { "on" } else { "off" });
+    if msg == WM_POWERBROADCAST {
+        match wparam.0 as u32 {
+            PBT_POWERSETTINGCHANGE => {
+                // SAFETY: for a PBT_POWERSETTINGCHANGE message Windows guarantees lparam points
+                // to a POWERBROADCAST_SETTING valid for the duration of this call; we only read it.
+                let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
+                if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
+                    // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
+                    let on = setting.Data[0] != 0;
+                    DISPLAY_ON.store(on, Ordering::Relaxed);
+                    log::info!("console display state: {}", if on { "on" } else { "off" });
+                }
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+            PBT_APMSUSPEND => {
+                // The system is about to sleep. This notification arrives *before* the
+                // main event loop freezes, so it's our only chance to drop the firmware
+                // always-on flag -- otherwise the keyboard stays lit through sleep (the
+                // display-state gate in the main loop can't run while suspended). On
+                // resume the display-on notification restores the flag via that same
+                // gate. We open a fresh, short-lived device handle here because this
+                // runs on the notification thread, not the loop that owns the main
+                // handle; HID feature reports are stateless, so a second handle is safe.
+                log::info!("suspend: dropping keyboard always-on flag for sleep");
+                match librazer::device::Device::detect() {
+                    Ok(dev) => {
+                        if let Err(e) = librazer::command::set_lights_always_on(
+                            &dev,
+                            librazer::types::LightsAlwaysOn::Disable,
+                        ) {
+                            log::warn!("suspend: set_lights_always_on(Disable) failed: {e:?}");
+                        }
+                    }
+                    Err(e) => log::warn!("suspend: device detect failed: {e:?}"),
+                }
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+            _ => {}
         }
-        return windows::Win32::Foundation::LRESULT(1);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -382,6 +410,16 @@ pub fn spawn_display_state_monitor() {
         ) {
             log::warn!("display monitor: RegisterPowerSettingNotification failed: {e:?}");
             return;
+        }
+
+        // Also receive suspend/resume so we can drop the always-on backlight flag
+        // before the system sleeps (handled in power_wnd_proc). A message-only window
+        // does not receive the broadcast PBT_APMSUSPEND unless we register for it.
+        if let Err(e) = windows::Win32::System::Power::RegisterSuspendResumeNotification(
+            windows::Win32::Foundation::HANDLE(hwnd.0),
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        ) {
+            log::warn!("display monitor: RegisterSuspendResumeNotification failed: {e:?}");
         }
         log::info!("display-state monitor running");
 
