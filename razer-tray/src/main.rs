@@ -1,968 +1,32 @@
 #![windows_subsystem = "windows"]
 
-use serde::{Deserialize, Serialize};
-use strum::IntoEnumIterator;
-use anyhow::Error;
+mod menu;
+mod platform;
+mod program;
+mod state;
 
-use librazer::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode};
+use anyhow::Result;
+
+use librazer::types::LightsAlwaysOn;
 use librazer::{command, device};
 
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
-    menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, MenuItem, Submenu, MenuId},
-    TrayIconBuilder, TrayIconEvent, 
+    menu::{MenuEvent, MenuId},
+    TrayIconBuilder, TrayIconEvent,
 };
-
-use std::process::Command as procCommand;
-use sysinfo::{ProcessExt, Signal, System, SystemExt};
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use single_instance::SingleInstance;
 
 #[cfg(target_os = "windows")]
-static KEY_PRESSED: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::Ordering;
 
-// Tracks whether the console display is powered on. Updated by the power-setting
-// notification handler; read by the event loop to gate the firmware always-on
-// flag. Starts true (fail-open: keyboard stays lit if we never hear otherwise).
-#[cfg(target_os = "windows")]
-static DISPLAY_ON: AtomicBool = AtomicBool::new(true);
+use program::ProgramState;
+use state::{get_fan_rpm, ConfigState, DeviceState};
 
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HANDLE;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
-    IDLE_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-};
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-const PKG_NAME: &str = env!("CARGO_PKG_NAME");
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-enum FanSpeed {
-    Auto,
-    Manual(u16),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-enum PerfMode {
-    Battery,
-    Silent,
-    Balanced,
-    Performance,
-    Hyperboost,
-    Custom(CpuBoost, GpuBoost),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct LightsMode {
-    logo_mode: LogoMode,
-    keyboard_brightness: u8,
-    always_on: LightsAlwaysOn,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct FanRpm {
-    fan1: u16,
-    fan2: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct DeviceState {
-    perf_mode: PerfMode,
-    lights_mode: LightsMode,
-    battery_care: BatteryCare,
-    fan_speed : FanSpeed,
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-/// Map a 0..=100 percentage to the device's 0..255 keyboard-brightness scale,
-/// rounded. Used by the brightness submenu so its 10% steps span the full
-/// hardware range (0->0, 10->26, 50->128, 100->255).
-fn percent_to_brightness(percent: u8) -> u8 {
-    ((percent as u16 * 255 + 50) / 100) as u8
-}
-
-impl DeviceState {
-    /// Read the device's *actual* current state. Used by the Mirror refresh to keep
-    /// the tray display honest. This is read-only: callers must treat the result as
-    /// something to *display*, never to re-apply (re-applying would fight external
-    /// changes such as Fn-key brightness and could overwrite saved AC/battery
-    /// profiles). Returns Err on any transient HID failure; callers should swallow
-    /// that and keep the last known-good values rather than propagating it.
-    fn read(device: &device::Device) -> Result<Self> {
-        let perf_mode = match command::get_perf_mode(device)? {
-            (librazer::types::PerfMode::Battery, _) => PerfMode::Battery,
-            (librazer::types::PerfMode::Silent, _) => PerfMode::Silent,
-            (librazer::types::PerfMode::Balanced, _) => PerfMode::Balanced,
-            (librazer::types::PerfMode::Performance, _) => PerfMode::Performance,
-            (librazer::types::PerfMode::Hyperboost, _) => PerfMode::Hyperboost,
-            (librazer::types::PerfMode::Custom, _) => {
-                let cpu_boost = command::get_cpu_boost(device)?;
-                let gpu_boost = command::get_gpu_boost(device)?;
-                PerfMode::Custom(cpu_boost, gpu_boost)
-            }
-        };
-
-        let fan_speed = match command::get_perf_mode(device)? {
-            (_, FanMode::Auto) => FanSpeed::Auto,
-            (_, FanMode::Manual) => {
-                let rpm = command::get_fan_rpm(device, librazer::types::FanZone::Zone1)?;
-                FanSpeed::Manual(rpm)
-            }
-        };
-        let lights_mode = LightsMode {
-            logo_mode: command::get_logo_mode(device)?,
-            keyboard_brightness: command::get_keyboard_brightness(device)?,
-            always_on: command::get_lights_always_on(device)?,
-        };
-
-        let battery_care = command::get_battery_care(device)?;
-
-        Ok(Self {
-            perf_mode,
-            lights_mode,
-            battery_care,
-            fan_speed,
-        })
-    }
-
-    /// Perf mode + fan + logo -- the settings shared by `apply()` (full write) and
-    /// `enforce_to()` (the Synapse tug-of-war reassert). Kept in one place so the two
-    /// can't drift. Fan failures are logged but non-fatal (manual RPM can be rejected
-    /// depending on mode); a logo/perf failure propagates.
-    fn apply_perf_fan_logo(&self, device: &device::Device) -> Result<()> {
-        match self.perf_mode {
-            PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
-            PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
-            PerfMode::Balanced => command::set_perf_mode(device, librazer::types::PerfMode::Balanced),
-            PerfMode::Performance => command::set_perf_mode(device, librazer::types::PerfMode::Performance),
-            PerfMode::Hyperboost => command::set_perf_mode(device, librazer::types::PerfMode::Hyperboost),
-            PerfMode::Custom(cpu_boost, gpu_boost) => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Custom)?;
-                command::set_cpu_boost(device, cpu_boost)?;
-                command::set_gpu_boost(device, gpu_boost)
-            }
-        }?;
-
-        if let Err(e) = match self.fan_speed {
-            FanSpeed::Auto => command::set_fan_mode(device, librazer::types::FanMode::Auto),
-            FanSpeed::Manual(rpm) => command::set_fan_mode(device, librazer::types::FanMode::Manual)
-                .and_then(|_| command::set_fan_rpm(device, rpm, false)),
-        } {
-            log::warn!("fan command failed: {:?}", e);
-        }
-
-        command::set_logo_mode(device, self.lights_mode.logo_mode)
-    }
-
-    fn apply(&self, device: &device::Device) -> Result<()> {
-        self.apply_perf_fan_logo(device)?;
-        command::set_lights_always_on(device, self.lights_mode.always_on)?;
-        command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness)?;
-        command::set_battery_care(device, self.battery_care)
-    }
-
-    /// Re-assert the "enforced" subset of settings -- perf mode, fan, logo, and
-    /// battery care -- WITHOUT touching keyboard brightness or lights-always-on.
-    /// This is what the opt-in Enforce mode uses to win a tug-of-war with Synapse.
-    /// Brightness is excluded so it stays on the adopt path (Fn keys keep working);
-    /// always-on is excluded because it's owned by the display-state gate (it gets
-    /// dropped while the display is off). It's exactly apply() minus those two writes.
-    fn enforce_to(&self, device: &device::Device) -> Result<()> {
-        self.apply_perf_fan_logo(device)?;
-        command::set_battery_care(device, self.battery_care)
-    }
-
-    fn perf_delta(
-        &self,
-        cpu_boost: Option<CpuBoost>,
-        gpu_boost: Option<GpuBoost>,
-    ) -> Self {
-        DeviceState {
-            perf_mode: if let PerfMode::Custom(cb, gb) = self.perf_mode {
-                PerfMode::Custom(
-                    cpu_boost.unwrap_or(cb),
-                    gpu_boost.unwrap_or(gb)
-                )
-            } else {
-                PerfMode::Custom(
-                    cpu_boost.unwrap_or(CpuBoost::Boost),
-                    gpu_boost.unwrap_or(GpuBoost::High)
-                )
-            },
-            ..*self
-        }
-    }
-}
-
-impl Default for DeviceState {
-    fn default() -> Self {
-        Self {
-            perf_mode: PerfMode::Performance,
-            lights_mode: LightsMode {
-                logo_mode: LogoMode::Off,
-                keyboard_brightness: 0,
-                always_on: LightsAlwaysOn::Disable,
-            },
-            battery_care: BatteryCare::Percent80,
-            fan_speed : FanSpeed::Auto,
-        }
-    }
-}
-
-trait DeviceStateDelta<T> {
-    fn delta(&self, property: T) -> Self;
-}
-
-impl DeviceStateDelta<CpuBoost> for DeviceState {
-    fn delta(&self, cpu_boost: CpuBoost) -> Self {
-        self.perf_delta(Some(cpu_boost), None)
-    }
-}
-
-impl DeviceStateDelta<GpuBoost> for DeviceState {
-    fn delta(&self, gpu_boost: GpuBoost) -> Self {
-        self.perf_delta(None, Some(gpu_boost))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct ConfigState {
-    ac_state: DeviceState,
-    battery_state: DeviceState,
-    // Opt-in "win against Synapse" mode. #[serde(default)] keeps older config
-    // files (written before this field existed) loadable -> defaults to false.
-    #[serde(default)]
-    enforce: bool,
-}
-
-impl Default for ConfigState {
-    fn default() -> Self {
-        Self {
-            ac_state: DeviceState {..Default::default()},
-            battery_state : DeviceState {
-                    perf_mode : PerfMode::Battery,
-                    ..Default::default()
-                },
-            enforce: false,
-        }
-    }
-}
-
-
-struct ProgramState {
-    device_state: DeviceState,
-    observed: DeviceState,
-    ac_state: DeviceState,
-    battery_state: DeviceState,
-    event_handlers: std::collections::HashMap<String, DeviceState>,
-    menu: Menu,
-    fan_actual : FanRpm,
-    ac_power : bool,
-    enforce: bool,
-}
-
-impl ProgramState {
-    fn new(device_state: DeviceState, fan_last : FanRpm, enforce: bool) -> Result<Self> {
-        let (menu, event_handlers) = Self::create_menu_and_handlers(&device_state, enforce)?;
-        let fan_actual = fan_last;
-        let ac_power = true;
-        let ac_state = device_state;
-        let battery_state = device_state;
-        let observed = device_state;
-        Ok(Self {
-            device_state,
-            observed,
-            ac_state,
-            battery_state,
-            event_handlers,
-            menu,
-            fan_actual,
-            ac_power,
-            enforce,
-        })
-    }
-
-    fn create_menu_and_handlers(
-        dstate: &DeviceState,
-        enforce: bool,
-    ) -> Result<(Menu, std::collections::HashMap<String, DeviceState>)> {
-        let mut event_handlers = std::collections::HashMap::new();
-        let menu = Menu::new();
-        // header
-
-        // perf
-        let perf_modes = Submenu::new("Performance", true);
-        // The simple (non-Custom) modes are uniform: id == Debug name, enabled when
-        // not current, checked when current. Custom is built separately below.
-        for (mode, label) in [
-            (PerfMode::Battery, "Battery"),
-            (PerfMode::Silent, "Silent"),
-            (PerfMode::Balanced, "Balanced"),
-            (PerfMode::Performance, "Performance"),
-            (PerfMode::Hyperboost, "Hyperboost"),
-        ] {
-            let id = format!("{:?}", mode);
-            perf_modes.append(&CheckMenuItem::with_id(
-                id.clone(),
-                label,
-                dstate.perf_mode != mode,
-                dstate.perf_mode == mode,
-                None,
-            ))?;
-            event_handlers.insert(
-                id,
-                DeviceState {
-                    perf_mode: mode,
-                    ..*dstate
-                },
-            );
-        }
-
-        // custom
-        let cpu_boosts: Vec<CheckMenuItem> = CpuBoost::iter()
-            .map(|boost| {
-                let event_id = format!("cpu_boost:{:?}", boost);
-                event_handlers.insert(event_id.clone(), dstate.delta(boost));
-                let checked = matches!(dstate.perf_mode, PerfMode::Custom(b, _) if b == boost);
-                CheckMenuItem::with_id(event_id, format!("{:?}", boost), !checked, checked, None)
-            })
-            .collect();
-
-        let gpu_boosts: Vec<CheckMenuItem> = GpuBoost::iter()
-            .map(|boost| {
-                let event_id = format!("gpu_boost:{:?}", boost);
-                event_handlers.insert(event_id.clone(), dstate.delta(boost));
-                let checked = matches!(dstate.perf_mode, PerfMode::Custom(_, b) if b == boost);
-                CheckMenuItem::with_id(event_id, format!("{:?}", boost), !checked, checked, None)
-            })
-            .collect();
-
-        let separator = PredefinedMenuItem::separator();
-
-        perf_modes.append(&Submenu::with_items(
-            "Custom",
-            true,
-            &cpu_boosts
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .chain([&separator as &dyn IsMenuItem])
-                .chain(gpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
-                .collect::<Vec<_>>(),
-        )?)?;
-
-        menu.append(&perf_modes)?;
-
-        // Fan Speed
-        menu.append(&PredefinedMenuItem::separator())?;
-        let fan_speeds: Vec<CheckMenuItem> = [CheckMenuItem::with_id(
-            "fan_speeds:auto",
-            "Fan: Auto",
-            dstate.fan_speed != FanSpeed::Auto,
-            dstate.fan_speed == FanSpeed::Auto,
-            None,
-        )]
-        .into_iter()
-        .chain((0..=5500).step_by(500).map(|rpm| {
-            let event_id = format!("fan_speeds:{}", rpm);
-            event_handlers.insert(
-                event_id.clone(),
-                DeviceState {
-                    fan_speed: FanSpeed::Manual(rpm),
-                    ..*dstate
-                },
-            );
-            CheckMenuItem::with_id(
-                event_id,
-                format!("Fan: {} RPM", rpm),
-                dstate.fan_speed != FanSpeed::Manual(rpm),
-                dstate.fan_speed == FanSpeed::Manual(rpm),
-                None,
-            )
-        }))
-        .collect();
-        event_handlers.insert(
-            "fan_speeds:auto".to_string(),
-            DeviceState {
-                fan_speed: FanSpeed::Auto,
-                ..*dstate
-            },
-        );
-
-        menu.append(&Submenu::with_items(
-            "Fan Speed",
-            true,
-            &fan_speeds
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .collect::<Vec<_>>(),
-        )?)?;
-
-        // logo
-        menu.append(&PredefinedMenuItem::separator())?;
-        let modes = LogoMode::iter()
-            .map(|mode| {
-                let event_id = format!("logo_mode:{:?}", mode);
-                event_handlers.insert(
-                    event_id.clone(),
-                    DeviceState {
-                        lights_mode: LightsMode {
-                            logo_mode: mode,
-                            ..dstate.lights_mode
-                        },
-                        ..*dstate
-                    },
-                );
-                CheckMenuItem::with_id(
-                    event_id,
-                    format!("{:?}", mode),
-                    dstate.lights_mode.logo_mode != mode,
-                    dstate.lights_mode.logo_mode == mode,
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        menu.append(&Submenu::with_items(
-            "Logo",
-            true,
-            &modes
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .collect::<Vec<_>>(),
-        )?)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-
-        // keyboard always on
-        menu.append(&CheckMenuItem::with_id(
-            "lights_always_on",
-            "Keyboard Always On",
-            true,
-            dstate.lights_mode.always_on == LightsAlwaysOn::Enable,
-            None,
-        ))?;
-        event_handlers.insert(
-            "lights_always_on".to_string(),
-            DeviceState {
-                lights_mode: LightsMode {
-                    always_on: match dstate.lights_mode.always_on {
-                        LightsAlwaysOn::Enable => LightsAlwaysOn::Disable,
-                        LightsAlwaysOn::Disable => LightsAlwaysOn::Enable,
-                    },
-                    ..dstate.lights_mode
-                },
-                ..*dstate
-            },
-        );
-
-        // Brightness submenu: 0..100% in 10% steps, mapped onto the device's full
-        // 0..255 range. The hardware Fn keys use a 16-step ladder that doesn't line
-        // up with the 10% marks, so an external (Fn-key) value usually lands between
-        // our steps -- we highlight the *nearest* percent step so there's always
-        // exactly one check. The exact 0..255 value still shows in the tooltip.
-        let current_brightness = dstate.lights_mode.keyboard_brightness;
-        let nearest_percent: u8 = (0u8..=100)
-            .step_by(10)
-            .min_by_key(|p| (percent_to_brightness(*p) as i32 - current_brightness as i32).abs())
-            .unwrap_or(0);
-
-        let brightness_modes: Vec<CheckMenuItem> = (0u8..=100)
-            .step_by(10)
-            .map(|percent| {
-                let event_id = format!("brightness:{}", percent);
-                event_handlers.insert(
-                    event_id.clone(),
-                    DeviceState {
-                        lights_mode: LightsMode {
-                            keyboard_brightness: percent_to_brightness(percent),
-                            ..dstate.lights_mode
-                        },
-                        ..*dstate
-                    },
-                );
-                CheckMenuItem::with_id(
-                    event_id,
-                    format!("{}%", percent),
-                    percent != nearest_percent,
-                    percent == nearest_percent,
-                    None,
-                )
-            })
-            .collect();
-
-        menu.append(&Submenu::with_items(
-            "Keyboard Brightness",
-            true,
-            &brightness_modes
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .collect::<Vec<_>>(),
-        )?)?;
-
-        // battery care submenu
-        menu.append(&PredefinedMenuItem::separator())?;
-        
-        let battery_care_options = [
-            (BatteryCare::Percent50, "50%", "battery_care_50"),
-            (BatteryCare::Percent55, "55%", "battery_care_55"),
-            (BatteryCare::Percent60, "60%", "battery_care_60"),
-            (BatteryCare::Percent65, "65%", "battery_care_65"),
-            (BatteryCare::Percent70, "70%", "battery_care_70"),
-            (BatteryCare::Percent75, "75%", "battery_care_75"),
-            (BatteryCare::Percent80, "80%", "battery_care_80"),
-            (BatteryCare::Disable, "Disabled (100%)", "battery_care_disable"),
-        ];
-        
-        let battery_care_items: Vec<CheckMenuItem> = battery_care_options
-            .iter()
-            .map(|(mode, label, id)| {
-                event_handlers.insert(
-                    id.to_string(),
-                    DeviceState {
-                        battery_care: *mode,
-                        ..*dstate
-                    },
-                );
-                CheckMenuItem::with_id(
-                    id,
-                    label,
-                    true,
-                    dstate.battery_care == *mode,
-                    None,
-                )
-            })
-            .collect();
-        
-        menu.append(&Submenu::with_items(
-            "Battery Care",
-            true,
-            &battery_care_items
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .collect::<Vec<_>>(),
-        )?)?;
-
-        // Enforce settings (opt-in "win against Synapse"). Windows-only, since
-        // Synapse is a Windows product. Off by default.
-        #[cfg(target_os = "windows")]
-        {
-            menu.append(&PredefinedMenuItem::separator())?;
-            menu.append(&CheckMenuItem::with_id(
-                "toggle_enforce",
-                "Enforce Settings (override Synapse)",
-                true,
-                enforce,
-                None,
-            ))?;
-        }
-
-        // Start with Windows (launch at login). Windows-only.
-        #[cfg(target_os = "windows")]
-        {
-            menu.append(&PredefinedMenuItem::separator())?;
-            menu.append(&CheckMenuItem::with_id(
-                "toggle_autostart",
-                "Start with Windows",
-                true,
-                autostart_enabled(),
-                None,
-            ))?;
-        }
-
-        // gpu task killer
-        menu.append(&PredefinedMenuItem::separator())?;
-        let terminate_item = MenuItem::with_id("dgpu_terminate_proc","Terminate dGPU Processes", true, None);
-        menu.append(&terminate_item)?;
-        // footer
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&PredefinedMenuItem::about(None, Some(Self::about())))?;
-        menu.append(&PredefinedMenuItem::quit(None))?;
-
-        Ok((menu, event_handlers))
-    }
-
-    /// Persist the current AC/battery profiles + enforce flag. Single source of truth
-    /// so a future ConfigState field can't be silently dropped by one of the call
-    /// sites (there used to be three inline `confy::store` literals).
-    fn persist(&self) -> Result<()> {
-        confy::store(
-            PKG_NAME,
-            None,
-            ConfigState {
-                ac_state: self.ac_state,
-                battery_state: self.battery_state,
-                enforce: self.enforce,
-            },
-        )?;
-        Ok(())
-    }
-
-    fn handle_event(&self, event_id: &str) -> Result<DeviceState> {
-        let next_state = self.event_handlers.get(event_id).ok_or(anyhow::anyhow!(
-            "No event handler found for event_id: {}",
-            event_id
-        ))?;
-        Ok(*next_state)
-    }
-
-    fn about() -> tray_icon::menu::AboutMetadata {
-        tray_icon::menu::AboutMetadata {
-            name: Some(PKG_NAME.into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            authors: Some(
-                env!("CARGO_PKG_AUTHORS")
-                    .split(';')
-                    .map(|a| a.trim().to_string())
-                    .collect::<Vec<_>>(),
-            ),
-            website: Some(format!(
-                "{}\nLog: {}",
-                env!("CARGO_PKG_HOMEPAGE"),
-                get_logging_file_path().display()
-            )),
-            comments: Some(env!("CARGO_PKG_DESCRIPTION").into()),
-            ..Default::default()
-        }
-    }
-
-    fn get_next_perf_mode(&self) -> DeviceState {
-        DeviceState {
-            perf_mode: match self.device_state.perf_mode {
-                PerfMode::Battery => PerfMode::Silent,
-                PerfMode::Silent => PerfMode::Balanced,
-                PerfMode::Balanced => PerfMode::Performance,
-                PerfMode::Performance => PerfMode::Hyperboost,
-                PerfMode::Hyperboost => {
-                    PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
-                }
-                PerfMode::Custom(..) => PerfMode::Battery,
-            },
-            ..self.device_state
-        }
-    }
-
-    fn tooltip(&self) -> Result<String> {
-        use std::fmt::Write;
-
-        // Render from `observed` (the device's last-read real state) so the tray
-        // reflects reality, including changes made outside the tray (e.g. Fn keys).
-        let s = &self.observed;
-
-        // Keep this compact: the Windows tray tooltip (Shell_NotifyIcon szTip) is
-        // capped at 128 UTF-16 units and silently truncates past that. We build a
-        // terse, few-line string and hard-cap it below as a final guard.
-        let mut info = String::new();
-
-        match s.perf_mode {
-            PerfMode::Battery => write!(&mut info, "Battery")?,
-            PerfMode::Silent => write!(&mut info, "Silent")?,
-            PerfMode::Balanced => write!(&mut info, "Balanced")?,
-            PerfMode::Performance => write!(&mut info, "Performance")?,
-            PerfMode::Hyperboost => write!(&mut info, "Hyperboost")?,
-            PerfMode::Custom(cpu_boost, gpu_boost) => {
-                write!(&mut info, "Custom (CPU {cpu_boost:?}, GPU {gpu_boost:?})")?
-            }
-        }
-
-        match s.fan_speed {
-            FanSpeed::Auto => write!(&mut info, "\nFan: Auto")?,
-            FanSpeed::Manual(rpm) => write!(&mut info, "\nFan: {rpm} set")?,
-        }
-        write!(&mut info, " · {}/{} RPM", self.fan_actual.fan1, self.fan_actual.fan2)?;
-
-        write!(&mut info, "\nLogo {:?}", s.lights_mode.logo_mode)?;
-        if s.lights_mode.keyboard_brightness > 0 {
-            write!(&mut info, " · 🔆 {}", s.lights_mode.keyboard_brightness)?;
-        }
-        if s.lights_mode.always_on == LightsAlwaysOn::Enable {
-            write!(&mut info, " · 💡")?;
-        }
-
-        if s.battery_care != BatteryCare::Disable {
-            write!(&mut info, "\n🔋 {}%", s.battery_care.to_percent())?;
-        }
-
-        // Hard cap well under the 128-UTF-16-unit limit (emoji are 2 units each;
-        // counting scalar chars with margin keeps us safe without counting UTF-16).
-        Ok(info.chars().take(110).collect())
-    }
-
-    fn icon(&self) -> tray_icon::Icon {
-        use std::sync::OnceLock;
-        // Decode the embedded PNGs once per process. icon() runs on every Mirror
-        // refresh (and every update), so re-decoding a PNG each call was wasted work.
-        // Indexed by perf mode; the decoded RGBA is cheap to clone for from_rgba.
-        static ICONS: OnceLock<[(Vec<u8>, u32, u32); 6]> = OnceLock::new();
-        let icons = ICONS.get_or_init(|| {
-            let decode = |bytes: &[u8]| {
-                let img = image::load_from_memory(bytes)
-                    .expect("embedded icon failed to decode")
-                    .into_rgba8();
-                let (w, h) = img.dimensions();
-                (img.into_raw(), w, h)
-            };
-            [
-                decode(include_bytes!("../icons/razer-blue.png")),   // 0 Battery
-                decode(include_bytes!("../icons/razer-yellow.png")), // 1 Silent
-                decode(include_bytes!("../icons/razer-green.png")),  // 2 Balanced
-                decode(include_bytes!("../icons/razer-red.png")),    // 3 Performance
-                decode(include_bytes!("../icons/razer-violet.png")), // 4 Hyperboost
-                decode(include_bytes!("../icons/razer-brown.png")),  // 5 Custom
-            ]
-        });
-
-        let idx = match self.observed.perf_mode {
-            PerfMode::Battery => 0,
-            PerfMode::Silent => 1,
-            PerfMode::Balanced => 2,
-            PerfMode::Performance => 3,
-            PerfMode::Hyperboost => 4,
-            PerfMode::Custom(_, _) => 5,
-        };
-        let (rgba, width, height) = &icons[idx];
-        tray_icon::Icon::from_rgba(rgba.clone(), *width, *height).expect("failed to build tray icon")
-    }
-
-    fn update(
-        &mut self,
-        tray_icon: &mut tray_icon::TrayIcon,
-        new_device_state: DeviceState,
-        device: &device::Device
-    ) -> Result<()> {
-        self.device_state = new_device_state;
-        self.device_state.apply(device)?;
-        // A user-driven change is the new ground truth until Mirror reads again,
-        // so the tooltip/icon (which render from `observed`) reflect it immediately.
-        self.observed = self.device_state;
-        (self.menu, self.event_handlers) = Self::create_menu_and_handlers(&self.device_state, self.enforce)?;
-        self.fan_actual = get_fan_rpm(device)?;
-        if self.ac_power {
-            self.ac_state = self.device_state
-        } else {
-            self.battery_state = self.device_state
-        }
-        self.persist()?;
-        tray_icon.set_icon(Some(self.icon()))?;
-        tray_icon.set_tooltip(Some(self.tooltip()?))?;
-        tray_icon.set_menu(Some(Box::new(self.menu.clone())));
-
-        log::info!("state updated to {:?}", new_device_state);
-        Ok(())
-    }
-
-}
-
-
-
-#[cfg(target_os = "windows")]
-fn get_power_state() -> Result<bool> {
-    let mut ac_power : bool = true;
-    unsafe {
-        let mut status = SYSTEM_POWER_STATUS::default();
-        match GetSystemPowerStatus(&mut status) {
-            Ok(()) => {
-                match status.ACLineStatus {
-                    0 => ac_power = false,
-                    _ => ac_power = true
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to get power status: {:?}", e);
-            }
-        }
-    }
-    Ok(ac_power)
-}
-
-#[cfg(target_os = "linux")]
-fn get_power_state() -> Result<bool> {
-    // Try AC adapter first
-    if let Ok(online) = std::fs::read_to_string("/sys/class/power_supply/AC/online")
-        .or_else(|_| std::fs::read_to_string("/sys/class/power_supply/AC0/online"))
-        .or_else(|_| std::fs::read_to_string("/sys/class/power_supply/ACAD/online"))
-    {
-        return Ok(online.trim() == "1");
-    }
-    
-    // Fallback: check battery status
-    if let Ok(status) = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")
-        .or_else(|_| std::fs::read_to_string("/sys/class/power_supply/BAT1/status"))
-    {
-        let status = status.trim();
-        return Ok(status == "Charging" || status == "Full" || status == "Not charging");
-    }
-    
-    // Default to AC power if we can't detect
-    log::warn!("Could not detect power state, assuming AC power");
-    Ok(true)
-}
-
-fn get_fan_rpm(device: &device::Device) -> Result<FanRpm> {
-    let fan_actual = FanRpm {
-        fan1 : command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone1)?,
-        fan2 : command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone2)?,
-    };
-    //log::info!("fans updated to {:?}", fan_actual);
-    Ok(fan_actual)
-}
-
-#[cfg(target_os = "windows")]
-const AUTOSTART_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-#[cfg(target_os = "windows")]
-const AUTOSTART_VALUE_NAME: &str = "razer-tray";
-
-/// Whether razer-tray is registered to launch at login (HKCU Run key).
-#[cfg(target_os = "windows")]
-fn autostart_enabled() -> bool {
-    use winreg::enums::HKEY_CURRENT_USER;
-    use winreg::RegKey;
-    RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey(AUTOSTART_RUN_KEY)
-        .and_then(|run| run.get_value::<String, _>(AUTOSTART_VALUE_NAME))
-        .is_ok()
-}
-
-/// Register/unregister razer-tray for launch at login via the per-user Run key.
-#[cfg(target_os = "windows")]
-fn set_autostart(enable: bool) -> Result<()> {
-    use winreg::enums::HKEY_CURRENT_USER;
-    use winreg::RegKey;
-    let (run, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(AUTOSTART_RUN_KEY)?;
-    if enable {
-        let exe = std::env::current_exe()?;
-        // Quote the path so a space in it doesn't break the command.
-        run.set_value(AUTOSTART_VALUE_NAME, &format!("\"{}\"", exe.display()))?;
-        log::info!("Autostart enabled: {}", exe.display());
-    } else {
-        let _ = run.delete_value(AUTOSTART_VALUE_NAME); // ignore "not present"
-        log::info!("Autostart disabled");
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn gpu_taskkill() -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    let whitelist: &[&str] = &["explorer.exe", "Insufficient Permissions"];
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let output = match procCommand::new("nvidia-smi")
-        .args(["--query-compute-apps=name,pid", "--format=csv,noheader"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            // No NVIDIA tools on PATH (or it failed to launch). Nothing to terminate;
-            // don't panic -- this runs from the tray event loop and a panic here would
-            // crash/recover-churn the app the moment the user clicks the menu item.
-            log::info!("nvidia-smi not available ({e}); skipping dGPU terminate");
-            return Ok(());
-        }
-    };
-
-    if !output.status.success() {
-        log::info!("nvidia-smi command failed or no GPU processes found");
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines = stdout.lines();
-
-    let mut pids_to_kill = Vec::new();
-
-    for line in lines {
-        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-        if parts.len() != 2 {
-            continue;
-        }
-
-        let name = parts[0];
-        let pid: u32 = match parts[1].parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        if whitelist.contains(&name) {
-            log::info!("Skipping whitelisted process: {} ({})", pid, name);
-        } else {
-            pids_to_kill.push((pid, name.to_string()));
-        }
-    }
-
-    if pids_to_kill.is_empty() {
-        log::info!("No GPU-using processes to kill.");
-        return Ok(());
-    }
-
-    let mut sys = System::new_all();
-    sys.refresh_processes();
-
-    for (pid, name) in pids_to_kill {
-        if let Some(process) = sys.process(sysinfo::Pid::from(pid as usize)) {
-            log::info!("Attempting to kill process {} ({})", pid, name);
-            if process.kill_with(Signal::Kill).unwrap_or(false) {
-                log::info!("Successfully killed PID {}", pid);
-            } else {
-                log::info!("Failed to kill PID {}", pid);
-            }
-        } else {
-            log::info!("Process with PID {} not found", pid);
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn gpu_taskkill() -> Result<()> {
-    // dGPU process termination for Linux
-    let output = procCommand::new("nvidia-smi")
-        .args(&["--query-compute-apps=name,pid", "--format=csv,noheader"])
-        .output();
-    
-    if output.is_err() {
-        log::info!("nvidia-smi not found or no GPU processes");
-        return Ok(());
-    }
-    
-    let output = output?;
-    if !output.status.success() {
-        return Ok(());
-    }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut system = System::new_all();
-    system.refresh_all();
-    
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        
-        let pid: usize = match parts[1].parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        
-        if let Some(process) = system.process(sysinfo::Pid::from(pid)) {
-            log::info!("Terminating GPU process: {} (PID: {})", parts[0], pid);
-            process.kill_with(Signal::Term);
-        }
-    }
-    
-    Ok(())
-}
-
-
-fn get_logging_file_path() -> std::path::PathBuf {
+pub fn get_logging_file_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{}.log", PKG_NAME))
 }
 
@@ -1001,7 +65,7 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
     let config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
     let fan_actual = get_fan_rpm(device)?;
     let mut state = ProgramState::new(config.ac_state, fan_actual, config.enforce)?;
-    state.ac_power = get_power_state()?;
+    state.ac_power = platform::get_power_state()?;
     state.ac_state = config.ac_state;
     state.battery_state = config.battery_state;
     if !state.ac_power {
@@ -1011,186 +75,24 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
     Ok(state)
 }
 
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn keyboard_hook_proc(
-    code: i32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HHOOK};
-    if code >= 0 && (wparam.0 == 0x0100 || wparam.0 == 0x0104) {
-        KEY_PRESSED.store(true, Ordering::Relaxed);
-    }
-    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
-}
-
-/// Returns the system-wide "last input" tick (keyboard + mouse) from
-/// GetLastInputInfo, or None if it can't be read / on non-Windows. The Mirror
-/// refresh polls only when this value *changes* (new input since the last poll),
-/// so reads happen while you're actively using the machine -- including moving the
-/// trackpad to reach the tray -- but stop the instant you stop touching it. That
-/// matters because the keyboard firmware re-brightens the backlight on ANY HID
-/// activity (including our reads); gating on real input keeps us from re-poking an
-/// idle, dimming keyboard, so it dims off normally. (The trackpad movement that
-/// brings you to the tray already woke the backlight, so the hover read is free.)
-#[cfg(target_os = "windows")]
-fn last_input_tick() -> Option<u32> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-    unsafe {
-        let mut info = LASTINPUTINFO {
-            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-            dwTime: 0,
-        };
-        if GetLastInputInfo(&mut info).as_bool() {
-            Some(info.dwTime)
-        } else {
-            None // can't determine -> caller treats as "always refresh"
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn last_input_tick() -> Option<u32> {
-    // No cheap, portable idle signal here; returning None makes the caller fall
-    // back to a plain timed refresh (the original always-refresh behavior).
-    None
-}
-
-/// Window procedure for the hidden message-only window that receives power
-/// notifications. Updates DISPLAY_ON from GUID_CONSOLE_DISPLAY_STATE events.
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn power_wnd_proc(
-    hwnd: windows::Win32::Foundation::HWND,
-    msg: u32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::System::Power::POWERBROADCAST_SETTING;
-    use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
-    use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST};
-
-    if msg == WM_POWERBROADCAST && wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
-        let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
-        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
-            // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
-            let on = setting.Data[0] != 0;
-            DISPLAY_ON.store(on, Ordering::Relaxed);
-            log::info!("console display state: {}", if on { "on" } else { "off" });
-        }
-        return windows::Win32::Foundation::LRESULT(1);
-    }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
-}
-
-/// Spawn a background thread that owns a hidden message-only window, registers
-/// for console-display-state power notifications, and pumps messages. This is the
-/// event-driven (zero-poll) source of truth for DISPLAY_ON. Errors are logged and
-/// the thread exits, leaving DISPLAY_ON at its fail-open default of true.
-#[cfg(target_os = "windows")]
-fn spawn_display_state_monitor() {
-    std::thread::spawn(|| unsafe {
-        use windows::core::w;
-        use windows::Win32::Foundation::{HINSTANCE, HWND};
-        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::System::Power::RegisterPowerSettingNotification;
-        use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
-            DEVICE_NOTIFY_WINDOW_HANDLE, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
-        };
-
-        let hinstance: HINSTANCE = match GetModuleHandleW(None) {
-            Ok(h) => h.into(),
-            Err(e) => {
-                log::warn!("display monitor: GetModuleHandleW failed: {e:?}");
-                return;
-            }
-        };
-        let class_name = w!("razer_tray_power_window");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(power_wnd_proc),
-            hInstance: hinstance,
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-
-        let hwnd: HWND = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            class_name,
-            w!("razer-tray power"),
-            WINDOW_STYLE(0),
-            0,
-            0,
-            0,
-            0,
-            HWND_MESSAGE,
-            None,
-            hinstance,
-            None,
-        );
-        if hwnd.0 == 0 {
-            log::warn!("display monitor: CreateWindowExW returned null");
-            return;
-        }
-
-        if let Err(e) = RegisterPowerSettingNotification(
-            windows::Win32::Foundation::HANDLE(hwnd.0),
-            &GUID_CONSOLE_DISPLAY_STATE,
-            DEVICE_NOTIFY_WINDOW_HANDLE,
-        ) {
-            log::warn!("display monitor: RegisterPowerSettingNotification failed: {e:?}");
-            return;
-        }
-        log::info!("display-state monitor running");
-
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, hwnd, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    });
-}
-
-#[cfg(target_os = "windows")]
-fn efficiency_mode() {
-    unsafe {
-        let handle: HANDLE = GetCurrentProcess();
-
-        let _ = SetPriorityClass(handle, IDLE_PRIORITY_CLASS);
-
-        let power_throttling = PROCESS_POWER_THROTTLING_STATE {
-            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-            StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-        };
-        let _ = SetProcessInformation(
-            handle,
-            ProcessPowerThrottling,
-            &power_throttling as *const _ as *mut _,
-            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-        );
-    }
-}
-
 fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Initialize GTK for tray icon on Linux
         gtk::init().map_err(|_| anyhow::anyhow!("Failed to initialize GTK"))?;
     }
-    
+
     #[cfg(target_os = "windows")]
-    efficiency_mode();
+    platform::efficiency_mode();
 
     // Start the display-state monitor (event-driven; gates always-on backlight).
     #[cfg(target_os = "windows")]
-    spawn_display_state_monitor();
+    platform::spawn_display_state_monitor();
 
     // Create a named mutex (unique string for your app)
     let instance = SingleInstance::new("razer-tray").unwrap();
     if !instance.is_single() {
-        println!("Another instance is already running. Exiting.");
+        log::info!("Another instance is already running. Exiting.");
         return Ok(());
     }
 
@@ -1199,11 +101,7 @@ fn main() -> Result<()> {
 
     let device = match device::Device::detect() {
         Ok(d) => {
-            log::info!(
-                "detected device: {} (0x{:04X})",
-                d.info().name,
-                d.info().pid
-            );
+            log::info!("detected device: {} (0x{:04X})", d.info().name, d.info().pid);
             d
         }
         Err(e) => {
@@ -1240,7 +138,7 @@ fn main() -> Result<()> {
 
     // loop through the default start up sequence to initialise the device.
     for element in device.info().init_cmds {
-        command::send_command(&device, *element, &[0,0,0,0])?;
+        command::send_command(&device, *element, &[0, 0, 0, 0])?;
     }
 
     // Install a low-level keyboard hook used to refresh the tooltip on keypress.
@@ -1251,7 +149,7 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     let _keyboard_hook = unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) {
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(platform::keyboard_hook_proc), None, 0) {
             Ok(hook) => Some(hook),
             Err(e) => {
                 log::warn!("Failed to install keyboard hook ({e:?}); keypress tooltip refresh disabled");
@@ -1271,15 +169,14 @@ fn main() -> Result<()> {
                 log::info!("Menu Event {:?}", event.id);
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
                     log::info!("match event id");
-                    gpu_taskkill()?;
+                    platform::gpu_taskkill()?;
                 } else if event.id == MenuId("toggle_enforce".to_string()) {
                     state.enforce = !state.enforce;
                     if let Err(e) = state.persist() {
                         log::warn!("Failed to persist enforce flag: {:?}", e);
                     }
                     // Rebuild the menu so the checkmark reflects the new state.
-                    let (m, h) =
-                        ProgramState::create_menu_and_handlers(&state.device_state, state.enforce)?;
+                    let (m, h) = menu::build(&state.device_state, state.enforce)?;
                     state.menu = m;
                     state.event_handlers = h;
                     tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -1287,11 +184,11 @@ fn main() -> Result<()> {
                 } else if event.id == MenuId("toggle_autostart".to_string()) {
                     #[cfg(target_os = "windows")]
                     {
-                        if let Err(e) = set_autostart(!autostart_enabled()) {
+                        if let Err(e) = platform::set_autostart(!platform::autostart_enabled()) {
                             log::warn!("Failed to toggle autostart: {:?}", e);
                         }
                         // Rebuild the menu so the checkmark reflects the new state.
-                        let (m, h) = ProgramState::create_menu_and_handlers(&state.device_state, state.enforce)?;
+                        let (m, h) = menu::build(&state.device_state, state.enforce)?;
                         state.menu = m;
                         state.event_handlers = h;
                         tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -1309,7 +206,7 @@ fn main() -> Result<()> {
                 state.update(&mut tray_icon, new_device_state, &device)?;
             }
 
-            state.ac_power = get_power_state()?;
+            state.ac_power = platform::get_power_state()?;
             if state.ac_power && state.device_state != state.ac_state {
                 let new_device_state = state.ac_state;
                 log::info!("new_device_state 3 {:?}", new_device_state);
@@ -1342,7 +239,7 @@ fn main() -> Result<()> {
             // device_state (the menu's intent) is left unchanged.
             #[cfg(target_os = "windows")]
             {
-                let display_on = DISPLAY_ON.load(Ordering::Relaxed);
+                let display_on = platform::DISPLAY_ON.load(Ordering::Relaxed);
                 if display_on != last_display_on {
                     last_display_on = display_on;
                     if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable {
@@ -1377,7 +274,7 @@ fn main() -> Result<()> {
             // the machine, polling stops and the keyboard dims/off normally; we never
             // re-poke an idle keyboard. (None from last_input_tick -> always refresh,
             // the non-Windows fallback.)
-            let input_tick = last_input_tick();
+            let input_tick = platform::last_input_tick();
             let new_input = match (input_tick, last_polled_input_tick) {
                 (Some(cur), Some(prev)) => cur != prev,
                 _ => true,
@@ -1407,9 +304,7 @@ fn main() -> Result<()> {
                         if let Err(e) = state.persist() {
                             log::warn!("failed to persist adopted brightness: {:?}", e);
                         }
-                        if let Ok((menu, handlers)) =
-                            ProgramState::create_menu_and_handlers(&state.device_state, state.enforce)
-                        {
+                        if let Ok((menu, handlers)) = menu::build(&state.device_state, state.enforce) {
                             state.menu = menu;
                             state.event_handlers = handlers;
                             tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -1467,7 +362,7 @@ fn main() -> Result<()> {
             // Update fan RPM and tooltip whenever a key is pressed, since keypresses
             // already turn on the backlight; piggybacking here adds no idle-time cost.
             #[cfg(target_os = "windows")]
-            if KEY_PRESSED.swap(false, Ordering::Relaxed) {
+            if platform::KEY_PRESSED.swap(false, Ordering::Relaxed) {
                 if let Ok(fan) = get_fan_rpm(&device) {
                     state.fan_actual = fan;
                     if let Ok(tooltip) = state.tooltip() {
@@ -1484,7 +379,7 @@ fn main() -> Result<()> {
                     Ok(new_state) => {
                         state = new_state;
                         break;
-                    },
+                    }
                     Err(e) => {
                         log::error!("failed to recover: {:?}", e);
                         // Sleep between attempts. We're inside this inner `loop`, so we
