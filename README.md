@@ -1,83 +1,107 @@
-# Razer Blade control utility
+# razer-ctl (local fork) — Blade control without Synapse
 
-This is a fork of the razer-ctl program that [tdakhran](https://github.com/tdakran) first created in 2024.  It has been updated to add support for the new Razer Blade 16 2025. It is still very much a work in progress and not all features have been tested on all models so your milage may vary. 
+**TL;DR:** a tray app + CLI that drive a Razer Blade's performance, fans, lighting, and battery care
+straight over HID, so you don't need Synapse running. Local-only fork — never pushed. Validated on a
+Razer Blade 16 (2023), `RZ09-0483`, USB PID `0x029F`, Windows 11.
 
-The supported devices are :
-* Razer Blade 16 2025 (RTX 5080/5090)
-* Razer Blade 16 2024
-* Razer Blade 16 2023
-* Razer Blade 15 2022
-* Razer Blade 14 2023
+> This fork lives on a local-only `local` branch that's never pushed; `main` tracks upstream. This
+> README documents the local build; `README.upstream.md` covers the wider multi-model project.
+> Upstream lists other Blade models, but only the 2023 16" has had hands-on testing here.
 
-## What can it control?
+## What it is
 
-* Performance modes (including overclock & Hyperboost)
-* **Battery care (charge limiting)** - 50%, 55%, 60%, 65%, 70%, 75%, 80%, or disabled (100%)
-* Fan control (auto/manual with RPM settings)
-* Lid logo modes: off, static, breathing
-* Keyboard brightness (works on Windows with Fn keys anyway)
-* Lights always-on toggle
-* dGPU process termination (battery saving)
+`razer-tray.exe` is the daily driver — a tray icon with a menu and a live tooltip. `razer-cli.exe` does
+the same things from the command line. `librazer` holds the HID protocol, the device model, and the
+host-testable logic. Given the goal is "replace Synapse for the things I actually use," it stays small
+and only writes to the device when you ask it to.
 
-![](data/demo.gif)
+## What it controls
 
-## Battery Care Feature
+- **Performance modes** — Balanced, Silent, Battery, Performance, Hyperboost, and Custom (per-axis CPU/GPU boost).
+- **Fan** — Auto, or Manual at an explicit RPM (2000–5000).
+- **Keyboard brightness** — 0–100% in 10% steps; the exact value shows in the tooltip.
+- **Logo lighting** — off / static / breathing (its own light zone).
+- **Charge limit** — 50–80% in 5% steps, or off (100%).
+- **AC vs battery profiles** — separate profiles, switched automatically when you plug/unplug.
+- **Keyboard always-on** — keeps the backlight lit while the display's on. It's a Normal-mode keep-alive,
+  not Razer's driver-mode flag, so your Fn media keys keep working (see Quirks — this one took a day to get right).
+- **Enforce mode** (opt-in, off by default) — re-asserts perf/fan/logo/charge-limit if Synapse changes
+  them; it leaves brightness alone.
+- **Close GPU apps** — terminates dGPU-using processes, with a hard safelist so it never takes down the desktop.
+- **Start with Windows** — an `HKCU\…\Run` entry.
 
-The enhanced battery care system allows setting precise charge limits to optimize battery longevity:
+Config lives at `%APPDATA%\razer-tray\config\default-config.toml`; the log at `%TEMP%\razer-tray.log`
+(Info level, capped at 10 MiB, wiped on rollover).
 
-**Available Options:** 50%, 55%, 60%, 65%, 70%, 75%, 80%, or disabled (100%)
+## Install
 
-**Usage:**
-```bash
-# CLI
-./razer-cli auto battery-care set 50    # Set to 50% limit
-./razer-cli auto battery-care get       # Check current setting
+Drop `razer-tray.exe` somewhere (e.g. `C:\Program Files\RazerTray\`), run it, and use the tray's
+"Start with Windows" to autostart. The CLI is standalone — `razer-cli.exe --help`. No installer, no
+service, no Synapse.
 
-# Tray Menu
-Right-click tray icon → Battery Care → Select percentage
+## Changelog
+
+### 0.9.0 — first versioned local release
+The first numbered cut of the fork; it rode at upstream's `0.8.6` until now. Given how much changed,
+the highlights:
+
+**Architecture**
+- Put the device behind a `HidTransport` trait so the logic is host-testable with a mock, and moved the
+  state model into `librazer`. 47 host tests.
+- Split the ~1,500-line tray `main.rs` into `main` / `menu` / `state` / `program` / `platform`.
+- Sentence-case menu labels; reworked tooltip.
+
+**Behavior**
+- Mirror reads are input-gated — they track real input and stop when idle, which killed the old ~10 s
+  backlight pulsing.
+- Fn-key brightness changes are read back and adopted into the active profile.
+- Enforce mode (opt-in), with a resume-from-sleep re-assert.
+- Keyboard always-on is now a Normal-mode keep-alive (see Quirks); it never enters driver mode, so the
+  Fn keys keep working.
+- Logging dropped from Trace to Info, bounded at 10 MiB.
+
+**Fixes**
+- `battery-care` output went to a suppressed log level — now it prints (and `auto info` shows it).
+- "Close GPU apps" / `taskkill` could kill the desktop. Given nvidia-smi reports dwm/explorer/shell hosts
+  as GPU users and the old code had no real filter, it SIGKILLed the session. Added a shared, host-tested
+  `process_guard` safelist used by both the CLI and tray, plus handling for nvidia-smi's
+  `[Insufficient Permissions]` placeholder.
+- Recovery loop no longer busy-spins on device loss; "Close GPU apps" no longer panics when nvidia-smi
+  isn't on `PATH`; Linux build fix.
+
+## Quirks & limits (the hard-won ones)
+
+- **Always-on used to kill every Fn media key — that's why it's a keep-alive now.** The old "always-on"
+  was Razer's device-mode command (`0x0004`); Enable is `0x03` = driver mode, which hands key/light
+  handling to a host driver and makes the EC ignore the whole Fn layer — screen brightness, volume, and
+  keyboard brightness all go dead. OpenRazer confirms `0x0004` is device mode, and the upstream forks ship
+  the same mislabel. There's no firmware "backlight timeout" knob and no HID LampArray, so the fix is a
+  keep-alive: stay in Normal mode and re-brighten with a brightness *read* every ~3 s while the display's
+  on (the EC fades at ~4 s). A read writes nothing, so it never fights the Fn keys. Validated on hardware —
+  always-on lit steady, all Fn keys working.
+- **Enforce mode is last-writer-wins.** It re-asserts on an input-gated poll and on resume, so it beats
+  occasional changes but will lose to a tool that re-asserts every sub-second.
+- **"Close GPU apps" is conservative on purpose** — it skips a safelist of session-critical processes and
+  anything nvidia-smi can't name, so a few stubborn dGPU users may survive rather than risk the desktop.
+- **Device-loss recovery isn't runtime-tested on this unit.** The control interface rides the internal
+  keyboard's USB composite, which Windows won't let you disable, so the recovery backoff is code-reviewed only.
+- **`battery-care get` can read stale right after a `set`** (~1–2 s firmware lag) — re-read to confirm.
+- **`tray-icon` is pinned at 0.11.3** — the newer hover-event API isn't available in this build env, so
+  the tooltip refresh uses a keyboard hook plus last-input polling.
+
+## Building
+
+```
+.local-notes/check.sh    # clippy -D warnings + Windows cross-build + host tests; must end "ALL GREEN"
 ```
 
-**Compatibility:**
-- ✅ **Verified:** Razer Blade 16 (2024), Razer Blade 16 (2023)
-- 🔄 **Expected to work:** All models with battery-care feature (Blade 14/15/16 series)
-- ℹ️  **Note:** Percentages match official Razer Synapse Battery Health Optimizer (50-80% range)
+Rules for this fork:
+- Don't push, and don't add a remote. The `local` branch moves between machines via `git bundle`.
+- Don't edit `librazer/src/descriptor.rs` — those are hand-maintained hardware descriptors.
+- Don't run `cargo fmt` — it rewrites the hand-formatting and touches `descriptor.rs`.
 
-If you experience issues on your model, please report with your device model and PID.
+## Credits
 
-## What is missing vs ghelper?
-
-* Power settings seem to have no effect when AC power unplugged and on battery.
-* Windows power plan control
-* Detecting and disabling / closing apps which use GPU when needed to save power
-* GUI for fan controls
-* Custom power targets for GPU and CPU - can't do as Razer interface doesn't support it.
-
-## Reverse Engineering
-
-Read about the reverse engineering process for Razer Blade 16 in [data/README.md](data/README.md). You can follow the steps and adjust the utility for other Razer laptops.
-
-Run `razer-cli enumerate` to get PID.
-Then `razer-cli -p 0xPID info` to check if the application works for your Razer device.
-
-Special thanks to
-* [tdakhran](https://github.com/tdakran) for the original code for this fork [repository](https://github.com/tdakhran/razer-ctl)
-* [openrazer](https://github.com/openrazer) for [Reverse-Engineering-USB-Protocol](https://github.com/openrazer/openrazer/wiki/Reverse-Engineering-USB-Protocol)
-* [Razer-Linux](https://github.com/Razer-Linux/razer-laptop-control-no-dkms) for USB HID protocol implementation
-
-## FAQ
-
-**Q**: *How to build?*
-
-**A**: I build in WSL2(Arch) with `cargo run --release --target x86_64-pc-windows-gnu --bin razer-tray`.
-
-**Q**: *Does it work on Linux?*
-
-**A**: Yes! Fully tested on Linux with native device detection, GTK tray support, and proper permissions via plugdev group.
-
-**Q**: *Why Windows Defender tells me it is a Trojan*
-
-**A**: Read https://github.com/rust-lang/rust/issues/88297, and make sure recent Intelligence Updates are installed for Microsoft Defender.
-
-**Q**: *What's the easiest way to try?*
-
-**A**: Download `razer-tray.exe` from [Releases](https://github.com/tdakhran/razer-ctl/releases) and launch it.
+Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)); multi-model fork
+by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). This local fork is maintained by
+sqmagellan, developed with McClaude (Claude Opus 4.8).
