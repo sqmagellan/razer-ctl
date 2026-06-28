@@ -6,7 +6,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use librazer::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode};
-use librazer::{command, device};
+use librazer::command;
+use librazer::transport::HidTransport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FanSpeed {
@@ -66,7 +67,7 @@ impl DeviceState {
     /// changes such as Fn-key brightness and could overwrite saved AC/battery
     /// profiles). Returns Err on any transient HID failure; callers should swallow
     /// that and keep the last known-good values rather than propagating it.
-    pub fn read(device: &device::Device) -> Result<Self> {
+    pub fn read(device: &impl HidTransport) -> Result<Self> {
         let perf_mode = match command::get_perf_mode(device)? {
             (librazer::types::PerfMode::Battery, _) => PerfMode::Battery,
             (librazer::types::PerfMode::Silent, _) => PerfMode::Silent,
@@ -107,7 +108,7 @@ impl DeviceState {
     /// `enforce_to()` (the Synapse tug-of-war reassert). Kept in one place so the two
     /// can't drift. Fan failures are logged but non-fatal (manual RPM can be rejected
     /// depending on mode); a logo/perf failure propagates.
-    fn apply_perf_fan_logo(&self, device: &device::Device) -> Result<()> {
+    fn apply_perf_fan_logo(&self, device: &impl HidTransport) -> Result<()> {
         match self.perf_mode {
             PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
@@ -132,7 +133,7 @@ impl DeviceState {
         command::set_logo_mode(device, self.lights_mode.logo_mode)
     }
 
-    pub fn apply(&self, device: &device::Device) -> Result<()> {
+    pub fn apply(&self, device: &impl HidTransport) -> Result<()> {
         self.apply_perf_fan_logo(device)?;
         command::set_lights_always_on(device, self.lights_mode.always_on)?;
         command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness)?;
@@ -145,7 +146,7 @@ impl DeviceState {
     /// Brightness is excluded so it stays on the adopt path (Fn keys keep working);
     /// always-on is excluded because it's owned by the display-state gate (it gets
     /// dropped while the display is off). It's exactly apply() minus those two writes.
-    pub fn enforce_to(&self, device: &device::Device) -> Result<()> {
+    pub fn enforce_to(&self, device: &impl HidTransport) -> Result<()> {
         self.apply_perf_fan_logo(device)?;
         command::set_battery_care(device, self.battery_care)
     }
@@ -219,7 +220,7 @@ impl Default for ConfigState {
     }
 }
 
-pub fn get_fan_rpm(device: &device::Device) -> Result<FanRpm> {
+pub fn get_fan_rpm(device: &impl HidTransport) -> Result<FanRpm> {
     Ok(FanRpm {
         fan1: command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone1)?,
         fan2: command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone2)?,
