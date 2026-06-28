@@ -226,10 +226,34 @@ fn main() -> Result<()> {
             // state on resume, so when Enforce is on we immediately re-assert ours
             // rather than waiting for the next 10s enforce poll. Brightness is left
             // alone (enforce_to omits it) so a pre-sleep Fn setting isn't clobbered.
-            if state.enforce && since_last_tick > std::time::Duration::from_secs(30) {
-                log::info!("resume detected (tick gap {:?}); re-asserting enforced state", since_last_tick);
-                if let Err(e) = state.device_state.enforce_to(&device) {
-                    log::warn!("enforce: resume re-assert failed: {:?}", e);
+            if since_last_tick > std::time::Duration::from_secs(30) {
+                log::info!("resume detected (tick gap {:?})", since_last_tick);
+                // We drop the firmware always-on flag on suspend (platform::power_wnd_proc)
+                // so the backlight doesn't burn through sleep. The display-off transition
+                // the gate below would normally react to was missed while the loop was
+                // frozen, so restore the flag to the user's intent here -- independent of
+                // enforce -- and resync the gate's last-seen display state so it doesn't
+                // also fire.
+                #[cfg(target_os = "windows")]
+                {
+                    let display_on = platform::DISPLAY_ON.load(Ordering::Relaxed);
+                    last_display_on = display_on;
+                    if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable
+                        && display_on
+                    {
+                        match command::set_lights_always_on(&device, LightsAlwaysOn::Enable) {
+                            Ok(()) => log::info!("resume: restored keyboard always-on"),
+                            Err(e) => log::warn!("resume: restore always-on failed: {:?}", e),
+                        }
+                    }
+                }
+                // Re-assert enforced fields on resume (Synapse/firmware may have reset them
+                // while asleep); brightness is intentionally left alone by enforce_to.
+                if state.enforce {
+                    log::info!("re-asserting enforced state after resume");
+                    if let Err(e) = state.device_state.enforce_to(&device) {
+                        log::warn!("enforce: resume re-assert failed: {:?}", e);
+                    }
                 }
             }
 
