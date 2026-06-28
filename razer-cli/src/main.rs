@@ -333,7 +333,14 @@ fn taskkill() -> Result<()> {
 
     for pid in pids {
         if let Some(process) = sys.process(sysinfo::Pid::from(pid as usize)) {
-            println!("Killing process {} ({})", pid, process.name());
+            let name = process.name();
+            // Never kill the compositor/shell: on this hardware nvidia-smi reports
+            // dwm/explorer/etc. as GPU users, and killing them tears down the session.
+            if librazer::process_guard::is_protected_process(name) {
+                println!("Skipping protected process {} ({})", pid, name);
+                continue;
+            }
+            println!("Killing process {} ({})", pid, name);
             // Send SIGKILL to the process
             if process.kill_with(Signal::Kill).unwrap_or(false) {
                 println!("Successfully killed PID {}", pid);

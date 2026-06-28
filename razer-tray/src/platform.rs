@@ -114,7 +114,6 @@ pub fn set_autostart(enable: bool) -> Result<()> {
 #[cfg(target_os = "windows")]
 pub fn gpu_taskkill() -> Result<()> {
     use std::os::windows::process::CommandExt;
-    let whitelist: &[&str] = &["explorer.exe", "Insufficient Permissions"];
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = match procCommand::new("nvidia-smi")
@@ -154,8 +153,12 @@ pub fn gpu_taskkill() -> Result<()> {
             Err(_) => continue,
         };
 
-        if whitelist.contains(&name) {
-            log::info!("Skipping whitelisted process: {} ({})", pid, name);
+        // Skip the compositor/shell (on this hardware nvidia-smi lists dwm/explorer/
+        // shell hosts as GPU users) and any process whose name nvidia-smi couldn't
+        // read ("Insufficient Permissions") -- killing by an unknown name is unsafe.
+        if name == "Insufficient Permissions" || librazer::process_guard::is_protected_process(name)
+        {
+            log::info!("Skipping protected process: {} ({})", pid, name);
         } else {
             pids_to_kill.push((pid, name.to_string()));
         }
