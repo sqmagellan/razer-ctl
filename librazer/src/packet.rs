@@ -61,6 +61,13 @@ impl Packet {
         &self.args
     }
 
+    /// The 16-bit command (class<<8 | id) this packet carries -- the inverse of the
+    /// `command` argument to `new`. Lets tests/inspection recover which command a
+    /// packet represents without reaching into the private wire fields.
+    pub fn command(&self) -> u16 {
+        ((self.command_class as u16) << 8) | self.command_id as u16
+    }
+
     pub fn ensure_matches_report(&self, report: &Packet) -> Result<()> {
         ensure!(
             (report.command_class, report.command_id, report.id)
