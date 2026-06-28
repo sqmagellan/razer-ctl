@@ -20,11 +20,11 @@ fn read_device_model() -> Result<String> {
 
 #[cfg(target_os = "linux")]
 fn read_device_model() -> Result<String> {
-    let sku = fs::read_to_string("/sys/devices/virtual/dmi/id/product_sku")
+    let sku = std::fs::read_to_string("/sys/devices/virtual/dmi/id/product_sku")
         .map(|s| s.trim().to_string())
         .map_err(|e| anyhow::anyhow!("Failed to read product SKU: {}", e))?;
 
-    debug!("Linux product SKU: {}", sku);
+    log::debug!("Linux product SKU: {}", sku);
 
     if sku.starts_with("RZ") {
         Ok(sku.chars().take(10).collect())
