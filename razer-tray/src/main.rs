@@ -899,11 +899,20 @@ fn gpu_taskkill() -> Result<()> {
     let whitelist: &[&str] = &["explorer.exe", "Insufficient Permissions"];
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let output = procCommand::new("nvidia-smi")
+    let output = match procCommand::new("nvidia-smi")
         .args(&["--query-compute-apps=name,pid", "--format=csv,noheader"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .expect("Failed to execute nvidia-smi");
+    {
+        Ok(o) => o,
+        Err(e) => {
+            // No NVIDIA tools on PATH (or it failed to launch). Nothing to terminate;
+            // don't panic -- this runs from the tray event loop and a panic here would
+            // crash/recover-churn the app the moment the user clicks the menu item.
+            log::info!("nvidia-smi not available ({e}); skipping dGPU terminate");
+            return Ok(());
+        }
+    };
 
     if !output.status.success() {
         log::info!("nvidia-smi command failed or no GPU processes found");
@@ -1541,7 +1550,12 @@ fn main() -> Result<()> {
                     },
                     Err(e) => {
                         log::error!("failed to recover: {:?}", e);
-                        *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
+                        // Sleep between attempts. We're inside this inner `loop`, so we
+                        // never return to the event loop until init() succeeds -- which
+                        // means `control_flow` has no effect here. Without a sleep a
+                        // persistent failure (e.g. the device unplugged) would busy-spin
+                        // this thread, pegging a core and spamming HID reads + the log.
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
                     }
                 }
             }

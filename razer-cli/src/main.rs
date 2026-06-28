@@ -300,10 +300,16 @@ fn enumerate() -> Result<()> {
 
 fn taskkill() -> Result<()> {
     // Run nvidia-smi to get PIDs of GPU processes
-    let output = procCommand::new("nvidia-smi")
+    let output = match procCommand::new("nvidia-smi")
         .args(&["--query-compute-apps=pid", "--format=csv,noheader"])
         .output()
-        .expect("Failed to execute nvidia-smi");
+    {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("nvidia-smi not available ({e}); nothing to terminate");
+            return Ok(());
+        }
+    };
 
     if !output.status.success() {
         eprintln!("nvidia-smi command failed or no GPU processes found");
