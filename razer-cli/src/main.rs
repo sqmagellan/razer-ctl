@@ -10,7 +10,6 @@ use librazer::feature::Feature;
 
 use anyhow::Result;
 use clap::{arg, Command};
-use log::info;
 use std::process::Command as procCommand;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
 
@@ -113,22 +112,22 @@ impl Cli for feature::BatteryCare {
                         let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
                         let mode = BatteryCare::from_percent(percent)?;
                         command::set_battery_care(device, mode)?;
-                        info!("Battery care set to {}% limit", mode.to_percent());
+                        println!("Battery care set to {}% limit", mode.to_percent());
                         Ok(())
                     }
                     Some(("enable", _)) => {
                         command::set_battery_care(device, BatteryCare::Percent80)?;
-                        info!("Battery care enabled (charge limit set to 80%)");
+                        println!("Battery care enabled (charge limit set to 80%)");
                         Ok(())
                     }
                     Some(("disable", _)) => {
                         command::set_battery_care(device, BatteryCare::Disable)?;
-                        info!("Battery care disabled (will charge to 100%)");
+                        println!("Battery care disabled (will charge to 100%)");
                         Ok(())
                     }
                     Some(("get", _)) => {
                         let current = command::get_battery_care(device)?;
-                        info!("Current battery care: {}%", current.to_percent());
+                        println!("Current battery care: {}%", current.to_percent());
                         Ok(())
                     }
                     _ => Ok(()),
@@ -136,7 +135,7 @@ impl Cli for feature::BatteryCare {
             }
             Some(("info", _)) => {
                 let current = command::get_battery_care(device)?;
-                info!("{}: {}%", self.name(), current.to_percent());
+                println!("{}: {}%", self.name(), current.to_percent());
                 Ok(())
             }
             _ => Ok(()),
