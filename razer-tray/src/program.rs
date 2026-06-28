@@ -11,7 +11,7 @@ use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
 use crate::menu;
-use crate::state::{get_fan_rpm, ConfigState, DeviceState, FanRpm, FanSpeed, PerfMode};
+use crate::state::{get_fan_rpm, brightness_to_percent, ConfigState, DeviceState, FanRpm, FanSpeed, PerfMode};
 
 pub struct ProgramState {
     pub device_state: DeviceState,
@@ -108,9 +108,9 @@ impl ProgramState {
         }
         write!(&mut info, " · {}/{} RPM", self.fan_actual.fan1, self.fan_actual.fan2)?;
 
-        write!(&mut info, "\nLogo {:?}", s.lights_mode.logo_mode)?;
+        write!(&mut info, "\nLogo: {:?}", s.lights_mode.logo_mode)?;
         if s.lights_mode.keyboard_brightness > 0 {
-            write!(&mut info, " · 🔆 {}", s.lights_mode.keyboard_brightness)?;
+            write!(&mut info, " · 🔆 {}%", brightness_to_percent(s.lights_mode.keyboard_brightness))?;
         }
         if s.lights_mode.always_on == LightsAlwaysOn::Enable {
             write!(&mut info, " · 💡")?;

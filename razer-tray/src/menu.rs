@@ -23,7 +23,7 @@ pub fn build(
     let menu = Menu::new();
 
     // perf
-    let perf_modes = Submenu::new("Performance", true);
+    let perf_modes = Submenu::new("Performance mode", true);
     // The simple (non-Custom) modes are uniform: id == Debug name, enabled when
     // not current, checked when current. Custom is built separately below.
     for (mode, label) in [
@@ -88,7 +88,7 @@ pub fn build(
     menu.append(&PredefinedMenuItem::separator())?;
     let fan_speeds: Vec<CheckMenuItem> = [CheckMenuItem::with_id(
         "fan_speeds:auto",
-        "Fan: Auto",
+        "Auto",
         dstate.fan_speed != FanSpeed::Auto,
         dstate.fan_speed == FanSpeed::Auto,
         None,
@@ -105,7 +105,7 @@ pub fn build(
         );
         CheckMenuItem::with_id(
             event_id,
-            format!("Fan: {} RPM", rpm),
+            format!("{} RPM", rpm),
             dstate.fan_speed != FanSpeed::Manual(rpm),
             dstate.fan_speed == FanSpeed::Manual(rpm),
             None,
@@ -121,7 +121,7 @@ pub fn build(
     );
 
     menu.append(&Submenu::with_items(
-        "Fan Speed",
+        "Fan",
         true,
         &fan_speeds
             .iter()
@@ -155,7 +155,7 @@ pub fn build(
         .collect::<Vec<_>>();
 
     menu.append(&Submenu::with_items(
-        "Logo",
+        "Logo lighting",
         true,
         &modes.iter().map(|i| i as &dyn IsMenuItem).collect::<Vec<_>>(),
     )?)?;
@@ -164,7 +164,7 @@ pub fn build(
     // keyboard always on
     menu.append(&CheckMenuItem::with_id(
         "lights_always_on",
-        "Keyboard Always On",
+        "Keyboard always on",
         true,
         dstate.lights_mode.always_on == LightsAlwaysOn::Enable,
         None,
@@ -219,7 +219,7 @@ pub fn build(
         .collect();
 
     menu.append(&Submenu::with_items(
-        "Keyboard Brightness",
+        "Keyboard brightness",
         true,
         &brightness_modes
             .iter()
@@ -238,7 +238,7 @@ pub fn build(
         (BatteryCare::Percent70, "70%", "battery_care_70"),
         (BatteryCare::Percent75, "75%", "battery_care_75"),
         (BatteryCare::Percent80, "80%", "battery_care_80"),
-        (BatteryCare::Disable, "Disabled (100%)", "battery_care_disable"),
+        (BatteryCare::Disable, "Off (100%)", "battery_care_disable"),
     ];
 
     let battery_care_items: Vec<CheckMenuItem> = battery_care_options
@@ -256,7 +256,7 @@ pub fn build(
         .collect();
 
     menu.append(&Submenu::with_items(
-        "Battery Care",
+        "Charge limit",
         true,
         &battery_care_items
             .iter()
@@ -271,7 +271,7 @@ pub fn build(
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&CheckMenuItem::with_id(
             "toggle_enforce",
-            "Enforce Settings (override Synapse)",
+            "Keep settings enforced (override Synapse)",
             true,
             enforce,
             None,
@@ -294,7 +294,7 @@ pub fn build(
     // gpu task killer
     menu.append(&PredefinedMenuItem::separator())?;
     let terminate_item =
-        MenuItem::with_id("dgpu_terminate_proc", "Terminate dGPU Processes", true, None);
+        MenuItem::with_id("dgpu_terminate_proc", "Close GPU apps", true, None);
     menu.append(&terminate_item)?;
     // footer
     menu.append(&PredefinedMenuItem::separator())?;

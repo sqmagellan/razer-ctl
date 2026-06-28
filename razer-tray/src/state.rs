@@ -52,6 +52,13 @@ pub fn percent_to_brightness(percent: u8) -> u8 {
     ((percent as u16 * 255 + 50) / 100) as u8
 }
 
+/// Inverse of `percent_to_brightness`: map the device's 0..=255 brightness back to a
+/// 0..=100 percentage, rounded. Used by the tooltip so it reports the same unit the
+/// brightness menu offers rather than the raw register value (0..=255).
+pub fn brightness_to_percent(brightness: u8) -> u8 {
+    ((brightness as u16 * 100 + 127) / 255) as u8
+}
+
 impl DeviceState {
     /// Read the device's *actual* current state. Used by the Mirror refresh to keep
     /// the tray display honest. This is read-only: callers must treat the result as
@@ -239,6 +246,15 @@ mod tests {
             let b = percent_to_brightness(p);
             assert!(b >= prev, "brightness must not decrease as percent rises");
             prev = b;
+        }
+    }
+
+    #[test]
+    fn brightness_percent_round_trips_on_menu_steps() {
+        // The tooltip converts raw->percent; the menu converts percent->raw. For the
+        // 10% menu steps the round trip must land back on the same percent.
+        for p in (0u8..=100).step_by(10) {
+            assert_eq!(brightness_to_percent(percent_to_brightness(p)), p);
         }
     }
 
