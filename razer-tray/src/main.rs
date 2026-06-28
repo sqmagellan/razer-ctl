@@ -127,10 +127,11 @@ fn main() -> Result<()> {
     // this changes (new input), so polling follows your activity and stops when you
     // stop touching the machine. None = not yet polled / non-Windows (always refresh).
     let mut last_polled_input_tick: Option<u32> = None;
-    // Tracks the last-seen console display power state, to drive the always-on
-    // backlight gate only on transitions.
+    // Throttles the always-on keep-alive: while "keyboard always-on" is enabled and the
+    // display is on, we touch the device every few seconds to re-brighten the backlight
+    // (the EC fades it after ~4s idle). This records the last keep-alive tick.
     #[cfg(target_os = "windows")]
-    let mut last_display_on = true;
+    let mut last_keepalive_timestamp = std::time::Instant::now();
     // Tracks wall-clock between event-loop ticks. The loop ticks ~every second;
     // a gap far larger than that means the process was suspended (system sleep),
     // which we use as a cheap, API-free "resumed from sleep" signal.
@@ -139,6 +140,15 @@ fn main() -> Result<()> {
     // loop through the default start up sequence to initialise the device.
     for element in device.info().init_cmds {
         command::send_command(&device, *element, &[0, 0, 0, 0])?;
+    }
+
+    // Ensure the keyboard is in Normal (hardware) device mode, never Razer "driver mode".
+    // The 0x0004 command's Enable value (0x03) is driver mode, which hands key handling to
+    // a host driver and disables the EC's native Fn media keys (brightness/volume/kbd
+    // backlight). A previous build used it for "always-on"; we never enter it -- always-on
+    // is a Normal-mode keep-alive (see the keep-alive block in the event loop below).
+    if let Err(e) = command::set_lights_always_on(&device, LightsAlwaysOn::Disable) {
+        log::warn!("could not force Normal device mode: {:?}", e);
     }
 
     // Install a low-level keyboard hook used to refresh the tooltip on keypress.
@@ -220,35 +230,13 @@ fn main() -> Result<()> {
                 state.update(&mut tray_icon, new_device_state, &device)?;
             }
 
-            // Resume-from-sleep reassert. The event loop is frozen while the
-            // machine sleeps, so a tick gap far larger than our ~1s cadence means
-            // we just woke. Synapse (and sometimes firmware) re-assert their own
-            // state on resume, so when Enforce is on we immediately re-assert ours
-            // rather than waiting for the next 10s enforce poll. Brightness is left
-            // alone (enforce_to omits it) so a pre-sleep Fn setting isn't clobbered.
+            // Resume-from-sleep reassert. The event loop is frozen while the machine
+            // sleeps, so a tick gap far larger than our ~1s cadence means we just woke.
+            // When Enforce is on, re-assert immediately rather than waiting for the next
+            // poll. (The always-on keep-alive needs no resume handling -- it simply
+            // resumes ticking, and brightness is left to the Fn-key adopt path.)
             if since_last_tick > std::time::Duration::from_secs(30) {
                 log::info!("resume detected (tick gap {:?})", since_last_tick);
-                // We drop the firmware always-on flag on suspend (platform::power_wnd_proc)
-                // so the backlight doesn't burn through sleep. The display-off transition
-                // the gate below would normally react to was missed while the loop was
-                // frozen, so restore the flag to the user's intent here -- independent of
-                // enforce -- and resync the gate's last-seen display state so it doesn't
-                // also fire.
-                #[cfg(target_os = "windows")]
-                {
-                    let display_on = platform::DISPLAY_ON.load(Ordering::Relaxed);
-                    last_display_on = display_on;
-                    if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable
-                        && display_on
-                    {
-                        match command::set_lights_always_on(&device, LightsAlwaysOn::Enable) {
-                            Ok(()) => log::info!("resume: restored keyboard always-on"),
-                            Err(e) => log::warn!("resume: restore always-on failed: {:?}", e),
-                        }
-                    }
-                }
-                // Re-assert enforced fields on resume (Synapse/firmware may have reset them
-                // while asleep); brightness is intentionally left alone by enforce_to.
                 if state.enforce {
                     log::info!("re-asserting enforced state after resume");
                     if let Err(e) = state.device_state.enforce_to(&device) {
@@ -257,34 +245,21 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Always-on display gate. This unit's firmware keeps the keyboard lit
-            // literally always, so we drop the firmware always-on flag when the
-            // console display powers off (screen-off timeout / display sleep) and
-            // restore it when the display comes back. Driven by the display-state
-            // monitor (GUID_CONSOLE_DISPLAY_STATE) -> acts only on transitions, no
-            // polling. Only touches the flag when the user has always-on enabled;
-            // device_state (the menu's intent) is left unchanged.
+            // Keyboard always-on (opt-in) keep-alive. The keyboard's EC fades the
+            // backlight after ~4s of no input. The ONLY way to keep it lit without Razer
+            // "driver mode" (which disables the Fn media keys) is to touch the device
+            // faster than that fade. Any HID access re-brightens, so we issue a
+            // lightweight brightness *read* (writes nothing -> never fights the Fn
+            // brightness keys) every few seconds while always-on is enabled and the
+            // display is on. It naturally stops while the display sleeps and while the
+            // system is suspended (the loop is frozen), so the backlight goes dark then.
             #[cfg(target_os = "windows")]
+            if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable
+                && platform::DISPLAY_ON.load(Ordering::Relaxed)
+                && now > last_keepalive_timestamp + std::time::Duration::from_secs(3)
             {
-                let display_on = platform::DISPLAY_ON.load(Ordering::Relaxed);
-                if display_on != last_display_on {
-                    last_display_on = display_on;
-                    if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable {
-                        let effective = if display_on {
-                            LightsAlwaysOn::Enable
-                        } else {
-                            LightsAlwaysOn::Disable
-                        };
-                        match command::set_lights_always_on(&device, effective) {
-                            Ok(()) => log::info!(
-                                "display {} -> always-on {:?}",
-                                if display_on { "on" } else { "off" },
-                                effective
-                            ),
-                            Err(e) => log::warn!("display-gate: set_lights_always_on failed: {:?}", e),
-                        }
-                    }
-                }
+                last_keepalive_timestamp = now;
+                let _ = command::get_keyboard_brightness(&device);
             }
 
             // Mirror: refresh the displayed device state (tooltip/icon) so it's fresh
@@ -373,11 +348,11 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Always-on backlight is handled by the firmware flag set in apply()
-            // (command::set_lights_always_on), so there is no software heartbeat:
-            // the keyboard stays lit until the display/system powers it down, with
-            // zero polling. (A previous iteration polled every 5s gated on idle,
-            // which incorrectly let the backlight time out while merely idle.)
+            // Always-on backlight is the Normal-mode keep-alive above (a periodic read
+            // that re-brightens the EC's idle-fade). We deliberately do NOT use the
+            // firmware "device mode" flag for it -- driver mode disables the Fn media
+            // keys. When always-on is off there's no polling: the keyboard fades/off
+            // naturally and the Fn keys behave normally.
 
             // Update fan RPM and tooltip whenever a key is pressed, since keypresses
             // already turn on the backlight; piggybacking here adds no idle-time cost.

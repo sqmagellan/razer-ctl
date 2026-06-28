@@ -135,17 +135,20 @@ impl DeviceState {
 
     pub fn apply(&self, device: &impl HidTransport) -> Result<()> {
         self.apply_perf_fan_logo(device)?;
-        command::set_lights_always_on(device, self.lights_mode.always_on)?;
+        // NB: always-on is deliberately NOT applied here. It is the Razer "device mode"
+        // command (0x0004); Enable == driver mode, which disables the keyboard's native
+        // Fn media keys (brightness/volume). The tray keeps the device in Normal mode and
+        // implements "keyboard always-on" as a Normal-mode keep-alive instead.
         command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness)?;
         command::set_battery_care(device, self.battery_care)
     }
 
     /// Re-assert the "enforced" subset of settings -- perf mode, fan, logo, and
-    /// battery care -- WITHOUT touching keyboard brightness or lights-always-on.
-    /// This is what the opt-in Enforce mode uses to win a tug-of-war with Synapse.
-    /// Brightness is excluded so it stays on the adopt path (Fn keys keep working);
-    /// always-on is excluded because it's owned by the display-state gate (it gets
-    /// dropped while the display is off). It's exactly apply() minus those two writes.
+    /// battery care -- WITHOUT touching keyboard brightness. This is what the opt-in
+    /// Enforce mode uses to win a tug-of-war with Synapse. Brightness is excluded so it
+    /// stays on the adopt path (Fn keys keep working). It's exactly apply() minus the
+    /// brightness write. (always-on isn't a device write at all -- it's a Normal-mode
+    /// keep-alive in the tray -- so there's nothing here to exclude for it.)
     pub fn enforce_to(&self, device: &impl HidTransport) -> Result<()> {
         self.apply_perf_fan_logo(device)?;
         command::set_battery_care(device, self.battery_care)
@@ -153,10 +156,10 @@ impl DeviceState {
 
     /// Whether the *enforced* fields -- perf mode, fan, logo, battery care -- of `self`
     /// (typically a just-read `observed` state) differ from `intended`. This is exactly
-    /// the subset `enforce_to` writes: keyboard brightness and lights-always-on are
-    /// excluded on purpose (brightness rides the Fn-key adopt path; always-on is owned
-    /// by the display gate), so drift in those must NOT trigger a re-assert. The tray's
-    /// Enforce loop calls this before re-asserting against Synapse.
+    /// the subset `enforce_to` writes: keyboard brightness is excluded on purpose (it
+    /// rides the Fn-key adopt path), and always-on isn't a device write, so drift in
+    /// those must NOT trigger a re-assert. The tray's Enforce loop calls this before
+    /// re-asserting against Synapse.
     pub fn enforced_fields_differ(&self, intended: &DeviceState) -> bool {
         self.perf_mode != intended.perf_mode
             || self.fan_speed != intended.fan_speed
@@ -389,25 +392,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_writes_brightness_alwayson_and_battery_but_enforce_skips_two() {
-        // The documented contract: apply() writes brightness (0x0303), lights-always-on
-        // (0x0004) and battery care (0x0712); enforce_to() writes battery but must NOT
-        // touch brightness or always-on (those ride other paths).
+    fn apply_writes_brightness_and_battery_but_not_device_mode_or_enforce_brightness() {
+        // The documented contract: apply() writes brightness (0x0303) and battery care
+        // (0x0712) but must NOT write device mode (0x0004) -- driver mode breaks the Fn
+        // keys, so always-on is a Normal-mode keep-alive instead. enforce_to() writes
+        // battery but must NOT touch brightness.
         let state = DeviceState::default(); // Performance / Auto / logo Off -> simple write path
 
         let apply_mock = MockTransport::echo();
         state.apply(&apply_mock).unwrap();
         let applied: Vec<u16> = apply_mock.sent().iter().map(|(c, _)| *c).collect();
         assert!(applied.contains(&0x0303), "apply writes keyboard brightness");
-        assert!(applied.contains(&0x0004), "apply writes lights-always-on");
         assert!(applied.contains(&0x0712), "apply writes battery care");
+        assert!(!applied.contains(&0x0004), "apply must NOT set device mode (driver mode breaks Fn keys)");
 
         let enforce_mock = MockTransport::echo();
         state.enforce_to(&enforce_mock).unwrap();
         let enforced: Vec<u16> = enforce_mock.sent().iter().map(|(c, _)| *c).collect();
         assert!(enforced.contains(&0x0712), "enforce_to still asserts battery care");
         assert!(!enforced.contains(&0x0303), "enforce_to must not touch brightness");
-        assert!(!enforced.contains(&0x0004), "enforce_to must not touch lights-always-on");
+        assert!(!enforced.contains(&0x0004), "enforce_to must not touch device mode");
     }
 
     #[test]

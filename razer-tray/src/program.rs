@@ -112,7 +112,10 @@ impl ProgramState {
         if s.lights_mode.keyboard_brightness > 0 {
             write!(&mut info, " · 🔆 {}%", brightness_to_percent(s.lights_mode.keyboard_brightness))?;
         }
-        if s.lights_mode.always_on == LightsAlwaysOn::Enable {
+        // 💡 reflects the always-on *intent* (the keep-alive), not the device-mode
+        // read in `observed` -- we keep the device in Normal mode, so that read is
+        // always Disable.
+        if self.device_state.lights_mode.always_on == LightsAlwaysOn::Enable {
             write!(&mut info, " · 💡")?;
         }
 
