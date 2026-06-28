@@ -210,12 +210,12 @@ fn main() -> Result<()> {
             }
 
             state.ac_power = platform::get_power_state()?;
-            if state.ac_power && state.device_state != state.ac_state {
-                let new_device_state = state.ac_state;
-                log::info!("new_device_state 3 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
-            } else if !state.ac_power && state.device_state != state.battery_state {
-                let new_device_state = state.battery_state;
+            if let Some(new_device_state) = state::profile_for_power(
+                state.ac_power,
+                &state.device_state,
+                &state.ac_state,
+                &state.battery_state,
+            ) {
                 log::info!("new_device_state 3 {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, &device)?;
             }
@@ -323,14 +323,7 @@ fn main() -> Result<()> {
                     // whenever you're active (incl. right after you return to the
                     // machine); the resume-from-sleep reassert covers the wake case.
                     if state.enforce {
-                        let drifted = {
-                            let o = &state.observed;
-                            let d = &state.device_state;
-                            o.perf_mode != d.perf_mode
-                                || o.fan_speed != d.fan_speed
-                                || o.lights_mode.logo_mode != d.lights_mode.logo_mode
-                                || o.battery_care != d.battery_care
-                        };
+                        let drifted = state.observed.enforced_fields_differ(&state.device_state);
                         if drifted {
                             log::info!("enforce: device drifted; re-asserting intended state");
                             if let Err(e) = state.device_state.enforce_to(&device) {

@@ -10,6 +10,7 @@ pub mod device;
 
 pub mod feature;
 pub mod matching;
+pub mod state;
 pub mod transport;
 pub mod types;
 
