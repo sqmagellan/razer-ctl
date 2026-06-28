@@ -8,6 +8,7 @@ pub mod device;
 
 pub mod feature;
 pub mod matching;
+pub mod transport;
 pub mod types;
 
 pub mod descriptor;

@@ -1,5 +1,6 @@
 use crate::descriptor::{Descriptor, SUPPORTED};
 use crate::packet::Packet;
+use crate::transport::HidTransport;
 
 use anyhow::{anyhow, Context, Result};
 use std::{thread, time};
@@ -150,5 +151,15 @@ impl Device {
                 pid_list
             ),
         }
+    }
+}
+
+impl HidTransport for Device {
+    /// Thin adapter: delegate to the inherent `Device::send` (the real hidapi
+    /// exchange). Method resolution prefers the inherent method, so this is not
+    /// recursive. Lets `command::*` accept any `HidTransport` while production code
+    /// keeps passing a `Device` unchanged.
+    fn send(&self, packet: Packet) -> Result<Packet> {
+        Device::send(self, packet)
     }
 }
