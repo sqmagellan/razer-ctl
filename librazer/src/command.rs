@@ -237,3 +237,159 @@ pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result
         .starts_with(args));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::MockTransport;
+
+    /// Build a canned-response packet whose args buffer begins with `args`
+    /// (everything past that stays zero), mimicking a register read.
+    fn reply(args: &[u8]) -> Packet {
+        let mut p = Packet::new(0, &[]);
+        p.set_args(args);
+        p
+    }
+
+    // ---- write path: the bytes we put on the wire -------------------------------
+
+    #[test]
+    fn set_perf_mode_writes_both_fan_zones() {
+        let mock = MockTransport::echo();
+        set_perf_mode(&mock, PerfMode::Performance).unwrap();
+        // One 0x0d02 per zone, carrying [enable, zone, perf=2, fan=Auto=0].
+        assert_eq!(
+            mock.sent(),
+            vec![
+                (0x0d02, vec![0x01, 1, PerfMode::Performance as u8, FanMode::Auto as u8]),
+                (0x0d02, vec![0x01, 2, PerfMode::Performance as u8, FanMode::Auto as u8]),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_keyboard_brightness_emits_keyboard_payload() {
+        let mock = MockTransport::echo();
+        set_keyboard_brightness(&mock, 128).unwrap();
+        assert_eq!(mock.sent(), vec![(0x0303, vec![1, 5, 128])]);
+    }
+
+    #[test]
+    fn set_battery_care_emits_single_byte_register() {
+        let mock = MockTransport::echo();
+        set_battery_care(&mock, BatteryCare::Percent80).unwrap();
+        assert_eq!(mock.sent(), vec![(0x0712, vec![BatteryCare::Percent80 as u8])]);
+    }
+
+    #[test]
+    fn set_logo_mode_off_only_touches_power_register() {
+        // Off must not send a logo-*mode* (0x0302) write, just power off (0x0300).
+        let mock = MockTransport::echo();
+        set_logo_mode(&mock, LogoMode::Off).unwrap();
+        assert_eq!(mock.sent(), vec![(0x0300, vec![1, 4, 0])]);
+    }
+
+    #[test]
+    fn set_logo_mode_breathing_sets_mode_then_power() {
+        let mock = MockTransport::echo();
+        set_logo_mode(&mock, LogoMode::Breathing).unwrap();
+        assert_eq!(
+            mock.sent(),
+            vec![(0x0302, vec![1, 4, 2]), (0x0300, vec![1, 4, 1])]
+        );
+    }
+
+    // ---- read path: parsing the firmware's response -----------------------------
+
+    #[test]
+    fn get_perf_mode_parses_matching_zones() {
+        // Both zones agree -> the parsed (PerfMode, FanMode) is returned.
+        let mock = MockTransport::with_responder(|_| {
+            reply(&[0, 0, PerfMode::Custom as u8, FanMode::Manual as u8])
+        });
+        assert_eq!(get_perf_mode(&mock).unwrap(), (PerfMode::Custom, FanMode::Manual));
+    }
+
+    #[test]
+    fn get_perf_mode_errors_when_zones_disagree() {
+        // Respond per zone (args[1]) so the two reads conflict -> ensure! trips.
+        let mock = MockTransport::with_responder(|req| {
+            let zone = req.get_args()[1];
+            let perf = if zone == 1 { PerfMode::Performance } else { PerfMode::Silent };
+            reply(&[0, 0, perf as u8, FanMode::Auto as u8])
+        });
+        assert!(get_perf_mode(&mock).is_err());
+    }
+
+    #[test]
+    fn get_keyboard_brightness_reads_third_arg() {
+        // args[1] must be the keyboard LED id (5); the value lives in args[2].
+        let mock = MockTransport::with_responder(|_| reply(&[1, 5, 200]));
+        assert_eq!(get_keyboard_brightness(&mock).unwrap(), 200);
+    }
+
+    #[test]
+    fn get_keyboard_brightness_rejects_wrong_led_id() {
+        let mock = MockTransport::with_responder(|_| reply(&[1, 4, 200]));
+        assert!(get_keyboard_brightness(&mock).is_err());
+    }
+
+    #[test]
+    fn get_battery_care_decodes_wire_byte() {
+        let mock = MockTransport::with_responder(|_| reply(&[BatteryCare::Percent80 as u8]));
+        assert_eq!(get_battery_care(&mock).unwrap(), BatteryCare::Percent80);
+    }
+
+    #[test]
+    fn get_fan_rpm_scales_register_by_100() {
+        // Register holds rpm/100; getter must rescale. args[1] must echo the zone.
+        let mock = MockTransport::with_responder(|req| {
+            let zone = req.get_args()[1];
+            reply(&[0, zone, 30])
+        });
+        assert_eq!(get_fan_rpm(&mock, FanZone::Zone1).unwrap(), 3000);
+    }
+
+    #[test]
+    fn get_logo_mode_reports_off_without_reading_mode() {
+        // Power register (0x0380) reads 0 -> Off, and the mode register is never read.
+        let mock = MockTransport::with_responder(|_| reply(&[1, 4, 0]));
+        assert_eq!(get_logo_mode(&mock).unwrap(), LogoMode::Off);
+        assert_eq!(mock.sent(), vec![(0x0380, vec![1, 4, 0])]);
+    }
+
+    #[test]
+    fn get_logo_mode_reads_mode_when_powered() {
+        // Power on (0x0380 -> 1), then mode register (0x0382 -> 2) decodes to Breathing.
+        let mock = MockTransport::with_responder(|req| match req.command() {
+            0x0380 => reply(&[1, 4, 1]),
+            0x0382 => reply(&[1, 4, 2]),
+            other => panic!("unexpected command {other:#06x}"),
+        });
+        assert_eq!(get_logo_mode(&mock).unwrap(), LogoMode::Breathing);
+    }
+
+    // ---- a guard that combines a read precondition with a write -----------------
+
+    #[test]
+    fn set_cpu_boost_requires_custom_perf_mode() {
+        // _set_boost first reads perf mode and demands Custom before writing 0x0d07.
+        let custom = MockTransport::with_responder(|req| match req.command() {
+            0x0d82 => reply(&[0, 0, PerfMode::Custom as u8, FanMode::Auto as u8]),
+            _ => reply(&[0x01, Cluster::Cpu as u8, CpuBoost::Boost as u8]),
+        });
+        set_cpu_boost(&custom, CpuBoost::Boost).unwrap();
+        assert!(custom
+            .sent()
+            .iter()
+            .any(|(cmd, args)| *cmd == 0x0d07 && args == &[0x01, Cluster::Cpu as u8, CpuBoost::Boost as u8]));
+
+        // Not in Custom mode -> the boost write must be refused.
+        let balanced = MockTransport::with_responder(|_| {
+            reply(&[0, 0, PerfMode::Balanced as u8, FanMode::Auto as u8])
+        });
+        assert!(set_cpu_boost(&balanced, CpuBoost::Boost).is_err());
+        assert!(!balanced.sent().iter().any(|(cmd, _)| *cmd == 0x0d07));
+    }
+}
+

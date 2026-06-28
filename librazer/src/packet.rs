@@ -68,6 +68,12 @@ impl Packet {
         ((self.command_class as u16) << 8) | self.command_id as u16
     }
 
+    /// Logical argument length (the `data_size` field). The full args buffer is
+    /// always 80 bytes; this is how many of them are meaningful for this packet.
+    pub fn data_len(&self) -> usize {
+        self.data_size as usize
+    }
+
     pub fn ensure_matches_report(&self, report: &Packet) -> Result<()> {
         ensure!(
             (report.command_class, report.command_id, report.id)

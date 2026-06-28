@@ -65,9 +65,8 @@ impl MockTransport {
 impl HidTransport for MockTransport {
     fn send(&self, packet: Packet) -> Result<Packet> {
         let response = (self.responder)(&packet);
-        self.sent
-            .borrow_mut()
-            .push((packet.command(), packet.get_args().to_vec()));
+        let args = packet.get_args()[..packet.data_len()].to_vec();
+        self.sent.borrow_mut().push((packet.command(), args));
         Ok(response)
     }
 }
