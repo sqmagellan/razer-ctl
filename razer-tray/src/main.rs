@@ -35,7 +35,7 @@ fn init_logging_to_file() -> Result<()> {
         roll::delete::DeleteRoller, trigger::size::SizeTrigger, CompoundPolicy,
     };
     let policy = CompoundPolicy::new(
-        Box::new(SizeTrigger::new(50 << 20)),
+        Box::new(SizeTrigger::new(10 << 20)),
         Box::new(DeleteRoller::new()),
     );
 
@@ -50,7 +50,10 @@ fn init_logging_to_file() -> Result<()> {
         .build(
             log4rs::config::Root::builder()
                 .appender("logfile")
-                .build(log::LevelFilter::Trace),
+                // Info covers every meaningful event (startup, device detect, menu actions,
+                // enforce, profile switches, display state); Trace adds HID-level noise and
+                // is only useful while debugging. Bounded to 10 MiB, wiped on rollover.
+                .build(log::LevelFilter::Info),
         )?;
 
     log4rs::init_config(config)?;

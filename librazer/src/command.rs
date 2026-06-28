@@ -1,3 +1,21 @@
+//! Razer HID command layer.
+//!
+//! Each command is a 16-bit id, `(command_class << 8) | command_id`, sent as a feature
+//! report over [`HidTransport`]. Setting the `0x80` bit on the command_id is the "get"
+//! mirror of the corresponding "set" (e.g. `0x0303` set keyboard brightness / `0x0383` get;
+//! `0x0004` set device mode / `0x0084` get). Command classes used here: `0x00` standard/
+//! device, `0x03` lighting/LED, `0x07` battery, `0x0d` performance/fan.
+//!
+//! ⚠️ DEVICE MODE (`0x0004`) IS NOT A LIGHTING COMMAND -- it's the Razer "set device mode"
+//! command: arg `0x00` = Normal (hardware) mode, `0x03` = Driver mode. In Driver mode the
+//! keyboard hands key/light handling to a host driver (Synapse) and the EC stops emitting its
+//! native Fn media keys -- screen brightness, volume, AND keyboard brightness all go dead.
+//! It was historically mislabeled "lights always on" because Driver mode also skips the
+//! firmware's idle dimming (so the backlight stays lit). DO NOT use Driver mode to keep the
+//! backlight on: keep the device in Normal mode and re-brighten with a periodic read instead
+//! (razer-tray's always-on keep-alive). Confirmed against OpenRazer's
+//! `razer_chroma_standard_set_device_mode` (report `0x00/0x04`, modes `0x00`/`0x03`).
+
 use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
@@ -212,10 +230,16 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
     Ok(())
 }
 
+/// Read the Razer **device mode** (the `0x0084` get-mirror of `0x0004`). See the module
+/// docs: `Disable` (0x00) is Normal/hardware mode, `Enable` (0x03) is Driver mode.
 pub fn get_lights_always_on(device: &impl HidTransport) -> Result<LightsAlwaysOn> {
     device.send(Packet::new(0x0084, &[0, 0]))?.get_args()[0].try_into()
 }
 
+/// Set the Razer **device mode** -- this is the `0x0004` command, NOT a lighting toggle.
+/// `LightsAlwaysOn::Disable` (0x00) = Normal/hardware mode; `Enable` (0x03) = Driver mode,
+/// which disables the EC's native Fn media keys (see module docs). The tray only ever sets
+/// Normal mode; "keyboard always-on" is a Normal-mode keep-alive, not Driver mode.
 pub fn set_lights_always_on(device: &impl HidTransport, lights_always_on: LightsAlwaysOn) -> Result<()> {
     let args = &[lights_always_on as u8, 0];
     ensure!(device

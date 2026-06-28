@@ -62,6 +62,10 @@ pub enum LogoMode {
     Static,
 }
 
+/// Razer **device mode** (the `0x0004` command), misleadingly named for historical reasons.
+/// `Enable` (0x03) is Driver mode and `Disable` (0x00) is Normal mode -- this is NOT a backlight
+/// toggle. Driver mode disables the keyboard's native Fn media keys; see `command` module docs.
+/// The tray keeps the device in Normal mode and does "always-on" via a keep-alive instead.
 #[derive(EnumString, ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum LightsAlwaysOn {
     Enable = 0x03,
