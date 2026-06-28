@@ -148,6 +148,9 @@ fn main() -> Result<()> {
     // Windows reclaims low-level hooks automatically when the process exits.
     #[cfg(target_os = "windows")]
     let _keyboard_hook = unsafe {
+        // SAFETY: SetWindowsHookExW with a valid extern "system" proc and a thread id of
+        // 0 (all threads) for a WH_KEYBOARD_LL hook. We keep the returned HHOOK for the
+        // process lifetime; Windows reclaims low-level hooks automatically on exit.
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(platform::keyboard_hook_proc), None, 0) {
             Ok(hook) => Some(hook),

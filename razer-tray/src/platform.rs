@@ -35,6 +35,8 @@ use windows::Win32::System::Threading::{
 #[cfg(target_os = "windows")]
 pub fn get_power_state() -> Result<bool> {
     let mut ac_power: bool = true;
+    // SAFETY: `status` is a fully-default-initialized SYSTEM_POWER_STATUS; we pass a
+    // valid &mut to it and GetSystemPowerStatus only writes through that pointer.
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         match GetSystemPowerStatus(&mut status) {
@@ -231,6 +233,9 @@ pub unsafe extern "system" fn keyboard_hook_proc(
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HHOOK};
+    // SAFETY: a WH_KEYBOARD_LL hook proc invoked by the OS. The body only touches an
+    // atomic (cannot unwind in practice), and we always forward to the next hook via
+    // CallNextHookEx as the API requires; not doing so would break the global hook chain.
     if code >= 0 && (wparam.0 == 0x0100 || wparam.0 == 0x0104) {
         KEY_PRESSED.store(true, Ordering::Relaxed);
     }
@@ -249,6 +254,8 @@ pub unsafe extern "system" fn keyboard_hook_proc(
 #[cfg(target_os = "windows")]
 pub fn last_input_tick() -> Option<u32> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    // SAFETY: `info` is initialized with the cbSize the API contract requires; we pass
+    // a valid &mut and only read dwTime back after a successful (TRUE) return.
     unsafe {
         let mut info = LASTINPUTINFO {
             cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -285,6 +292,8 @@ unsafe extern "system" fn power_wnd_proc(
     };
 
     if msg == WM_POWERBROADCAST && wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
+        // SAFETY: for a PBT_POWERSETTINGCHANGE message Windows guarantees lparam points
+        // to a POWERBROADCAST_SETTING valid for the duration of this call; we only read it.
         let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
         if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
             // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
@@ -303,6 +312,9 @@ unsafe extern "system" fn power_wnd_proc(
 /// the thread exits, leaving DISPLAY_ON at its fail-open default of true.
 #[cfg(target_os = "windows")]
 pub fn spawn_display_state_monitor() {
+    // SAFETY: a self-contained Win32 message-only-window setup on its own thread. The
+    // window class name is 'static; the class/window outlive the message loop below;
+    // power_wnd_proc is a valid extern "system" proc. The thread blocks in GetMessageW.
     std::thread::spawn(|| unsafe {
         use windows::core::w;
         use windows::Win32::Foundation::{HINSTANCE, HWND};
@@ -369,6 +381,8 @@ pub fn spawn_display_state_monitor() {
 
 #[cfg(target_os = "windows")]
 pub fn efficiency_mode() {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle valid for this call; the
+    // throttling struct lives on the stack across the call and we pass its exact size.
     unsafe {
         let handle: HANDLE = GetCurrentProcess();
 

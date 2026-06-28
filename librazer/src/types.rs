@@ -209,3 +209,103 @@ impl TryFrom<u8> for MaxFanSpeedMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // BatteryCare::from_percent is a rounding table that's easy to break silently.
+    // Lock the bucket boundaries (50/55/.../80, then 100=Disable).
+    #[test]
+    fn battery_care_from_percent_boundaries() {
+        let cases = [
+            (50, BatteryCare::Percent50),
+            (52, BatteryCare::Percent50), // top of the 50% bucket
+            (53, BatteryCare::Percent55), // bottom of the 55% bucket
+            (80, BatteryCare::Percent80),
+            (90, BatteryCare::Percent80), // 78..=90 still maps to 80%
+            (91, BatteryCare::Disable),   // 91..=100 disables the limit
+            (100, BatteryCare::Disable),
+        ];
+        for (pct, expected) in cases {
+            assert_eq!(
+                BatteryCare::from_percent(pct).unwrap(),
+                expected,
+                "from_percent({pct})"
+            );
+        }
+        // Out of range errors (only > 100 is rejected; the u8 max is 255).
+        assert!(BatteryCare::from_percent(101).is_err());
+        assert!(BatteryCare::from_percent(255).is_err());
+    }
+
+    #[test]
+    fn battery_care_percent_round_trips() {
+        // For every canonical option, percent -> enum -> percent is stable.
+        for mode in [
+            BatteryCare::Percent50,
+            BatteryCare::Percent55,
+            BatteryCare::Percent60,
+            BatteryCare::Percent65,
+            BatteryCare::Percent70,
+            BatteryCare::Percent75,
+            BatteryCare::Percent80,
+            BatteryCare::Disable,
+        ] {
+            let pct = mode.to_percent();
+            assert_eq!(BatteryCare::from_percent(pct).unwrap(), mode, "round-trip {pct}%");
+        }
+    }
+
+    #[test]
+    fn battery_care_wire_value_round_trips() {
+        // The enum's u8 discriminant is the on-wire byte; try_from must invert it.
+        for mode in [
+            BatteryCare::Percent50,
+            BatteryCare::Percent80,
+            BatteryCare::Disable,
+        ] {
+            assert_eq!(BatteryCare::try_from(mode as u8).unwrap(), mode);
+        }
+        assert!(BatteryCare::try_from(0xFF).is_err());
+    }
+
+    #[test]
+    fn enum_wire_values_round_trip() {
+        // Each fieldless enum's discriminant is its protocol byte; the TryFrom impls
+        // must round-trip every variant so a renumber can't silently desync.
+        for v in [
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Custom,
+            PerfMode::Silent,
+            PerfMode::Battery,
+            PerfMode::Hyperboost,
+        ] {
+            assert_eq!(PerfMode::try_from(v as u8).unwrap(), v);
+        }
+        for v in [CpuBoost::Low, CpuBoost::Medium, CpuBoost::High, CpuBoost::Boost, CpuBoost::Undervolt] {
+            assert_eq!(CpuBoost::try_from(v as u8).unwrap(), v);
+        }
+        for v in [GpuBoost::Low, GpuBoost::Medium, GpuBoost::High] {
+            assert_eq!(GpuBoost::try_from(v as u8).unwrap(), v);
+        }
+        for v in [FanMode::Auto, FanMode::Manual] {
+            assert_eq!(FanMode::try_from(v as u8).unwrap(), v);
+        }
+        for v in [LightsAlwaysOn::Enable, LightsAlwaysOn::Disable] {
+            assert_eq!(LightsAlwaysOn::try_from(v as u8).unwrap(), v);
+        }
+        for v in [MaxFanSpeedMode::Enable, MaxFanSpeedMode::Disable] {
+            assert_eq!(MaxFanSpeedMode::try_from(v as u8).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn unknown_wire_values_are_rejected() {
+        assert!(PerfMode::try_from(99).is_err());
+        assert!(CpuBoost::try_from(99).is_err());
+        assert!(GpuBoost::try_from(99).is_err());
+        assert!(FanMode::try_from(99).is_err());
+    }
+}
