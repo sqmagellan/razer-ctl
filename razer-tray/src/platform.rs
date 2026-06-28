@@ -155,10 +155,12 @@ pub fn gpu_taskkill() -> Result<()> {
 
         // Skip the compositor/shell (on this hardware nvidia-smi lists dwm/explorer/
         // shell hosts as GPU users) and any process whose name nvidia-smi couldn't
-        // read ("Insufficient Permissions") -- killing by an unknown name is unsafe.
-        if name == "Insufficient Permissions" || librazer::process_guard::is_protected_process(name)
-        {
-            log::info!("Skipping protected process: {} ({})", pid, name);
+        // read -- it emits a bracketed placeholder like "[Insufficient Permissions]"
+        // for protected/elevated processes, and killing a PID whose name we can't
+        // even read is unsafe.
+        let unreadable = name.starts_with('[') || name.eq_ignore_ascii_case("Insufficient Permissions");
+        if unreadable || librazer::process_guard::is_protected_process(name) {
+            log::info!("Skipping protected/unreadable process: {} ({})", pid, name);
         } else {
             pids_to_kill.push((pid, name.to_string()));
         }
@@ -174,6 +176,15 @@ pub fn gpu_taskkill() -> Result<()> {
 
     for (pid, name) in pids_to_kill {
         if let Some(process) = sys.process(sysinfo::Pid::from(pid as usize)) {
+            // Defense in depth: trust the OS-resolved name, not nvidia-smi's. The
+            // OS can read names (e.g. "dwm.exe") that nvidia-smi reports only as
+            // "[Insufficient Permissions]", so this catches protected processes the
+            // parse-loop guard above couldn't identify by name.
+            let real_name = process.name();
+            if librazer::process_guard::is_protected_process(real_name) {
+                log::info!("Skipping protected process: {} ({})", pid, real_name);
+                continue;
+            }
             log::info!("Attempting to kill process {} ({})", pid, name);
             if process.kill_with(Signal::Kill).unwrap_or(false) {
                 log::info!("Successfully killed PID {}", pid);
