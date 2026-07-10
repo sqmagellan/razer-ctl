@@ -1,0 +1,14 @@
+# Pin the toolchain so the build is self-describing across the iMac (cargo xwin) and the
+# native Blade (2B) build hosts.
+#
+# Channel is "stable" (NOT a numeric version) on purpose: this repo is built in an
+# environment where only the `stable` toolchain is installed and cargo/rustup network fetch
+# is sandboxed offline, so a numeric pin like "1.96.0" would trigger an offline-breaking
+# toolchain download. "stable" + the components/targets we already have installed keeps the
+# build reproducible-enough without any network. If exact version reproducibility is ever
+# needed, bump `channel` to a specific version from a networked terminal (where rustup can
+# fetch it) rather than here.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-pc-windows-msvc"]
