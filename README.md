@@ -23,6 +23,9 @@ and only writes to the device when you ask it to.
   (min)/(max) — instead of dead 0/500 steps and an out-of-range 5500.
 - **Keyboard brightness** — 0–100% in 10% steps; the exact value shows in the tooltip.
 - **Logo lighting** — off / static / breathing (its own light zone).
+- **Keyboard lighting** — Off / Spectrum / Wave / Breathing: the EC's built-in animated effects, over
+  the same HID path in Normal mode, so the Fn keys keep working. No color picker by design — arbitrary
+  color needs Razer driver mode (what Synapse does), which kills the Fn keys (see Quirks).
 - **Charge limit** — 50–80% in 5% steps, or off (100%).
 - **AC vs battery profiles** — separate profiles, switched automatically when you plug/unplug.
 - **App profiles** — auto-apply a perf mode while a named app is running, then fall back to the
@@ -47,6 +50,22 @@ Drop `razer-tray.exe` somewhere (e.g. `C:\Program Files\RazerTray\`), run it, an
 service, no Synapse.
 
 ## Changelog
+
+### 2026-07 — keyboard lighting (effects-only)
+All HW-verified on a **single physical unit — a Razer Blade 16 (2023), `RZ09-0483U`, PID `0x029F`**
+(no other model was tested for lighting).
+- **Keyboard RGB effects** — Off / Spectrum / Wave / Breathing, in the tray ("Keyboard lighting"
+  submenu) and CLI (`razer-cli auto kbd-lighting effect <off|spectrum|wave|breathing>`). These are the
+  EC's built-in animated effects (extended-matrix command `0x0f02`, VARSTORE, our native `0x1F`
+  transaction), so they run in Normal mode and the Fn media keys keep working. Write-only *intent*
+  (no getter on this device) — persisted and re-applied like always-on, never read back or reconciled.
+- **No keyboard color, by design.** Arbitrary static/per-key color needs Razer *driver mode*
+  (host-streamed frames — what Synapse does), which disables the Fn media keys. In Normal mode the EC
+  ignores color payloads (falls back to Razer green) and effect-speed parameters (Wave runs at a fixed
+  rate — no slow/fast). Verified across *both* the extended (`0x0f02`) and standard (`0x030a`) matrix
+  families at transactions `0x1F` and `0xFF`, plus the per-key custom-frame path. See Quirks.
+- **`razer-cli … cmd --tx <hex>`** — a transaction-id override on the raw `cmd` path, for protocol
+  debugging (the reference drivers issue some commands at `0xFF` rather than our default `0x1F`).
 
 ### 2026-07 — control, status & self-healing pass
 Landed on top of `0.9.0` (tray stayed `0.9.0`, CLI `0.8.6`); all HW-verified on `0x029F`.
@@ -110,6 +129,20 @@ the highlights:
 
 ## Quirks & limits (the hard-won ones)
 
+- **No arbitrary keyboard color — it needs driver mode, which we refuse.** You can pick a keyboard
+  *effect* (Spectrum/Wave/Breathing/Off) but not a chosen color. On this hardware a static/per-key color
+  is host-driven: the EC only self-animates its built-in effects in Normal mode and *ignores* any color
+  bytes we send (it falls back to Razer brand green — its unparsed-command default). Getting real color
+  means Razer "driver mode" (the host streams frames every tick, which is what Synapse does), and driver
+  mode disables the Fn media keys — the same trap as always-on. HW-verified the color is dropped across
+  both matrix command families (`0x0f02` extended, `0x030a` standard) at both transaction ids (`0x1F`,
+  `0xFF`) and via the custom-frame path, so this is a hardware/design limit, not a missing feature — as
+  observed on the one unit tested (`RZ09-0483U`, `0x029F`). For the same reason effect *speed* isn't
+  adjustable (Wave runs at a fixed EC rate).
+- **Keyboard effect can't be read back.** Chroma is write-only on this device — no getter — so the tray
+  menu reflects the effect *you last set through the app* (persisted intent), not whatever the firmware
+  is actually running. Set an effect outside the app (Synapse, the raw CLI) and the menu won't show it
+  checked; pick it in-app once and it persists + re-applies on launch.
 - **Always-on used to kill every Fn media key — that's why it's a keep-alive now.** The old "always-on"
   was Razer's device-mode command (`0x0004`); Enable is `0x03` = driver mode, which hands key/light
   handling to a host driver and makes the EC ignore the whole Fn layer — screen brightness, volume, and
