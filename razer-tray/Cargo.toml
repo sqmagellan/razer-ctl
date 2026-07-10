@@ -19,7 +19,7 @@ serde = { version = "1.0.197", features = ["derive"] }
 strum = "0.26.1"
 strum_macros = "0.26.1"
 tao = "0.26.0"
-tray-icon = "0.11.3"
+tray-icon = "0.19"
 sysinfo = "0.29"
 single-instance = "=0.1.2"
 

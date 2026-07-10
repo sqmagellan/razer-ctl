@@ -10,11 +10,6 @@ use sysinfo::{ProcessExt, Signal, System, SystemExt};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Set by the low-level keyboard hook; consumed by the event loop to refresh the
-/// tooltip on keypress (keypresses already wake the backlight, so it's free).
-#[cfg(target_os = "windows")]
-pub static KEY_PRESSED: AtomicBool = AtomicBool::new(false);
-
 /// Tracks whether the console display is powered on. Updated by the power-setting
 /// notification handler; read by the event loop to gate the firmware always-on
 /// flag. Starts true (fail-open: keyboard stays lit if we never hear otherwise).
@@ -238,22 +233,6 @@ pub fn gpu_taskkill() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub unsafe extern "system" fn keyboard_hook_proc(
-    code: i32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HHOOK};
-    // SAFETY: a WH_KEYBOARD_LL hook proc invoked by the OS. The body only touches an
-    // atomic (cannot unwind in practice), and we always forward to the next hook via
-    // CallNextHookEx as the API requires; not doing so would break the global hook chain.
-    if code >= 0 && (wparam.0 == 0x0100 || wparam.0 == 0x0104) {
-        KEY_PRESSED.store(true, Ordering::Relaxed);
-    }
-    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
 /// Returns the system-wide "last input" tick (keyboard + mouse) from

@@ -13,7 +13,7 @@ use librazer::{command, device};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
     menu::{MenuEvent, MenuId},
-    TrayIconBuilder, TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 
 use single_instance::SingleInstance;
@@ -152,6 +152,8 @@ fn main() -> Result<()> {
     // a gap far larger than that means the process was suspended (system sleep),
     // which we use as a cheap, API-free "resumed from sleep" signal.
     let mut last_tick_timestamp = std::time::Instant::now();
+    // Throttles the on-hover Mirror refresh (tray-icon Enter/Move events fire rapidly).
+    let mut last_hover_refresh = std::time::Instant::now();
 
     // "Actions" (app-triggered profiles). We scan the process list on a slow cadence
     // (only when rules exist) and remember which rule is currently active so we act on
@@ -175,26 +177,6 @@ fn main() -> Result<()> {
     if let Err(e) = command::set_lights_always_on(&device, LightsAlwaysOn::Disable) {
         log::warn!("could not force Normal device mode: {:?}", e);
     }
-
-    // Install a low-level keyboard hook used to refresh the tooltip on keypress.
-    // If it fails we log and carry on -- it's a nice-to-have, not load-bearing.
-    // We hold the handle for the life of the process: tao's event loop never
-    // returns, so there's no reachable place to call UnhookWindowsHookEx, and
-    // Windows reclaims low-level hooks automatically when the process exits.
-    #[cfg(target_os = "windows")]
-    let _keyboard_hook = unsafe {
-        // SAFETY: SetWindowsHookExW with a valid extern "system" proc and a thread id of
-        // 0 (all threads) for a WH_KEYBOARD_LL hook. We keep the returned HHOOK for the
-        // process lifetime; Windows reclaims low-level hooks automatically on exit.
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(platform::keyboard_hook_proc), None, 0) {
-            Ok(hook) => Some(hook),
-            Err(e) => {
-                log::warn!("Failed to install keyboard hook ({e:?}); keypress tooltip refresh disabled");
-                None
-            }
-        }
-    };
 
     event_loop.run(move |_, _, control_flow| {
         let now = std::time::Instant::now();
@@ -238,10 +220,40 @@ fn main() -> Result<()> {
                 }
             }
 
-            if matches!(tray_channel.try_recv(), Ok(event) if event.click_type == tray_icon::ClickType::Left) {
-                let new_device_state = state.get_next_perf_mode();
-                log::info!("new_device_state 2 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
+            // Tray-icon events (tray-icon 0.14+ enum). Left-click cycles the perf mode;
+            // hover (Enter/Move) refreshes the displayed state on demand -- this is what
+            // replaced the old global keyboard hook + input-gated freshness heuristic: we
+            // now read exactly when you look at the tray. Move fires rapidly, so it's
+            // throttled. A hover means you're actively on the machine (trackpad/mouse), so
+            // the backlight is already awake -- the read can't cause a visible pulse.
+            if let Ok(event) = tray_channel.try_recv() {
+                match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => {
+                        let new_device_state = state.get_next_perf_mode();
+                        log::info!("new_device_state 2 {:?}", new_device_state);
+                        state.update(&mut tray_icon, new_device_state, &device)?;
+                    }
+                    TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. }
+                        if now > last_hover_refresh + std::time::Duration::from_millis(500) =>
+                    {
+                        last_hover_refresh = now;
+                        if let Ok(observed) = DeviceState::read(&device) {
+                            state.observed = observed;
+                        }
+                        if let Ok(fan) = get_fan_rpm(&device) {
+                            state.fan_actual = fan;
+                        }
+                        let _ = tray_icon.set_icon(Some(state.icon()));
+                        if let Ok(tooltip) = state.tooltip() {
+                            let _ = tray_icon.set_tooltip(Some(tooltip));
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             state.ac_power = platform::get_power_state()?;
@@ -434,18 +446,6 @@ fn main() -> Result<()> {
             // firmware "device mode" flag for it -- driver mode disables the Fn media
             // keys. When always-on is off there's no polling: the keyboard fades/off
             // naturally and the Fn keys behave normally.
-
-            // Update fan RPM and tooltip whenever a key is pressed, since keypresses
-            // already turn on the backlight; piggybacking here adds no idle-time cost.
-            #[cfg(target_os = "windows")]
-            if platform::KEY_PRESSED.swap(false, Ordering::Relaxed) {
-                if let Ok(fan) = get_fan_rpm(&device) {
-                    state.fan_actual = fan;
-                    if let Ok(tooltip) = state.tooltip() {
-                        let _ = tray_icon.set_tooltip(Some(tooltip));
-                    }
-                }
-            }
 
             Ok(())
         })() {
