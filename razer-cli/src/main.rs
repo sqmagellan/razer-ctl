@@ -285,7 +285,6 @@ impl Cli for feature::Perf {
 
 fn enumerate() -> Result<()> {
     let (pid_list, model_number_prefix) = device::Device::enumerate()?;
-
     println!("Model: {}", model_number_prefix);
     println!(
         "Supported: {}",
@@ -294,6 +293,67 @@ fn enumerate() -> Result<()> {
             .any(|supported| model_number_prefix == supported.model_number_prefix)
     );
     println!("PID: {:#06x?}", pid_list);
+    Ok(())
+}
+
+/// Machine-readable device state, one JSON object per line-free block. Kept as a flat,
+/// stable shape (no nested enum tuples) so downstream consumers -- a Home Assistant
+/// command-line sensor, a status line -- can parse it without knowing Rust's serde
+/// enum encoding. Mirrors what `perf/fan/... info` prints, gathered in one read.
+#[derive(serde::Serialize)]
+struct JsonStatus {
+    name: &'static str,
+    pid: String,
+    perf_mode: &'static str,
+    cpu_boost: Option<String>,
+    gpu_boost: Option<String>,
+    fan_mode: &'static str,
+    fan_setpoint_rpm: Option<u16>,
+    fan_actual_rpm: [u16; 2],
+    keyboard_brightness_percent: u8,
+    logo_mode: String,
+    battery_care_percent: u8,
+}
+
+fn print_json(device: &device::Device) -> Result<()> {
+    use librazer::state::{brightness_to_percent, DeviceState, FanSpeed, PerfMode};
+
+    let s = DeviceState::read(device)?;
+    let fan = librazer::state::get_fan_rpm(device)?;
+
+    let (perf_mode, cpu_boost, gpu_boost) = match s.perf_mode {
+        PerfMode::Battery => ("Battery", None, None),
+        PerfMode::Silent => ("Silent", None, None),
+        PerfMode::Balanced => ("Balanced", None, None),
+        PerfMode::Performance => ("Performance", None, None),
+        PerfMode::Hyperboost => ("Hyperboost", None, None),
+        PerfMode::Custom(cpu, gpu) => (
+            "Custom",
+            Some(format!("{:?}", cpu)),
+            Some(format!("{:?}", gpu)),
+        ),
+    };
+
+    let (fan_mode, fan_setpoint_rpm) = match s.fan_speed {
+        FanSpeed::Auto => ("Auto", None),
+        FanSpeed::Manual(rpm) => ("Manual", Some(rpm)),
+    };
+
+    let status = JsonStatus {
+        name: device.info.name,
+        pid: format!("{:#06x}", device.info.pid),
+        perf_mode,
+        cpu_boost,
+        gpu_boost,
+        fan_mode,
+        fan_setpoint_rpm,
+        fan_actual_rpm: [fan.fan1, fan.fan2],
+        keyboard_brightness_percent: brightness_to_percent(s.lights_mode.keyboard_brightness),
+        logo_mode: format!("{:?}", s.lights_mode.logo_mode),
+        battery_care_percent: s.battery_care.to_percent(),
+    };
+
+    println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
 }
 
@@ -370,6 +430,10 @@ fn handle(
         println!("Device: {:?}", device.info);
     }
 
+    if let Some(("json", _)) = matches.subcommand() {
+        return print_json(device);
+    }
+
     for f in features {
         f.handle(device, matches)?;
     }
@@ -388,9 +452,11 @@ fn main() -> Result<()> {
     env_logger::init();
     
     let info_cmd = clap::Command::new("info").about("Get device info");
+    let json_cmd = clap::Command::new("json").about("Print full device state as JSON");
     let auto_cmd = clap::Command::new("auto")
         .about("Automatically detect supported Razer device and enable device specific features")
         .subcommand(info_cmd.clone())
+        .subcommand(json_cmd.clone())
         .subcommand_required(true);
 
     let manual_cmd =clap::Command::new("manual").about("Manually specify PID of the Razer device and enable all features (many might not work)")
@@ -401,6 +467,7 @@ fn main() -> Result<()> {
             )
             .arg_required_else_help(true)
             .subcommand(info_cmd)
+            .subcommand(json_cmd)
             .subcommand_required(true);
 
     // TODO: find a better way to detect auto mode in advance

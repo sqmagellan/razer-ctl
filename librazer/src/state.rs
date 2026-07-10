@@ -213,7 +213,23 @@ impl DeviceStateDelta<GpuBoost> for DeviceState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// One "Action" rule: while `process` is running, force `perf_mode`. This is the
+/// config-driven automation layer (cf. Legion Toolkit's Actions). Rules are matched in
+/// list order; the first running match wins. There's no in-app editor -- rules are
+/// hand-added to the config TOML -- so this stays opt-in (an empty list = no behavior).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppProfile {
+    /// Executable name to match, case-insensitive, e.g. "cyberpunk2077.exe".
+    pub process: String,
+    /// Perf mode to switch to while that process is running.
+    pub perf_mode: PerfMode,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigState {
     pub ac_state: DeviceState,
     pub battery_state: DeviceState,
@@ -221,6 +237,15 @@ pub struct ConfigState {
     // files (written before this field existed) loadable -> defaults to false.
     #[serde(default)]
     pub enforce: bool,
+    // On wake from sleep, re-assert the intended profile's enforced fields (perf/fan/
+    // logo/battery) even when `enforce` is off -- a just-woken EC can drop the perf mode
+    // the same way a just-booted one does (see the tray's startup reconcile). Defaults to
+    // true; set false to restore the old enforce-only-on-resume behavior.
+    #[serde(default = "default_true")]
+    pub reassert_on_resume: bool,
+    // "Actions": app-triggered profile switches. Empty by default (no behavior).
+    #[serde(default)]
+    pub app_profiles: Vec<AppProfile>,
 }
 
 impl Default for ConfigState {
@@ -232,8 +257,20 @@ impl Default for ConfigState {
                 ..Default::default()
             },
             enforce: false,
+            reassert_on_resume: true,
+            app_profiles: Vec::new(),
         }
     }
+}
+
+/// Index of the first app-profile whose `process` is currently running (case-insensitive
+/// exact match on the executable name), or `None` if none match. Pure so it's unit-tested
+/// without a live process table: the caller passes the running process names (from sysinfo
+/// on the real system). First match wins, so earlier rules take priority.
+pub fn matching_app_profile(profiles: &[AppProfile], running: &[String]) -> Option<usize> {
+    profiles
+        .iter()
+        .position(|p| running.iter().any(|r| r.eq_ignore_ascii_case(&p.process)))
 }
 
 pub fn get_fan_rpm(device: &impl HidTransport) -> Result<FanRpm> {
@@ -330,6 +367,35 @@ mod tests {
         assert_eq!(cfg.battery_state.perf_mode, PerfMode::Battery);
         assert_eq!(cfg.ac_state.perf_mode, PerfMode::Performance);
         assert!(!cfg.enforce);
+        // Actions defaults: resume re-assert on, no app rules.
+        assert!(cfg.reassert_on_resume);
+        assert!(cfg.app_profiles.is_empty());
+    }
+
+    #[test]
+    fn matching_app_profile_first_match_wins_case_insensitive() {
+        let profiles = vec![
+            AppProfile { process: "game.exe".into(), perf_mode: PerfMode::Hyperboost },
+            AppProfile { process: "editor.exe".into(), perf_mode: PerfMode::Balanced },
+        ];
+        // No listed process running -> None.
+        let running = vec!["explorer.exe".to_string(), "svchost.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running), None);
+
+        // Case-insensitive match on the executable name.
+        let running = vec!["Game.EXE".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running), Some(0));
+
+        // Both running -> earlier rule (index 0) wins.
+        let running = vec!["editor.exe".to_string(), "game.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running), Some(0));
+
+        // Only the second rule's process is up.
+        let running = vec!["editor.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running), Some(1));
+
+        // Empty rule set never matches.
+        assert_eq!(matching_app_profile(&[], &running), None);
     }
 
     // ---- device-facing logic, exercised through MockTransport (no hardware) ------
