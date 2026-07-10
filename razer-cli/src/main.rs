@@ -3,7 +3,7 @@ use librazer::device;
 use librazer::feature;
 use librazer::types::{
     BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
-    MaxFanSpeedMode, PerfMode, Rgb,
+    MaxFanSpeedMode, PerfMode,
 };
 
 use librazer::feature::Feature;
@@ -143,17 +143,6 @@ impl Cli for feature::BatteryCare {
     }
 }
 
-/// Parse a `RRGGBB` / `#RRGGBB` hex color into an `Rgb`.
-fn parse_hex_color(s: &str) -> Result<Rgb> {
-    let h = s.trim().trim_start_matches('#');
-    anyhow::ensure!(h.len() == 6, "color must be 6 hex digits (RRGGBB), got {:?}", s);
-    Ok(Rgb {
-        r: u8::from_str_radix(&h[0..2], 16)?,
-        g: u8::from_str_radix(&h[2..4], 16)?,
-        b: u8::from_str_radix(&h[4..6], 16)?,
-    })
-}
-
 impl Cli for feature::KbdLighting {
     fn cmd(&self) -> Option<Command> {
         Some(
@@ -161,17 +150,11 @@ impl Cli for feature::KbdLighting {
                 .about("Control keyboard RGB backlight effect (write-only; not read back)")
                 .subcommand(
                     clap::Command::new("effect")
-                        .about("Set the backlight effect (off/static/spectrum)")
+                        .about("Set the backlight effect (off/spectrum/wave/breathing)")
                         .arg(
                             arg!(<EFFECT> "Effect")
                                 .value_parser(clap::value_parser!(KeyboardEffect)),
                         )
-                        .arg_required_else_help(true),
-                )
-                .subcommand(
-                    clap::Command::new("color")
-                        .about("Set a static color (implies the Static effect)")
-                        .arg(arg!(<HEX> "Color as RRGGBB or #RRGGBB"))
                         .arg_required_else_help(true),
                 )
                 .arg_required_else_help(true),
@@ -183,17 +166,8 @@ impl Cli for feature::KbdLighting {
             Some((ident, sub)) if ident == self.name() => match sub.subcommand() {
                 Some(("effect", m)) => {
                     let effect = *m.get_one::<KeyboardEffect>("EFFECT").unwrap();
-                    command::set_keyboard_effect(device, effect, Rgb::default())?;
+                    command::set_keyboard_effect(device, effect)?;
                     println!("Keyboard effect set to {:?}", effect);
-                    Ok(())
-                }
-                Some(("color", m)) => {
-                    let rgb = parse_hex_color(m.get_one::<String>("HEX").unwrap())?;
-                    command::set_keyboard_effect(device, KeyboardEffect::Static, rgb)?;
-                    println!(
-                        "Keyboard static color set to #{:02X}{:02X}{:02X}",
-                        rgb.r, rgb.g, rgb.b
-                    );
                     Ok(())
                 }
                 _ => Ok(()),
@@ -217,6 +191,11 @@ impl Cli for CustomCommand {
             clap::Command::new(self.name())
                 .about("Run custom command [WARNING: Use at your own risk]")
                 .arg(
+                    arg!(--tx <TX> "Transaction id override (hex, e.g. 0xff); default 0x1f")
+                        .required(false)
+                        .value_parser(clap_num::maybe_hex::<u8>),
+                )
+                .arg(
                     arg!(<COMMAND> "Command in hex format, e.g. 0x0d82")
                         .required(true)
                         .value_parser(clap_num::maybe_hex::<u16>),
@@ -234,9 +213,21 @@ impl Cli for CustomCommand {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
                 let cmd = *matches.get_one::<u16>("COMMAND").unwrap();
-                let args: Vec<u8> = matches.get_many::<u8>("ARGS").unwrap().copied().collect();
-                println!("Running custom command: {:x?} {:?}", cmd, args);
-                command::custom_command(device, cmd, &args)
+                let args: Vec<u8> = matches
+                    .get_many::<u8>("ARGS")
+                    .map(|v| v.copied().collect())
+                    .unwrap_or_default();
+                let tx = matches.get_one::<u8>("tx").copied();
+                match tx {
+                    Some(t) => {
+                        println!("Running custom command @ tx {:#04x}: {:x?} {:?}", t, cmd, args);
+                        command::custom_command_tx(device, cmd, &args, t)
+                    }
+                    None => {
+                        println!("Running custom command: {:x?} {:?}", cmd, args);
+                        command::custom_command(device, cmd, &args)
+                    }
+                }
             }
             _ => Ok(()),
         }

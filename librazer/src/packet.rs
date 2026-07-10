@@ -53,6 +53,16 @@ impl Packet {
         }
     }
 
+    /// Build a packet like [`Packet::new`] but force a specific transaction id, overriding
+    /// [`Packet::TRANSACTION_ID`]. Some reference drivers issue certain commands at a
+    /// different id than our default 0x1F -- notably OpenRazer drives keyboard *matrix
+    /// effects* at 0xFF on several Blade laptops. Used by the CLI `cmd --tx` probe.
+    pub fn new_with_tx(command: u16, args: &[u8], tx: u8) -> Packet {
+        let mut p = Packet::new(command, args);
+        p.id = tx;
+        p
+    }
+
     pub fn set_args(&mut self, args: &[u8]) {
         self.args[..args.len()].copy_from_slice(args)
     }

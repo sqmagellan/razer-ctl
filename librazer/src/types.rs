@@ -63,37 +63,24 @@ pub enum LogoMode {
 }
 
 /// Keyboard backlight **effect** (the `0x0f02` extended-matrix effect command, LED region
-/// 0x05 = backlight). HW-confirmed on PID 0x029F (2026-07-10): the write applies in *Normal*
-/// device mode -- the Fn media keys keep working -- so this is Fn-safe and needs no driver
-/// mode (unlike the old always-on device-mode trap; see `command` module docs). Chroma has
-/// no getter on this device, so effect state is **write-only**: it's stored as *intent* and
-/// re-applied, never read back or reconciled.
+/// 0x05 = backlight). HW-verified on PID 0x029F (2026-07-10): these apply in *Normal* device
+/// mode -- the Fn media keys keep working -- so they're Fn-safe and need no driver mode.
 ///
-/// v1 ships only the effects whose opcode byte was HW-confirmed: `Off` (0x00), `Static`
-/// (0x01, takes an RGB color), `Spectrum` (0x03, EC-animated). Breathing/Wave need extra
-/// direction/speed/color args and HW calibration -- deliberately out of v1 (RGB scope P2).
+/// v1 is **effects-only, no arbitrary color, by design.** A chosen static/per-key color on
+/// this hardware requires Razer "driver mode" (host-streamed frames, i.e. what Synapse does),
+/// which disables the Fn media keys -- our hard "no". In Normal mode the EC only self-animates
+/// its built-in effects; any color payload we send is ignored and the board falls back to
+/// Razer green. So we ship exactly the EC-animated effects that need no host color, all
+/// HW-confirmed: Off (0x00), Spectrum (0x03), Wave (0x04, directional), Breathing (0x02,
+/// random-color fade). Static/Reactive are intentionally omitted (they require a color).
 #[derive(
     EnumString, EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize,
 )]
 pub enum KeyboardEffect {
     Off,
-    Static,
     Spectrum,
-}
-
-/// A 24-bit RGB color for the `Static` keyboard effect. Defaults to white so a `Static` pick
-/// made without choosing a color is still visible.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Default for Rgb {
-    fn default() -> Self {
-        Self { r: 0xFF, g: 0xFF, b: 0xFF }
-    }
+    Wave,
+    Breathing,
 }
 
 /// Razer **device mode** (the `0x0004` command), misleadingly named for historical reasons.

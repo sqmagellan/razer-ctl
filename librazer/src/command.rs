@@ -20,7 +20,7 @@ use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
     BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn,
-    LogoMode, MaxFanSpeedMode, PerfMode, Rgb,
+    LogoMode, MaxFanSpeedMode, PerfMode,
 };
 
 use anyhow::{bail, ensure, Result};
@@ -168,6 +168,16 @@ pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> 
     Ok(())
 }
 
+/// Like [`custom_command`], but send at a caller-chosen transaction id (for probing
+/// commands the reference drivers issue at an id other than our default 0x1F).
+pub fn custom_command_tx(device: &impl HidTransport, command: u16, args: &[u8], tx: u8) -> Result<()> {
+    let report = Packet::new_with_tx(command, args, tx);
+    println!("Report   {:?}", report);
+    let response = device.send(report)?;
+    println!("Response {:?}", response);
+    Ok(())
+}
+
 fn _set_logo_power(device: &impl HidTransport, mode: LogoMode) -> Result<Packet> {
     match mode {
         LogoMode::Off => _send_command(device, 0x0300, &[1, 4, 0]),
@@ -232,36 +242,34 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
 
 // ---- keyboard RGB effect (0x0f02 extended-matrix effect; LED region 0x05 = backlight) ----
 //
-// HW-confirmed on 0x029F (2026-07-10): applies in Normal device mode (Fn keys survive), no
+// HW-verified on 0x029F (2026-07-10): applies in Normal device mode (Fn keys survive), no
 // driver mode needed. Chroma is WRITE-ONLY here (no getter), so this is never read back --
 // callers hold the effect as intent and re-apply it (see `DeviceState::apply_keyboard_lighting`).
+//
+// EFFECTS-ONLY, NO ARBITRARY COLOR (by design): a chosen color needs driver mode (host-streamed
+// frames = what Synapse does), which kills the Fn keys. In Normal mode the EC ignores color
+// payloads and falls back to Razer green, so we ship only the EC-animated effects that need no
+// host color. All four HW-confirmed on 0x029F at our default 0x1F transaction.
 
 /// Effect-command LED region: openrazer "backlight" (the whole keyboard).
 const KBD_LED_BACKLIGHT: u8 = 0x05;
-/// Variable-storage byte: NOSTORE applies the effect live without writing the EC's persisted
-/// slot. We always drive live from our own stored intent, so we never touch the EC's saved
-/// state (and never fight a Synapse-persisted effect).
-const KBD_STORE_NONE: u8 = 0x00;
+/// Variable-storage byte: VARSTORE writes the EC's persisted slot so the effect *sticks* and
+/// survives idle/wake. (NOSTORE only stages a volatile buffer the EC doesn't display, so the
+/// stored default -- rainbow -- returns; HW-confirmed 2026-07-10.)
+const KBD_STORE_VAR: u8 = 0x01;
+/// Default Wave direction (0x00..=0x02 accepted; the EC clamps).
+const KBD_WAVE_DIR: u8 = 0x01;
 
-/// Set the keyboard backlight effect (and, for `Static`, its color). Write-only: the response
-/// is not echo-checked because the effect command does not mirror its args back the way the
-/// `set_*`/`get_*` register pairs do (P0 read status 0x02 = success, not an arg echo).
-///
-/// ⚠️ COLOR OFFSET IS HW-CALIBRATION-PENDING: P0 found this device reads the static r/g/b one
-/// slot over from openrazer's generic `[vs, led, effect, r, g, b]` layout (sending r=0xFF lit
-/// the board GREEN). The mechanism is proven; only the exact byte position is open. Verify on
-/// 0x029F and adjust the color bytes below if the hue is wrong -- it can't harm the hardware.
-pub fn set_keyboard_effect(
-    device: &impl HidTransport,
-    effect: KeyboardEffect,
-    color: Rgb,
-) -> Result<()> {
+/// Set the keyboard backlight effect. Write-only: the response is not echo-checked because the
+/// effect command does not mirror its args back the way the `set_*`/`get_*` register pairs do
+/// (P0 read status 0x02 = success, not an arg echo). Effect ids are the extended-matrix values
+/// (openrazer `razerchromacommon.c`): Off=0x00, Breathing(random)=0x02, Spectrum=0x03, Wave=0x04.
+pub fn set_keyboard_effect(device: &impl HidTransport, effect: KeyboardEffect) -> Result<()> {
     let args: Vec<u8> = match effect {
-        KeyboardEffect::Off => vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x00],
-        KeyboardEffect::Static => {
-            vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x01, color.r, color.g, color.b]
-        }
-        KeyboardEffect::Spectrum => vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x03],
+        KeyboardEffect::Off => vec![KBD_STORE_VAR, KBD_LED_BACKLIGHT, 0x00],
+        KeyboardEffect::Breathing => vec![KBD_STORE_VAR, KBD_LED_BACKLIGHT, 0x02],
+        KeyboardEffect::Spectrum => vec![KBD_STORE_VAR, KBD_LED_BACKLIGHT, 0x03],
+        KeyboardEffect::Wave => vec![KBD_STORE_VAR, KBD_LED_BACKLIGHT, 0x04, KBD_WAVE_DIR],
     };
     device.send(Packet::new(0x0f02, &args))?;
     Ok(())
@@ -362,24 +370,25 @@ mod tests {
 
     #[test]
     fn set_keyboard_effect_emits_backlight_effect_command() {
-        use crate::types::{KeyboardEffect, Rgb};
-        // Off / Spectrum are EC-animated -> no color bytes; Static carries r,g,b. Every
-        // effect targets LED region 0x05 (backlight) with NOSTORE (0x00) storage, command 0x0f02.
+        use crate::types::KeyboardEffect;
+        // Every effect targets LED region 0x05 (backlight) with VARSTORE (0x01) storage,
+        // command 0x0f02. Effect ids: Off=0x00, Breathing=0x02, Spectrum=0x03, Wave=0x04
+        // (Wave carries a trailing direction byte). None carry a host color (effects-only v1).
         let off = MockTransport::echo();
-        set_keyboard_effect(&off, KeyboardEffect::Off, Rgb::default()).unwrap();
-        assert_eq!(off.sent(), vec![(0x0f02, vec![0x00, 0x05, 0x00])]);
+        set_keyboard_effect(&off, KeyboardEffect::Off).unwrap();
+        assert_eq!(off.sent(), vec![(0x0f02, vec![0x01, 0x05, 0x00])]);
+
+        let breathing = MockTransport::echo();
+        set_keyboard_effect(&breathing, KeyboardEffect::Breathing).unwrap();
+        assert_eq!(breathing.sent(), vec![(0x0f02, vec![0x01, 0x05, 0x02])]);
 
         let spectrum = MockTransport::echo();
-        set_keyboard_effect(&spectrum, KeyboardEffect::Spectrum, Rgb::default()).unwrap();
-        assert_eq!(spectrum.sent(), vec![(0x0f02, vec![0x00, 0x05, 0x03])]);
+        set_keyboard_effect(&spectrum, KeyboardEffect::Spectrum).unwrap();
+        assert_eq!(spectrum.sent(), vec![(0x0f02, vec![0x01, 0x05, 0x03])]);
 
-        let static_red = MockTransport::echo();
-        set_keyboard_effect(&static_red, KeyboardEffect::Static, Rgb { r: 0x10, g: 0x20, b: 0x30 })
-            .unwrap();
-        assert_eq!(
-            static_red.sent(),
-            vec![(0x0f02, vec![0x00, 0x05, 0x01, 0x10, 0x20, 0x30])]
-        );
+        let wave = MockTransport::echo();
+        set_keyboard_effect(&wave, KeyboardEffect::Wave).unwrap();
+        assert_eq!(wave.sent(), vec![(0x0f02, vec![0x01, 0x05, 0x04, 0x01])]);
     }
 
     // ---- read path: parsing the firmware's response -----------------------------

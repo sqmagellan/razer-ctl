@@ -5,7 +5,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode, MaxFanSpeedMode, Rgb};
+use crate::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode, MaxFanSpeedMode};
 use crate::command;
 use crate::transport::HidTransport;
 
@@ -45,12 +45,10 @@ pub struct LightsMode {
     /// today's behavior (brightness-only, no effect write; no regression). `Some(effect)` is
     /// written on apply. Write-only: Chroma has no getter on this device, so this is never in
     /// `read()`, `enforced_fields_differ`, or the Mirror poll -- there's nothing to reconcile
-    /// against. Same intent-only treatment as always-on.
+    /// against. Same intent-only treatment as always-on. Effects-only, no color (see
+    /// [`crate::types::KeyboardEffect`] for why arbitrary color is out of scope).
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
-    /// Color for the `Static` effect. Ignored by EC-animated effects (Off/Spectrum).
-    #[serde(default)]
-    pub keyboard_color: Rgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -120,10 +118,9 @@ impl DeviceState {
             keyboard_brightness: command::get_keyboard_brightness(device)?,
             always_on: command::get_lights_always_on(device)?,
             // The keyboard effect is write-only (no Chroma getter on this device); we can't
-            // read it back, so a freshly-read state reports "unknown" (None) + default color.
-            // Intent lives in the persisted config, applied by apply_keyboard_lighting().
+            // read it back, so a freshly-read state reports "unknown" (None). Intent lives in
+            // the persisted config, applied by apply_keyboard_lighting().
             keyboard_effect: None,
-            keyboard_color: Rgb::default(),
         };
 
         let battery_care = command::get_battery_care(device)?;
@@ -209,9 +206,7 @@ impl DeviceState {
     /// re-assert, if HW testing shows the EC drops the effect on wake) can re-push it cheaply.
     pub fn apply_keyboard_lighting(&self, device: &impl HidTransport) -> Result<()> {
         match self.lights_mode.keyboard_effect {
-            Some(effect) => {
-                command::set_keyboard_effect(device, effect, self.lights_mode.keyboard_color)
-            }
+            Some(effect) => command::set_keyboard_effect(device, effect),
             None => Ok(()),
         }
     }
@@ -265,7 +260,6 @@ impl Default for DeviceState {
                 keyboard_brightness: 0,
                 always_on: LightsAlwaysOn::Disable,
                 keyboard_effect: None,
-                keyboard_color: Rgb::default(),
             },
             battery_care: BatteryCare::Percent80,
             fan_speed: FanSpeed::Auto,
@@ -307,19 +301,16 @@ pub struct AppProfile {
     /// Logo lighting to apply while it runs. Omit to leave the logo unchanged.
     #[serde(default)]
     pub logo_mode: Option<LogoMode>,
-    /// Keyboard backlight effect to apply while it runs (e.g. red static for a game). Omit to
+    /// Keyboard backlight effect to apply while it runs (e.g. Spectrum for a game). Omit to
     /// leave the keyboard lighting unchanged.
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
-    /// Color for the rule's `Static` keyboard effect. Omit to keep the current color.
-    #[serde(default)]
-    pub keyboard_color: Option<Rgb>,
 }
 
 impl AppProfile {
     /// Overlay this rule's set fields onto `base`, yielding the transient state to apply
     /// while the app runs. Unset (`None`) fields leave `base` untouched, so a rule can
-    /// change just the fan, just the perf mode, the logo, the keyboard lighting, or any
+    /// change just the fan, just the perf mode, the logo, the keyboard effect, or any
     /// combination.
     pub fn overlay(&self, base: &DeviceState) -> DeviceState {
         let mut s = *base;
@@ -334,9 +325,6 @@ impl AppProfile {
         }
         if let Some(e) = self.keyboard_effect {
             s.lights_mode.keyboard_effect = Some(e);
-        }
-        if let Some(c) = self.keyboard_color {
-            s.lights_mode.keyboard_color = c;
         }
         s
     }
@@ -492,8 +480,8 @@ mod tests {
     #[test]
     fn matching_app_profile_first_match_wins_case_insensitive() {
         let profiles = vec![
-            AppProfile { process: "game.exe".into(), perf_mode: Some(PerfMode::Hyperboost), fan_speed: None, logo_mode: None, keyboard_effect: None, keyboard_color: None },
-            AppProfile { process: "editor.exe".into(), perf_mode: Some(PerfMode::Balanced), fan_speed: None, logo_mode: None, keyboard_effect: None, keyboard_color: None },
+            AppProfile { process: "game.exe".into(), perf_mode: Some(PerfMode::Hyperboost), fan_speed: None, logo_mode: None, keyboard_effect: None },
+            AppProfile { process: "editor.exe".into(), perf_mode: Some(PerfMode::Balanced), fan_speed: None, logo_mode: None, keyboard_effect: None },
         ];
         // No listed process running -> None.
         let running = vec!["explorer.exe".to_string(), "svchost.exe".to_string()];
@@ -529,7 +517,6 @@ mod tests {
             fan_speed: None,
             logo_mode: None,
             keyboard_effect: None,
-            keyboard_color: None,
         };
         let out = perf_only.overlay(&base);
         assert_eq!(out.perf_mode, PerfMode::Hyperboost);
@@ -543,7 +530,6 @@ mod tests {
             fan_speed: Some(FanSpeed::Manual(3000)),
             logo_mode: None,
             keyboard_effect: None,
-            keyboard_color: None,
         };
         let out = fan_only.overlay(&base);
         assert_eq!(out.perf_mode, PerfMode::Balanced);
@@ -552,19 +538,17 @@ mod tests {
 
     #[test]
     fn app_profile_overlay_carries_keyboard_lighting() {
-        // A lighting rule sets the effect + color and leaves perf/fan/logo alone.
+        // A lighting rule sets the effect and leaves perf/fan/logo alone.
         let base = DeviceState::default();
         let lit = AppProfile {
             process: "game.exe".into(),
             perf_mode: None,
             fan_speed: None,
             logo_mode: None,
-            keyboard_effect: Some(KeyboardEffect::Static),
-            keyboard_color: Some(Rgb { r: 0xFF, g: 0, b: 0 }),
+            keyboard_effect: Some(KeyboardEffect::Spectrum),
         };
         let out = lit.overlay(&base);
-        assert_eq!(out.lights_mode.keyboard_effect, Some(KeyboardEffect::Static));
-        assert_eq!(out.lights_mode.keyboard_color, Rgb { r: 0xFF, g: 0, b: 0 });
+        assert_eq!(out.lights_mode.keyboard_effect, Some(KeyboardEffect::Spectrum));
         assert_eq!(out.perf_mode, base.perf_mode);
         assert_eq!(out.fan_speed, base.fan_speed);
     }
@@ -583,7 +567,7 @@ mod tests {
         // With an effect set, apply() emits 0x0f02 AND re-asserts brightness (0x0303) after it,
         // so the effect write can't leave the backlight at the wrong brightness.
         let mut lit = DeviceState::default();
-        lit.lights_mode.keyboard_effect = Some(KeyboardEffect::Static);
+        lit.lights_mode.keyboard_effect = Some(KeyboardEffect::Spectrum);
         lit.lights_mode.keyboard_brightness = 200;
         let lit_mock = MockTransport::echo();
         lit.apply(&lit_mock).unwrap();
@@ -623,7 +607,6 @@ mod tests {
                 keyboard_brightness: 200,
                 always_on: LightsAlwaysOn::Disable,
                 keyboard_effect: None,
-                keyboard_color: Rgb::default(),
             },
             battery_care: BatteryCare::Percent80,
             fan_speed: FanSpeed::Auto,
