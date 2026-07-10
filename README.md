@@ -18,17 +18,24 @@ and only writes to the device when you ask it to.
 ## What it controls
 
 - **Performance modes** — Balanced, Silent, Battery, Performance, Hyperboost, and Custom (per-axis CPU/GPU boost).
-- **Fan** — Auto, or Manual at an explicit RPM (2000–5000).
+- **Fan** — Auto, or Manual at a real RPM. The range is per-chassis (declared on each descriptor), so the
+  menu only offers speeds the EC actually honors — 2200–5000 on the 2023 Blade 16, the ends labelled
+  (min)/(max) — instead of dead 0/500 steps and an out-of-range 5500.
 - **Keyboard brightness** — 0–100% in 10% steps; the exact value shows in the tooltip.
 - **Logo lighting** — off / static / breathing (its own light zone).
 - **Charge limit** — 50–80% in 5% steps, or off (100%).
 - **AC vs battery profiles** — separate profiles, switched automatically when you plug/unplug.
+- **App profiles** — auto-apply a perf mode while a named app is running, then fall back to the
+  power-source profile when it quits (first running match wins, case-insensitive). Opt-in, and a
+  *transient* override, so it never overwrites your saved AC/battery profiles.
 - **Keyboard always-on** — keeps the backlight lit while the display's on. It's a Normal-mode keep-alive,
   not Razer's driver-mode flag, so your Fn media keys keep working (see Quirks — this one took a day to get right).
 - **Enforce mode** (opt-in, off by default) — re-asserts perf/fan/logo/charge-limit if Synapse changes
   them; it leaves brightness alone.
 - **Close GPU apps** — terminates dGPU-using processes, with a hard safelist so it never takes down the desktop.
 - **Start with Windows** — an `HKCU\…\Run` entry.
+- **Machine-readable status** — `razer-cli auto json` prints the whole device state, including the
+  *actual* fan RPM, as flat JSON — ready for a Home Assistant command-line sensor or a shell status line.
 
 Config lives at `%APPDATA%\razer-tray\config\default-config.toml`; the log at `%TEMP%\razer-tray.log`
 (Info level, capped at 10 MiB, wiped on rollover).
@@ -40,6 +47,38 @@ Drop `razer-tray.exe` somewhere (e.g. `C:\Program Files\RazerTray\`), run it, an
 service, no Synapse.
 
 ## Changelog
+
+### 2026-07 — control, status & self-healing pass
+Landed on top of `0.9.0` (tray stayed `0.9.0`, CLI `0.8.6`); all HW-verified on `0x029F`.
+
+**New control & status**
+- **`razer-cli auto json`** — full device state as one flat JSON object (perf mode, CPU/GPU boost,
+  fan mode + setpoint + *actual* RPM, keyboard %, logo, charge limit), read in a single pass. Flat on
+  purpose — no Rust enum-tuple encoding — so Home Assistant or a status line can parse it blind.
+- **App profiles** — apply a perf mode while a named app runs, reverting to the AC/battery profile on
+  exit. A transient override that never clobbers a saved profile; empty by default.
+- **Resume re-assert without full enforce** — the intended mode is re-applied on wake by default
+  (`reassert_on_resume`), not only when enforce is on. Wake used to keep whatever the EC reset itself to.
+- **Labelled Custom boosts** — the Custom submenu now labels its two groups ("CPU boost" / "GPU boost")
+  instead of two unlabelled Low/Med/High stacks.
+
+**Self-healing / correctness**
+- **Startup reconcile** — on launch the tray reads the device back after its startup apply and
+  re-asserts once if reality doesn't match intent. A just-booted (especially crash-rebooted) EC will ACK
+  a perf-mode write without actually switching and keeps its last mode across a reboot — so the tray
+  could show "Balanced" while the EC sat in the battery profile. This runs regardless of the enforce
+  flag (startup correctness isn't optional) and retired the external `RazerPerfSilent` scheduled-task hack.
+- **Honest, per-chassis fan range** — the manual menu used to list 0/500/1000/1500/2000 (all at or below
+  the EC's floor, so no effect) and 5500 (above the ceiling). It now offers only speeds the hardware
+  honors, and the envelope is *per model* (a required `fan_rpm_range` on every descriptor), so the app
+  stays universal. Probed on hardware: setpoint 2000 still idles ~2400, and it won't exceed 5000.
+
+**Housekeeping**
+- **tray-icon 0.11.3 → 0.19** — enabled hover-driven tooltip refresh and let me delete the global
+  keyboard hook (see Quirks).
+- **Security** — dropped the unmaintained `failure` crate (RUSTSEC) via single-instance 0.3, and picked
+  up patched `crossbeam-epoch` + `anyhow`. Audit-clean apart from Linux-only GTK transitives that aren't
+  in the Windows binary.
 
 ### 0.9.0 — first versioned local release
 The first numbered cut of the fork; it rode at upstream's `0.8.6` until now. Given how much changed,
@@ -86,10 +125,17 @@ the highlights:
 - **Device-loss recovery isn't runtime-tested on this unit.** The control interface rides the internal
   keyboard's USB composite, which Windows won't let you disable, so the recovery backoff is code-reviewed only.
 - **`battery-care get` can read stale right after a `set`** (~1–2 s firmware lag) — re-read to confirm.
-- **`tray-icon` is pinned at 0.11.3** — the newer hover-event API isn't available in this build env, so
-  the tooltip refresh uses a keyboard hook plus last-input polling.
+- **Tooltip refresh is hover-driven (tray-icon 0.19).** The tooltip/icon freshen when you actually hover
+  the tray — which means you're at the machine, so the backlight's already awake and the read can't cause
+  a visible pulse (Move is throttled to 500 ms). That let me delete the entire global `WH_KEYBOARD_LL`
+  low-level keyboard hook — the most invasive Windows code in the crate, there only to freshen the tooltip
+  on keypress. The input-gated Mirror poll *stays*: it's the load-bearing anti-pulsing gate that also
+  drives enforce-drift and Fn-brightness adopt.
 
 ## Building
+
+Two ways to build now: `cargo xwin` cross-build from the iMac (offline), or natively on the Blade itself
+(VS 2022 Build Tools + the stable-MSVC toolchain). Either way, the gate is the same:
 
 ```
 .local-notes/check.sh    # clippy -D warnings + Windows cross-build + host tests; must end "ALL GREEN"
@@ -97,7 +143,8 @@ the highlights:
 
 Rules for this fork:
 - Don't push, and don't add a remote. The `local` branch moves between machines via `git bundle`.
-- Don't edit `librazer/src/descriptor.rs` — those are hand-maintained hardware descriptors.
+- `librazer/src/descriptor.rs` holds hand-maintained hardware descriptors — edit deliberately. Every
+  entry now has to declare its `fan_rpm_range`, so adding a model means giving its real fan envelope.
 - Don't run `cargo fmt` — it rewrites the hand-formatting and touches `descriptor.rs`.
 
 ## Credits
