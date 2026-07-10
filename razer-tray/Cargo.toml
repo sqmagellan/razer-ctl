@@ -21,7 +21,9 @@ strum_macros = "0.26.1"
 tao = "0.26.0"
 tray-icon = "0.19"
 sysinfo = "0.29"
-single-instance = "=0.1.2"
+# single-instance 0.3+ dropped the unmaintained `failure` dep (RUSTSEC-2019-0036 /
+# RUSTSEC-2020-0036, 9.8) that 0.1.2 pulled in. API (new/is_single) is unchanged for us.
+single-instance = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
