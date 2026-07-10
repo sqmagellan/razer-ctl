@@ -71,16 +71,21 @@ pub fn build(
 
     let separator = PredefinedMenuItem::separator();
 
-    perf_modes.append(&Submenu::with_items(
-        "Custom",
-        true,
-        &cpu_boosts
-            .iter()
-            .map(|i| i as &dyn IsMenuItem)
-            .chain([&separator as &dyn IsMenuItem])
-            .chain(gpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
-            .collect::<Vec<_>>(),
-    )?)?;
+    // Disabled header items so the two boost groups are labelled -- without them the
+    // submenu is just "Low/Medium/High/Boost/Undervolt / --- / Low/Medium/High" and you
+    // can't tell which axis is which. (HW-verified 2026-07-09: all five CPU levels and
+    // all three GPU levels apply + read back on PID 0x029f.)
+    let cpu_header = MenuItem::new("CPU boost", false, None);
+    let gpu_header = MenuItem::new("GPU boost", false, None);
+
+    let custom_items: Vec<&dyn IsMenuItem> = std::iter::once(&cpu_header as &dyn IsMenuItem)
+        .chain(cpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
+        .chain([&separator as &dyn IsMenuItem])
+        .chain(std::iter::once(&gpu_header as &dyn IsMenuItem))
+        .chain(gpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
+        .collect();
+
+    perf_modes.append(&Submenu::with_items("Custom", true, &custom_items)?)?;
 
     menu.append(&perf_modes)?;
 

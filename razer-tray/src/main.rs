@@ -18,6 +18,8 @@ use tray_icon::{
 
 use single_instance::SingleInstance;
 
+use sysinfo::{ProcessExt, SystemExt};
+
 #[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering;
 
@@ -67,7 +69,13 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
     );
     let config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
     let fan_actual = get_fan_rpm(device)?;
-    let mut state = ProgramState::new(config.ac_state, fan_actual, config.enforce)?;
+    let mut state = ProgramState::new(
+        config.ac_state,
+        fan_actual,
+        config.enforce,
+        config.reassert_on_resume,
+        config.app_profiles, // moves the Vec; keep as the last read of `config`
+    )?;
     state.ac_power = platform::get_power_state()?;
     state.ac_state = config.ac_state;
     state.battery_state = config.battery_state;
@@ -75,6 +83,11 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
         state.device_state = state.battery_state
     }
     state.update(tray_icon, state.device_state, device)?;
+    // The apply() inside update() pushed the stored profile, but a just-booted EC can
+    // ACK a perf-mode write without transitioning (and retains its last mode across a
+    // reboot). Read back and re-assert once if they disagree, so the tray isn't left
+    // showing a profile the device never actually entered. See reconcile_startup docs.
+    state.reconcile_startup(tray_icon, device);
     Ok(state)
 }
 
@@ -139,6 +152,15 @@ fn main() -> Result<()> {
     // a gap far larger than that means the process was suspended (system sleep),
     // which we use as a cheap, API-free "resumed from sleep" signal.
     let mut last_tick_timestamp = std::time::Instant::now();
+
+    // "Actions" (app-triggered profiles). We scan the process list on a slow cadence
+    // (only when rules exist) and remember which rule is currently active so we act on
+    // *transitions* -- apply on launch, revert on exit -- and otherwise leave the user's
+    // manual selection alone. A persistent System avoids re-enumerating everything each
+    // scan.
+    let mut last_app_scan_timestamp = std::time::Instant::now();
+    let mut active_app_rule: Option<usize> = None;
+    let mut app_scan_sys = sysinfo::System::new();
 
     // loop through the default start up sequence to initialise the device.
     for element in device.info().init_cmds {
@@ -240,11 +262,67 @@ fn main() -> Result<()> {
             // resumes ticking, and brightness is left to the Fn-key adopt path.)
             if since_last_tick > std::time::Duration::from_secs(30) {
                 log::info!("resume detected (tick gap {:?})", since_last_tick);
-                if state.enforce {
-                    log::info!("re-asserting enforced state after resume");
+                // A just-woken EC can drop the perf mode the same way a just-booted one
+                // does (the startup-reconcile case). Re-assert the intended enforced
+                // fields on wake. This now fires whenever `reassert_on_resume` is set
+                // (the default) OR `enforce` is on -- previously it was enforce-only, so
+                // the common case (enforce off) silently kept whatever the EC reset to.
+                // The AC/battery switch above already corrected `device_state` for the
+                // current power source, so re-asserting current intent is right.
+                if state.reassert_on_resume || state.enforce {
+                    log::info!("re-asserting intended state after resume");
                     if let Err(e) = state.device_state.enforce_to(&device) {
-                        log::warn!("enforce: resume re-assert failed: {:?}", e);
+                        log::warn!("resume re-assert failed: {:?}", e);
                     }
+                }
+            }
+
+            // "Actions": app-triggered profile switches. Only runs when rules are
+            // configured (empty by default). Scans the process list on a slow cadence and
+            // acts only on *transitions* -- so it applies a rule's mode when its process
+            // appears and reverts to the power-source profile when the last match exits,
+            // but never re-applies in between (a manual pick mid-session stays put). Uses
+            // update_transient so the override never overwrites the saved AC/battery
+            // profile we revert to.
+            if !state.app_profiles.is_empty()
+                && now > last_app_scan_timestamp + std::time::Duration::from_secs(5)
+            {
+                last_app_scan_timestamp = now;
+                app_scan_sys.refresh_processes();
+                let running: Vec<String> = app_scan_sys
+                    .processes()
+                    .values()
+                    .map(|p| p.name().to_string())
+                    .collect();
+                let matched = state::matching_app_profile(&state.app_profiles, &running);
+                if matched != active_app_rule {
+                    match matched {
+                        Some(i) => {
+                            let (proc_name, mode) = {
+                                let rule = &state.app_profiles[i];
+                                (rule.process.clone(), rule.perf_mode)
+                            };
+                            log::info!("action: '{}' running -> {:?}", proc_name, mode);
+                            let target = DeviceState {
+                                perf_mode: mode,
+                                ..state.device_state
+                            };
+                            state.update_transient(&mut tray_icon, target, &device)?;
+                        }
+                        None => {
+                            let target = if state.ac_power {
+                                state.ac_state
+                            } else {
+                                state.battery_state
+                            };
+                            log::info!(
+                                "action: no rule app running -> reverting to {:?}",
+                                target.perf_mode
+                            );
+                            state.update_transient(&mut tray_icon, target, &device)?;
+                        }
+                    }
+                    active_app_rule = matched;
                 }
             }
 

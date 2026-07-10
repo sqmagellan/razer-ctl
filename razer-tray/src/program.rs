@@ -11,7 +11,7 @@ use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
 use crate::menu;
-use crate::state::{get_fan_rpm, brightness_to_percent, ConfigState, DeviceState, FanRpm, FanSpeed, PerfMode};
+use crate::state::{get_fan_rpm, brightness_to_percent, AppProfile, ConfigState, DeviceState, FanRpm, FanSpeed, PerfMode};
 
 pub struct ProgramState {
     pub device_state: DeviceState,
@@ -23,10 +23,20 @@ pub struct ProgramState {
     pub fan_actual: FanRpm,
     pub ac_power: bool,
     pub enforce: bool,
+    /// Re-assert the intended profile on wake even when `enforce` is off (config-driven).
+    pub reassert_on_resume: bool,
+    /// "Actions" rules: while a listed process runs, force its perf mode (config-driven).
+    pub app_profiles: Vec<AppProfile>,
 }
 
 impl ProgramState {
-    pub fn new(device_state: DeviceState, fan_last: FanRpm, enforce: bool) -> Result<Self> {
+    pub fn new(
+        device_state: DeviceState,
+        fan_last: FanRpm,
+        enforce: bool,
+        reassert_on_resume: bool,
+        app_profiles: Vec<AppProfile>,
+    ) -> Result<Self> {
         let (menu, event_handlers) = menu::build(&device_state, enforce)?;
         Ok(Self {
             device_state,
@@ -38,12 +48,14 @@ impl ProgramState {
             fan_actual: fan_last,
             ac_power: true,
             enforce,
+            reassert_on_resume,
+            app_profiles,
         })
     }
 
-    /// Persist the current AC/battery profiles + enforce flag. Single source of truth
-    /// so a future ConfigState field can't be silently dropped by one of the call
-    /// sites (there used to be three inline `confy::store` literals).
+    /// Persist the current AC/battery profiles + enforce flag + Actions config. Single
+    /// source of truth so a future ConfigState field can't be silently dropped by one of
+    /// the call sites (there used to be three inline `confy::store` literals).
     pub fn persist(&self) -> Result<()> {
         confy::store(
             crate::PKG_NAME,
@@ -52,6 +64,8 @@ impl ProgramState {
                 ac_state: self.ac_state,
                 battery_state: self.battery_state,
                 enforce: self.enforce,
+                reassert_on_resume: self.reassert_on_resume,
+                app_profiles: self.app_profiles.clone(),
             },
         )?;
         Ok(())
@@ -164,7 +178,10 @@ impl ProgramState {
         tray_icon::Icon::from_rgba(rgba.clone(), *width, *height).expect("failed to build tray icon")
     }
 
-    pub fn update(
+    /// Apply `new_device_state` to the device and refresh the tray UI (icon/tooltip/menu)
+    /// -- WITHOUT recording it as the active AC/battery profile or persisting. This is the
+    /// shared core of `update` (which also saves) and `update_transient` (which doesn't).
+    fn apply_and_refresh(
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
         new_device_state: DeviceState,
@@ -172,22 +189,107 @@ impl ProgramState {
     ) -> Result<()> {
         self.device_state = new_device_state;
         self.device_state.apply(device)?;
-        // A user-driven change is the new ground truth until Mirror reads again,
-        // so the tooltip/icon (which render from `observed`) reflect it immediately.
+        // A change is the new ground truth until Mirror reads again, so the tooltip/icon
+        // (which render from `observed`) reflect it immediately.
         self.observed = self.device_state;
         (self.menu, self.event_handlers) = menu::build(&self.device_state, self.enforce)?;
         self.fan_actual = get_fan_rpm(device)?;
+        tray_icon.set_icon(Some(self.icon()))?;
+        tray_icon.set_tooltip(Some(self.tooltip()?))?;
+        tray_icon.set_menu(Some(Box::new(self.menu.clone())));
+        Ok(())
+    }
+
+    /// Apply a user-chosen state: it becomes the saved profile for the current power
+    /// source and is persisted. Use for menu picks, the left-click perf cycle, and
+    /// AC/battery profile switches.
+    pub fn update(
+        &mut self,
+        tray_icon: &mut tray_icon::TrayIcon,
+        new_device_state: DeviceState,
+        device: &device::Device,
+    ) -> Result<()> {
+        self.apply_and_refresh(tray_icon, new_device_state, device)?;
         if self.ac_power {
             self.ac_state = self.device_state
         } else {
             self.battery_state = self.device_state
         }
         self.persist()?;
-        tray_icon.set_icon(Some(self.icon()))?;
-        tray_icon.set_tooltip(Some(self.tooltip()?))?;
-        tray_icon.set_menu(Some(Box::new(self.menu.clone())));
-
         log::info!("state updated to {:?}", new_device_state);
         Ok(())
+    }
+
+    /// Apply a *transient* override that must NOT overwrite the saved AC/battery profile
+    /// -- used by app-triggered Actions, so that when the app closes we can revert to the
+    /// profile the user actually configured. Applies + refreshes the UI but never touches
+    /// `ac_state`/`battery_state` and never persists.
+    pub fn update_transient(
+        &mut self,
+        tray_icon: &mut tray_icon::TrayIcon,
+        new_device_state: DeviceState,
+        device: &device::Device,
+    ) -> Result<()> {
+        self.apply_and_refresh(tray_icon, new_device_state, device)?;
+        log::info!("transient state applied {:?}", new_device_state);
+        Ok(())
+    }
+
+    /// One-shot reconcile run once at startup, right after `init()`'s `apply()`.
+    ///
+    /// Why it's needed: `apply()` pushes the stored profile, but a freshly booted --
+    /// especially crash-rebooted -- EC can *acknowledge* a perf-mode write without
+    /// actually transitioning, and it retains its last-set mode across a reboot. That
+    /// leaves the tray showing the intended profile while the EC sits in whatever it
+    /// kept (observed 2026-07-09: tray said "Balanced" while the EC was still in the
+    /// battery profile). Because the tray never reads the device at startup -- the
+    /// first Mirror read is input-gated -- and the shipped default is `enforce = false`,
+    /// nothing corrected it until the user manually re-picked a mode.
+    ///
+    /// So: read the device back and, if the *enforced* fields still differ from intent,
+    /// re-assert once. This runs regardless of the `enforce` flag -- correctness at
+    /// startup is unconditional; `enforce` only governs the *continuous* tug-of-war with
+    /// Synapse. Best-effort: read/apply errors are logged and swallowed so a transient
+    /// HID hiccup can't abort startup. Refreshes the tray icon/tooltip from the real read
+    /// so the display is honest immediately, not on the next input-gated poll.
+    pub fn reconcile_startup(&mut self, tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) {
+        let observed = match DeviceState::read(device) {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("startup reconcile: device read failed, skipping: {:?}", e);
+                return;
+            }
+        };
+        self.observed = observed;
+
+        if observed.enforced_fields_differ(&self.device_state) {
+            log::warn!(
+                "startup reconcile: device {:?} != intended {:?}; re-asserting",
+                observed.perf_mode,
+                self.device_state.perf_mode
+            );
+            if let Err(e) = self.device_state.enforce_to(device) {
+                log::warn!("startup reconcile: re-assert failed: {:?}", e);
+            } else {
+                // Reflect the corrected device in `observed`. Prefer a fresh read;
+                // fall back to intent (keeping the real brightness, which enforce_to
+                // doesn't touch) if the read fails.
+                self.observed = DeviceState::read(device).unwrap_or_else(|_| {
+                    let brightness = self.observed.lights_mode.keyboard_brightness;
+                    let mut corrected = self.device_state;
+                    corrected.lights_mode.keyboard_brightness = brightness;
+                    corrected
+                });
+            }
+        } else {
+            log::info!("startup reconcile: device matches intended state");
+        }
+
+        // The icon/tooltip render from `observed`; refresh them so a mismatch (or a
+        // correction) shows now rather than waiting for the next input-gated Mirror poll.
+        let _ = tray_icon.set_icon(Some(self.icon()));
+        if let Ok(tooltip) = self.tooltip() {
+            let _ = tray_icon.set_tooltip(Some(tooltip));
+        }
     }
 }
