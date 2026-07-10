@@ -313,6 +313,7 @@ struct JsonStatus {
     keyboard_brightness_percent: u8,
     logo_mode: String,
     battery_care_percent: u8,
+    max_fan: bool,
 }
 
 fn print_json(device: &device::Device) -> Result<()> {
@@ -351,6 +352,7 @@ fn print_json(device: &device::Device) -> Result<()> {
         keyboard_brightness_percent: brightness_to_percent(s.lights_mode.keyboard_brightness),
         logo_mode: format!("{:?}", s.lights_mode.logo_mode),
         battery_care_percent: s.battery_care.to_percent(),
+        max_fan: s.max_fan,
     };
 
     println!("{}", serde_json::to_string_pretty(&status)?);

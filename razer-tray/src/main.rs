@@ -311,15 +311,17 @@ fn main() -> Result<()> {
                 if matched != active_app_rule {
                     match matched {
                         Some(i) => {
-                            let (proc_name, mode) = {
-                                let rule = &state.app_profiles[i];
-                                (rule.process.clone(), rule.perf_mode)
+                            let rule = state.app_profiles[i].clone();
+                            // Overlay the rule onto the user's saved power-source profile
+                            // (not any prior transient), so unset fields fall back to what
+                            // they configured for AC/battery.
+                            let base = if state.ac_power {
+                                state.ac_state
+                            } else {
+                                state.battery_state
                             };
-                            log::info!("action: '{}' running -> {:?}", proc_name, mode);
-                            let target = DeviceState {
-                                perf_mode: mode,
-                                ..state.device_state
-                            };
+                            let target = rule.overlay(&base);
+                            log::info!("action: '{}' running -> {:?}", rule.process, target);
                             state.update_transient(&mut tray_icon, target, &device)?;
                         }
                         None => {

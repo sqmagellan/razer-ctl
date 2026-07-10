@@ -46,6 +46,8 @@ pub fn build(
             id,
             DeviceState {
                 perf_mode: mode,
+                // Max fan is Custom-only, so switching to a non-Custom mode clears it.
+                max_fan: false,
                 ..*dstate
             },
         );
@@ -79,11 +81,33 @@ pub fn build(
     let cpu_header = MenuItem::new("CPU boost", false, None);
     let gpu_header = MenuItem::new("GPU boost", false, None);
 
+    // Max fan speed: Custom-only (the EC rejects the command in other modes), so it lives
+    // in the Custom submenu as a checkbox. Toggling it from a non-Custom mode promotes to
+    // Custom, seeding the documented boost defaults exactly like a CPU/GPU boost pick does.
+    let max_fan_now = matches!(dstate.perf_mode, PerfMode::Custom(..)) && dstate.max_fan;
+    let max_fan_target = {
+        let perf_mode = if matches!(dstate.perf_mode, PerfMode::Custom(..)) {
+            dstate.perf_mode
+        } else {
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+        };
+        DeviceState {
+            perf_mode,
+            max_fan: !max_fan_now,
+            ..*dstate
+        }
+    };
+    event_handlers.insert("max_fan".to_string(), max_fan_target);
+    let max_fan_item = CheckMenuItem::with_id("max_fan", "Max fan speed", true, max_fan_now, None);
+    let separator2 = PredefinedMenuItem::separator();
+
     let custom_items: Vec<&dyn IsMenuItem> = std::iter::once(&cpu_header as &dyn IsMenuItem)
         .chain(cpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
         .chain([&separator as &dyn IsMenuItem])
         .chain(std::iter::once(&gpu_header as &dyn IsMenuItem))
         .chain(gpu_boosts.iter().map(|i| i as &dyn IsMenuItem))
+        .chain([&separator2 as &dyn IsMenuItem])
+        .chain(std::iter::once(&max_fan_item as &dyn IsMenuItem))
         .collect();
 
     perf_modes.append(&Submenu::with_items("Custom", true, &custom_items)?)?;

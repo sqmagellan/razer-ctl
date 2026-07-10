@@ -5,7 +5,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode};
+use crate::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode};
 use crate::command;
 use crate::transport::HidTransport;
 
@@ -54,6 +54,12 @@ pub struct DeviceState {
     pub lights_mode: LightsMode,
     pub battery_care: BatteryCare,
     pub fan_speed: FanSpeed,
+    /// Max Fan Speed Mode: runs both fans flat-out regardless of the Auto/Manual RPM
+    /// setting. Custom perf mode ONLY -- the EC rejects the command in other modes -- so
+    /// it's always false outside Custom. `#[serde(default)]` keeps configs written before
+    /// this field existed loadable (they deserialize to false).
+    #[serde(default)]
+    pub max_fan: bool,
 }
 
 /// Map a 0..=100 percentage to the device's 0..255 keyboard-brightness scale,
@@ -106,11 +112,20 @@ impl DeviceState {
 
         let battery_care = command::get_battery_care(device)?;
 
+        // Max fan is a Custom-only toggle; only read it there -- the getter is meaningless
+        // outside Custom, and skipping it spares a HID read on every (frequent) poll.
+        let max_fan = matches!(perf_mode, PerfMode::Custom(..))
+            && matches!(
+                command::get_max_fan_speed_mode(device)?,
+                MaxFanSpeedMode::Enable
+            );
+
         Ok(Self {
             perf_mode,
             lights_mode,
             battery_care,
             fan_speed,
+            max_fan,
         })
     }
 
@@ -131,6 +146,19 @@ impl DeviceState {
                 command::set_gpu_boost(device, gpu_boost)
             }
         }?;
+
+        // Max fan speed is Custom-only (the EC rejects the command otherwise). Match intent
+        // while in Custom; leaving Custom clears it in the EC. Non-fatal, like the fan write.
+        if matches!(self.perf_mode, PerfMode::Custom(..)) {
+            let mode = if self.max_fan {
+                MaxFanSpeedMode::Enable
+            } else {
+                MaxFanSpeedMode::Disable
+            };
+            if let Err(e) = command::set_max_fan_speed_mode(device, mode) {
+                log::warn!("max fan command failed: {:?}", e);
+            }
+        }
 
         if let Err(e) = match self.fan_speed {
             FanSpeed::Auto => command::set_fan_mode(device, crate::types::FanMode::Auto),
@@ -173,6 +201,7 @@ impl DeviceState {
     pub fn enforced_fields_differ(&self, intended: &DeviceState) -> bool {
         self.perf_mode != intended.perf_mode
             || self.fan_speed != intended.fan_speed
+            || self.max_fan != intended.max_fan
             || self.lights_mode.logo_mode != intended.lights_mode.logo_mode
             || self.battery_care != intended.battery_care
     }
@@ -203,6 +232,7 @@ impl Default for DeviceState {
             },
             battery_care: BatteryCare::Percent80,
             fan_speed: FanSpeed::Auto,
+            max_fan: false,
         }
     }
 }
@@ -231,8 +261,34 @@ impl DeviceStateDelta<GpuBoost> for DeviceState {
 pub struct AppProfile {
     /// Executable name to match, case-insensitive, e.g. "cyberpunk2077.exe".
     pub process: String,
-    /// Perf mode to switch to while that process is running.
-    pub perf_mode: PerfMode,
+    /// Perf mode to switch to while that process runs. Omit to leave perf unchanged.
+    #[serde(default)]
+    pub perf_mode: Option<PerfMode>,
+    /// Fan setting to apply while it runs. Omit to leave the fan unchanged.
+    #[serde(default)]
+    pub fan_speed: Option<FanSpeed>,
+    /// Logo lighting to apply while it runs. Omit to leave the logo unchanged.
+    #[serde(default)]
+    pub logo_mode: Option<LogoMode>,
+}
+
+impl AppProfile {
+    /// Overlay this rule's set fields onto `base`, yielding the transient state to apply
+    /// while the app runs. Unset (`None`) fields leave `base` untouched, so a rule can
+    /// change just the fan, just the perf mode, the logo, or any combination.
+    pub fn overlay(&self, base: &DeviceState) -> DeviceState {
+        let mut s = *base;
+        if let Some(p) = self.perf_mode {
+            s.perf_mode = p;
+        }
+        if let Some(f) = self.fan_speed {
+            s.fan_speed = f;
+        }
+        if let Some(l) = self.logo_mode {
+            s.lights_mode.logo_mode = l;
+        }
+        s
+    }
 }
 
 fn default_true() -> bool {
@@ -385,8 +441,8 @@ mod tests {
     #[test]
     fn matching_app_profile_first_match_wins_case_insensitive() {
         let profiles = vec![
-            AppProfile { process: "game.exe".into(), perf_mode: PerfMode::Hyperboost },
-            AppProfile { process: "editor.exe".into(), perf_mode: PerfMode::Balanced },
+            AppProfile { process: "game.exe".into(), perf_mode: Some(PerfMode::Hyperboost), fan_speed: None, logo_mode: None },
+            AppProfile { process: "editor.exe".into(), perf_mode: Some(PerfMode::Balanced), fan_speed: None, logo_mode: None },
         ];
         // No listed process running -> None.
         let running = vec!["explorer.exe".to_string(), "svchost.exe".to_string()];
@@ -406,6 +462,37 @@ mod tests {
 
         // Empty rule set never matches.
         assert_eq!(matching_app_profile(&[], &running), None);
+    }
+
+    #[test]
+    fn app_profile_overlay_applies_only_set_fields() {
+        let base = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Auto,
+            ..Default::default()
+        };
+        // A perf-only rule changes perf and leaves fan/logo alone.
+        let perf_only = AppProfile {
+            process: "game.exe".into(),
+            perf_mode: Some(PerfMode::Hyperboost),
+            fan_speed: None,
+            logo_mode: None,
+        };
+        let out = perf_only.overlay(&base);
+        assert_eq!(out.perf_mode, PerfMode::Hyperboost);
+        assert_eq!(out.fan_speed, base.fan_speed);
+        assert_eq!(out.lights_mode.logo_mode, base.lights_mode.logo_mode);
+
+        // A fan-only rule leaves perf untouched.
+        let fan_only = AppProfile {
+            process: "zoom.exe".into(),
+            perf_mode: None,
+            fan_speed: Some(FanSpeed::Manual(3000)),
+            logo_mode: None,
+        };
+        let out = fan_only.overlay(&base);
+        assert_eq!(out.perf_mode, PerfMode::Balanced);
+        assert_eq!(out.fan_speed, FanSpeed::Manual(3000));
     }
 
     // ---- device-facing logic, exercised through MockTransport (no hardware) ------
@@ -440,6 +527,7 @@ mod tests {
             },
             battery_care: BatteryCare::Percent80,
             fan_speed: FanSpeed::Auto,
+            max_fan: false,
         };
         assert_eq!(DeviceState::read(&mock).unwrap(), expected);
     }
@@ -459,6 +547,7 @@ mod tests {
             0x0383 => reply(&[1, 5, 0]),
             0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),
             0x0792 => reply(&[BatteryCare::Percent80 as u8]),
+            0x078f => reply(&[MaxFanSpeedMode::Disable as u8]), // Custom perf -> read() queries max fan
             other => panic!("unexpected command {other:#06x}"),
         });
         assert_eq!(

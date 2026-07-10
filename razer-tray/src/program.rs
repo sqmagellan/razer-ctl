@@ -125,6 +125,9 @@ impl ProgramState {
             FanSpeed::Auto => write!(&mut info, "\nFan: Auto")?,
             FanSpeed::Manual(rpm) => write!(&mut info, "\nFan: {rpm} set")?,
         }
+        if s.max_fan {
+            write!(&mut info, " (max)")?;
+        }
         write!(&mut info, " · {}/{} RPM", self.fan_actual.fan1, self.fan_actual.fan2)?;
 
         write!(&mut info, "\nLogo: {:?}", s.lights_mode.logo_mode)?;
