@@ -75,6 +75,7 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
         config.enforce,
         config.reassert_on_resume,
         config.app_profiles, // moves the Vec; keep as the last read of `config`
+        device.info().fan_rpm_range, // per-chassis fan bounds, from the descriptor
     )?;
     state.ac_power = platform::get_power_state()?;
     state.ac_state = config.ac_state;
@@ -196,7 +197,7 @@ fn main() -> Result<()> {
                         log::warn!("Failed to persist enforce flag: {:?}", e);
                     }
                     // Rebuild the menu so the checkmark reflects the new state.
-                    let (m, h) = menu::build(&state.device_state, state.enforce)?;
+                    let (m, h) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
                     state.menu = m;
                     state.event_handlers = h;
                     tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -208,7 +209,7 @@ fn main() -> Result<()> {
                             log::warn!("Failed to toggle autostart: {:?}", e);
                         }
                         // Rebuild the menu so the checkmark reflects the new state.
-                        let (m, h) = menu::build(&state.device_state, state.enforce)?;
+                        let (m, h) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
                         state.menu = m;
                         state.event_handlers = h;
                         tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -399,7 +400,7 @@ fn main() -> Result<()> {
                         if let Err(e) = state.persist() {
                             log::warn!("failed to persist adopted brightness: {:?}", e);
                         }
-                        if let Ok((menu, handlers)) = menu::build(&state.device_state, state.enforce) {
+                        if let Ok((menu, handlers)) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range) {
                             state.menu = menu;
                             state.event_handlers = handlers;
                             tray_icon.set_menu(Some(Box::new(state.menu.clone())));

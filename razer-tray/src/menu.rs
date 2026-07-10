@@ -11,13 +11,14 @@ use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
 
-use crate::state::{percent_to_brightness, DeviceState, DeviceStateDelta, FanSpeed, LightsMode, PerfMode};
+use crate::state::{percent_to_brightness, DeviceState, DeviceStateDelta, FanSpeed, LightsMode, PerfMode, FAN_RPM_STEP};
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
 /// (current intent) via checkmarks; `enforce` drives the Windows-only Enforce toggle.
 pub fn build(
     dstate: &DeviceState,
     enforce: bool,
+    fan_rpm_range: (u16, u16),
 ) -> Result<(Menu, HashMap<String, DeviceState>)> {
     let mut event_handlers = std::collections::HashMap::new();
     let menu = Menu::new();
@@ -91,6 +92,13 @@ pub fn build(
 
     // Fan Speed
     menu.append(&PredefinedMenuItem::separator())?;
+    let (fan_min, fan_max) = fan_rpm_range;
+    // Manual presets spanning this chassis's usable range, always including both endpoints
+    // (the step may not land on `fan_max` exactly, so append it if missing).
+    let mut fan_rpms: Vec<u16> = (fan_min..=fan_max).step_by(FAN_RPM_STEP as usize).collect();
+    if fan_rpms.last() != Some(&fan_max) {
+        fan_rpms.push(fan_max);
+    }
     let fan_speeds: Vec<CheckMenuItem> = [CheckMenuItem::with_id(
         "fan_speeds:auto",
         "Auto",
@@ -99,23 +107,35 @@ pub fn build(
         None,
     )]
     .into_iter()
-    .chain((0..=5500).step_by(500).map(|rpm| {
-        let event_id = format!("fan_speeds:{}", rpm);
-        event_handlers.insert(
-            event_id.clone(),
-            DeviceState {
-                fan_speed: FanSpeed::Manual(rpm),
-                ..*dstate
-            },
-        );
-        CheckMenuItem::with_id(
-            event_id,
-            format!("{} RPM", rpm),
-            dstate.fan_speed != FanSpeed::Manual(rpm),
-            dstate.fan_speed == FanSpeed::Manual(rpm),
-            None,
-        )
-    }))
+    .chain(
+        fan_rpms.into_iter().map(|rpm| {
+            let event_id = format!("fan_speeds:{}", rpm);
+            event_handlers.insert(
+                event_id.clone(),
+                DeviceState {
+                    fan_speed: FanSpeed::Manual(rpm),
+                    ..*dstate
+                },
+            );
+            // Label the extremes so it's clear these are the chassis's real limits
+            // (below min the EC floors the fan, above max it clamps). Range is per-device
+            // (Descriptor::fan_rpm_range), so this stays honest on every supported chassis.
+            let label = if rpm == fan_min {
+                format!("{} RPM (min)", rpm)
+            } else if rpm == fan_max {
+                format!("{} RPM (max)", rpm)
+            } else {
+                format!("{} RPM", rpm)
+            };
+            CheckMenuItem::with_id(
+                event_id,
+                label,
+                dstate.fan_speed != FanSpeed::Manual(rpm),
+                dstate.fan_speed == FanSpeed::Manual(rpm),
+                None,
+            )
+        }),
+    )
     .collect();
     event_handlers.insert(
         "fan_speeds:auto".to_string(),

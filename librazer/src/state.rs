@@ -15,6 +15,16 @@ pub enum FanSpeed {
     Manual(u16),
 }
 
+/// Manual-fan RPM step for building the UI presets (granularity; model-independent).
+pub const FAN_RPM_STEP: u16 = 400;
+
+/// Widest manual-fan bounds across all known Blade models, for callers that must fix a
+/// static range *before* the device is detected (e.g. the CLI arg parser). The per-device
+/// range lives on the [`crate::descriptor::Descriptor`] (`fan_rpm_range`) and is narrower;
+/// the EC clamps anything outside its real range regardless.
+pub const FAN_RPM_MIN_ANY: u16 = 2200;
+pub const FAN_RPM_MAX_ANY: u16 = 5300;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PerfMode {
     Battery,

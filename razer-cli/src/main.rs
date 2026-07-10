@@ -190,7 +190,7 @@ impl Cli for feature::Fan {
                 .about("Control fan")
                 .subcommand(clap::Command::new("auto").about("Set fan mode to auto"))
                 .subcommand(clap::Command::new("manual").about("Set fan mode to manual"))
-                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(2000..=5000)}, "rpm", "RPM", "Set fan rpm", "Fan RPM in range [2000, 5000]"})
+                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm", "Fan RPM (chassis-dependent; the EC clamps values outside this model's real range)"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(MaxFanSpeedMode)}, "max", "MAX", "Control Max Fan Speed Mode", "Max Fan Speed Mode"})
                 .arg_required_else_help(true),
         )
@@ -510,7 +510,8 @@ fn main() -> Result<()> {
                 name: "Unknown",
                 pid: *submatches.get_one::<u16>("pid").unwrap(),
                 features: feature::ALL_FEATURES,
-                init_cmds : &[]
+                init_cmds : &[],
+                fan_rpm_range: (2200, 5000), // unknown chassis: safe modern-Blade default; EC clamps
             })?;
             handle(&device, submatches, &cli_features)?;
         }

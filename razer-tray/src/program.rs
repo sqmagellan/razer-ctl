@@ -27,6 +27,9 @@ pub struct ProgramState {
     pub reassert_on_resume: bool,
     /// "Actions" rules: while a listed process runs, force its perf mode (config-driven).
     pub app_profiles: Vec<AppProfile>,
+    /// Usable manual-fan RPM bounds for this chassis (from `Descriptor::fan_rpm_range`),
+    /// captured once at startup so menu rebuilds don't need the `Device` on hand.
+    pub fan_rpm_range: (u16, u16),
 }
 
 impl ProgramState {
@@ -36,8 +39,9 @@ impl ProgramState {
         enforce: bool,
         reassert_on_resume: bool,
         app_profiles: Vec<AppProfile>,
+        fan_rpm_range: (u16, u16),
     ) -> Result<Self> {
-        let (menu, event_handlers) = menu::build(&device_state, enforce)?;
+        let (menu, event_handlers) = menu::build(&device_state, enforce, fan_rpm_range)?;
         Ok(Self {
             device_state,
             observed: device_state,
@@ -50,6 +54,7 @@ impl ProgramState {
             enforce,
             reassert_on_resume,
             app_profiles,
+            fan_rpm_range,
         })
     }
 
@@ -192,7 +197,7 @@ impl ProgramState {
         // A change is the new ground truth until Mirror reads again, so the tooltip/icon
         // (which render from `observed`) reflect it immediately.
         self.observed = self.device_state;
-        (self.menu, self.event_handlers) = menu::build(&self.device_state, self.enforce)?;
+        (self.menu, self.event_handlers) = menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
         self.fan_actual = get_fan_rpm(device)?;
         tray_icon.set_icon(Some(self.icon()))?;
         tray_icon.set_tooltip(Some(self.tooltip()?))?;

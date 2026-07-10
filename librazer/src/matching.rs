@@ -22,6 +22,7 @@ mod tests {
             pid,
             features: &[],
             init_cmds: &[],
+            fan_rpm_range: (2200, 5000),
         }
     }
 
