@@ -2,8 +2,8 @@ use librazer::command;
 use librazer::device;
 use librazer::feature;
 use librazer::types::{
-    BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode,
-    PerfMode,
+    BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
+    MaxFanSpeedMode, PerfMode, Rgb,
 };
 
 use librazer::feature::Feature;
@@ -138,6 +138,66 @@ impl Cli for feature::BatteryCare {
                 println!("{}: {}%", self.name(), current.to_percent());
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Parse a `RRGGBB` / `#RRGGBB` hex color into an `Rgb`.
+fn parse_hex_color(s: &str) -> Result<Rgb> {
+    let h = s.trim().trim_start_matches('#');
+    anyhow::ensure!(h.len() == 6, "color must be 6 hex digits (RRGGBB), got {:?}", s);
+    Ok(Rgb {
+        r: u8::from_str_radix(&h[0..2], 16)?,
+        g: u8::from_str_radix(&h[2..4], 16)?,
+        b: u8::from_str_radix(&h[4..6], 16)?,
+    })
+}
+
+impl Cli for feature::KbdLighting {
+    fn cmd(&self) -> Option<Command> {
+        Some(
+            clap::Command::new(self.name())
+                .about("Control keyboard RGB backlight effect (write-only; not read back)")
+                .subcommand(
+                    clap::Command::new("effect")
+                        .about("Set the backlight effect (off/static/spectrum)")
+                        .arg(
+                            arg!(<EFFECT> "Effect")
+                                .value_parser(clap::value_parser!(KeyboardEffect)),
+                        )
+                        .arg_required_else_help(true),
+                )
+                .subcommand(
+                    clap::Command::new("color")
+                        .about("Set a static color (implies the Static effect)")
+                        .arg(arg!(<HEX> "Color as RRGGBB or #RRGGBB"))
+                        .arg_required_else_help(true),
+                )
+                .arg_required_else_help(true),
+        )
+    }
+
+    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+        match matches.subcommand() {
+            Some((ident, sub)) if ident == self.name() => match sub.subcommand() {
+                Some(("effect", m)) => {
+                    let effect = *m.get_one::<KeyboardEffect>("EFFECT").unwrap();
+                    command::set_keyboard_effect(device, effect, Rgb::default())?;
+                    println!("Keyboard effect set to {:?}", effect);
+                    Ok(())
+                }
+                Some(("color", m)) => {
+                    let rgb = parse_hex_color(m.get_one::<String>("HEX").unwrap())?;
+                    command::set_keyboard_effect(device, KeyboardEffect::Static, rgb)?;
+                    println!(
+                        "Keyboard static color set to #{:02X}{:02X}{:02X}",
+                        rgb.r, rgb.g, rgb.b
+                    );
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }

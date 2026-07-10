@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 
-use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn, LogoMode};
+use librazer::types::{BatteryCare, CpuBoost, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode, Rgb};
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -208,6 +208,72 @@ pub fn build(
         true,
         &modes.iter().map(|i| i as &dyn IsMenuItem).collect::<Vec<_>>(),
     )?)?;
+
+    // Keyboard lighting (RGB / Chroma). Write-only intent -- Chroma has no getter on this
+    // device -- so a pick is stored + applied, never read back or reconciled (unlike perf/
+    // fan/logo). Effects: Off / Static (with a color swatch) / Spectrum (EC-animated). A
+    // swatch pick implies the Static effect. HW-confirmed Fn-safe on 0x029F (2026-07-10).
+    menu.append(&PredefinedMenuItem::separator())?;
+    let kbd_effects: Vec<CheckMenuItem> = KeyboardEffect::iter()
+        .map(|effect| {
+            let event_id = format!("kbd_effect:{:?}", effect);
+            event_handlers.insert(
+                event_id.clone(),
+                DeviceState {
+                    lights_mode: LightsMode {
+                        keyboard_effect: Some(effect),
+                        ..dstate.lights_mode
+                    },
+                    ..*dstate
+                },
+            );
+            let checked = dstate.lights_mode.keyboard_effect == Some(effect);
+            CheckMenuItem::with_id(event_id, format!("{:?}", effect), !checked, checked, None)
+        })
+        .collect();
+
+    // A small fixed palette for the Static effect (a full color picker is against the
+    // keep-small thesis -- edit an exact hex via the CLI / config for anything else).
+    let color_header = MenuItem::new("Static color", false, None);
+    let swatches: [(&str, Rgb); 6] = [
+        ("Red", Rgb { r: 0xFF, g: 0x00, b: 0x00 }),
+        ("Green", Rgb { r: 0x00, g: 0xFF, b: 0x00 }),
+        ("Blue", Rgb { r: 0x00, g: 0x00, b: 0xFF }),
+        ("White", Rgb { r: 0xFF, g: 0xFF, b: 0xFF }),
+        ("Purple", Rgb { r: 0xA0, g: 0x00, b: 0xFF }),
+        ("Cyan", Rgb { r: 0x00, g: 0xFF, b: 0xFF }),
+    ];
+    let color_items: Vec<CheckMenuItem> = swatches
+        .iter()
+        .map(|(name, rgb)| {
+            let event_id = format!("kbd_color:{}", name);
+            event_handlers.insert(
+                event_id.clone(),
+                DeviceState {
+                    lights_mode: LightsMode {
+                        keyboard_effect: Some(KeyboardEffect::Static),
+                        keyboard_color: *rgb,
+                        ..dstate.lights_mode
+                    },
+                    ..*dstate
+                },
+            );
+            let checked = dstate.lights_mode.keyboard_effect == Some(KeyboardEffect::Static)
+                && dstate.lights_mode.keyboard_color == *rgb;
+            CheckMenuItem::with_id(event_id, *name, !checked, checked, None)
+        })
+        .collect();
+
+    let kbd_sep = PredefinedMenuItem::separator();
+    let kbd_items: Vec<&dyn IsMenuItem> = kbd_effects
+        .iter()
+        .map(|i| i as &dyn IsMenuItem)
+        .chain([&kbd_sep as &dyn IsMenuItem])
+        .chain(std::iter::once(&color_header as &dyn IsMenuItem))
+        .chain(color_items.iter().map(|i| i as &dyn IsMenuItem))
+        .collect();
+    menu.append(&Submenu::with_items("Keyboard lighting", true, &kbd_items)?)?;
+
     menu.append(&PredefinedMenuItem::separator())?;
 
     // keyboard always on

@@ -68,6 +68,7 @@ feature_list![
     LidLogo,
     LightsAlwaysOn,
     KbdBacklight,
+    KbdLighting,
     Fan,
     Perf,
 ];

@@ -19,8 +19,8 @@
 use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
-    BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, LightsAlwaysOn, LogoMode,
-    MaxFanSpeedMode, PerfMode,
+    BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn,
+    LogoMode, MaxFanSpeedMode, PerfMode, Rgb,
 };
 
 use anyhow::{bail, ensure, Result};
@@ -230,6 +230,43 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
     Ok(())
 }
 
+// ---- keyboard RGB effect (0x0f02 extended-matrix effect; LED region 0x05 = backlight) ----
+//
+// HW-confirmed on 0x029F (2026-07-10): applies in Normal device mode (Fn keys survive), no
+// driver mode needed. Chroma is WRITE-ONLY here (no getter), so this is never read back --
+// callers hold the effect as intent and re-apply it (see `DeviceState::apply_keyboard_lighting`).
+
+/// Effect-command LED region: openrazer "backlight" (the whole keyboard).
+const KBD_LED_BACKLIGHT: u8 = 0x05;
+/// Variable-storage byte: NOSTORE applies the effect live without writing the EC's persisted
+/// slot. We always drive live from our own stored intent, so we never touch the EC's saved
+/// state (and never fight a Synapse-persisted effect).
+const KBD_STORE_NONE: u8 = 0x00;
+
+/// Set the keyboard backlight effect (and, for `Static`, its color). Write-only: the response
+/// is not echo-checked because the effect command does not mirror its args back the way the
+/// `set_*`/`get_*` register pairs do (P0 read status 0x02 = success, not an arg echo).
+///
+/// ⚠️ COLOR OFFSET IS HW-CALIBRATION-PENDING: P0 found this device reads the static r/g/b one
+/// slot over from openrazer's generic `[vs, led, effect, r, g, b]` layout (sending r=0xFF lit
+/// the board GREEN). The mechanism is proven; only the exact byte position is open. Verify on
+/// 0x029F and adjust the color bytes below if the hue is wrong -- it can't harm the hardware.
+pub fn set_keyboard_effect(
+    device: &impl HidTransport,
+    effect: KeyboardEffect,
+    color: Rgb,
+) -> Result<()> {
+    let args: Vec<u8> = match effect {
+        KeyboardEffect::Off => vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x00],
+        KeyboardEffect::Static => {
+            vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x01, color.r, color.g, color.b]
+        }
+        KeyboardEffect::Spectrum => vec![KBD_STORE_NONE, KBD_LED_BACKLIGHT, 0x03],
+    };
+    device.send(Packet::new(0x0f02, &args))?;
+    Ok(())
+}
+
 /// Read the Razer **device mode** (the `0x0084` get-mirror of `0x0004`). See the module
 /// docs: `Disable` (0x00) is Normal/hardware mode, `Enable` (0x03) is Driver mode.
 pub fn get_lights_always_on(device: &impl HidTransport) -> Result<LightsAlwaysOn> {
@@ -320,6 +357,28 @@ mod tests {
         assert_eq!(
             mock.sent(),
             vec![(0x0302, vec![1, 4, 2]), (0x0300, vec![1, 4, 1])]
+        );
+    }
+
+    #[test]
+    fn set_keyboard_effect_emits_backlight_effect_command() {
+        use crate::types::{KeyboardEffect, Rgb};
+        // Off / Spectrum are EC-animated -> no color bytes; Static carries r,g,b. Every
+        // effect targets LED region 0x05 (backlight) with NOSTORE (0x00) storage, command 0x0f02.
+        let off = MockTransport::echo();
+        set_keyboard_effect(&off, KeyboardEffect::Off, Rgb::default()).unwrap();
+        assert_eq!(off.sent(), vec![(0x0f02, vec![0x00, 0x05, 0x00])]);
+
+        let spectrum = MockTransport::echo();
+        set_keyboard_effect(&spectrum, KeyboardEffect::Spectrum, Rgb::default()).unwrap();
+        assert_eq!(spectrum.sent(), vec![(0x0f02, vec![0x00, 0x05, 0x03])]);
+
+        let static_red = MockTransport::echo();
+        set_keyboard_effect(&static_red, KeyboardEffect::Static, Rgb { r: 0x10, g: 0x20, b: 0x30 })
+            .unwrap();
+        assert_eq!(
+            static_red.sent(),
+            vec![(0x0f02, vec![0x00, 0x05, 0x01, 0x10, 0x20, 0x30])]
         );
     }
 

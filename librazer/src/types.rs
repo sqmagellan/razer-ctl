@@ -62,6 +62,40 @@ pub enum LogoMode {
     Static,
 }
 
+/// Keyboard backlight **effect** (the `0x0f02` extended-matrix effect command, LED region
+/// 0x05 = backlight). HW-confirmed on PID 0x029F (2026-07-10): the write applies in *Normal*
+/// device mode -- the Fn media keys keep working -- so this is Fn-safe and needs no driver
+/// mode (unlike the old always-on device-mode trap; see `command` module docs). Chroma has
+/// no getter on this device, so effect state is **write-only**: it's stored as *intent* and
+/// re-applied, never read back or reconciled.
+///
+/// v1 ships only the effects whose opcode byte was HW-confirmed: `Off` (0x00), `Static`
+/// (0x01, takes an RGB color), `Spectrum` (0x03, EC-animated). Breathing/Wave need extra
+/// direction/speed/color args and HW calibration -- deliberately out of v1 (RGB scope P2).
+#[derive(
+    EnumString, EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize,
+)]
+pub enum KeyboardEffect {
+    Off,
+    Static,
+    Spectrum,
+}
+
+/// A 24-bit RGB color for the `Static` keyboard effect. Defaults to white so a `Static` pick
+/// made without choosing a color is still visible.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Default for Rgb {
+    fn default() -> Self {
+        Self { r: 0xFF, g: 0xFF, b: 0xFF }
+    }
+}
+
 /// Razer **device mode** (the `0x0004` command), misleadingly named for historical reasons.
 /// `Enable` (0x03) is Driver mode and `Disable` (0x00) is Normal mode -- this is NOT a backlight
 /// toggle. Driver mode disables the keyboard's native Fn media keys; see `command` module docs.
