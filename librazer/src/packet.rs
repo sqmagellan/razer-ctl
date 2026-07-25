@@ -1,5 +1,4 @@
 use anyhow::{ensure, Result};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -65,12 +64,19 @@ impl std::fmt::Display for ResponseError {
 }
 
 impl Packet {
-    /// Transaction id placed in every outgoing packet. Razer firmware uses this
-    /// field to route responses, and the reference drivers use a FIXED id per
-    /// device family (razer-laptop-control: 0x1F; OpenRazer: 0xFF) rather than a
-    /// random one. A fixed id matches the reference and tends to reduce the retries
-    /// in `Device::send`. Set to `None` to restore the original random-id behavior.
-    const TRANSACTION_ID: Option<u8> = Some(0x1f);
+    /// Transaction id placed in every outgoing packet. Razer firmware uses this field
+    /// to route responses, and the reference drivers use a FIXED id per device family
+    /// (razer-laptop-control: 0x1F; OpenRazer: 0xFF) rather than a random one. A fixed
+    /// id matches the reference and reduces retries in `Device::send`.
+    ///
+    /// This was once `Option<u8>`, falling back to a random id when `None` -- which is
+    /// why this crate depended on `rand`. It has been a fixed `0x1f` since we
+    /// standardized on the reference behavior, so that fallback was unreachable and the
+    /// dependency (plus `rand_chacha`, `rand_core`, `ppv-lite86`, `zerocopy`,
+    /// `getrandom`) was dead weight in a binary people are asked to trust. If a device
+    /// ever needs a different id, use [`Packet::new_with_tx`] -- per-command and
+    /// explicit, which is what the probe path already does.
+    const TRANSACTION_ID: u8 = 0x1f;
 
     /// Capacity of the wire `args` buffer. The report is a fixed 90 bytes, of which 80
     /// carry arguments, and `data_size` is a single byte -- so anything longer can be
@@ -121,7 +127,7 @@ impl Packet {
 
         Packet {
             status: CommandStatus::New as u8,
-            id: Self::TRANSACTION_ID.unwrap_or_else(|| rand::thread_rng().gen()),
+            id: Self::TRANSACTION_ID,
             remaining_packets: 0x0000,
             protocol_type: 0x00,
             data_size: args.len() as u8,
@@ -278,8 +284,8 @@ mod tests {
     #[test]
     fn transaction_id_constant_is_fixed_0x1f() {
         // Reference drivers (razer-laptop-control 0x1F, OpenRazer 0xFF) use a fixed
-        // id; we standardized on 0x1F. Flip TRANSACTION_ID to None to restore random.
-        assert_eq!(Packet::TRANSACTION_ID, Some(0x1f));
+        // id; we standardized on 0x1F. Per-command overrides go through new_with_tx.
+        assert_eq!(Packet::TRANSACTION_ID, 0x1f);
     }
 
     #[test]
@@ -292,9 +298,11 @@ mod tests {
         assert_eq!(bytes.len(), 90);
 
         assert_eq!(bytes[0], 0x00, "status = New");
-        if let Some(id) = Packet::TRANSACTION_ID {
-            assert_eq!(bytes[1], id, "transaction id is wired into the packet");
-        }
+        assert_eq!(
+            bytes[1],
+            Packet::TRANSACTION_ID,
+            "transaction id is wired into the packet"
+        );
         // bytes[2..4] = remaining_packets (u16 LE) = 0
         assert_eq!(&bytes[2..4], &[0x00, 0x00]);
         assert_eq!(bytes[4], 0x00, "protocol_type");
