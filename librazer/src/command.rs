@@ -31,8 +31,11 @@ fn _send_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Resul
     Ok(response)
 }
 
-fn _set_perf_mode(device: &impl HidTransport, perf_mode: PerfMode, fan_mode: FanMode) -> Result<()> {
-
+fn _set_perf_mode(
+    device: &impl HidTransport,
+    perf_mode: PerfMode,
+    fan_mode: FanMode,
+) -> Result<()> {
     [1, 2].into_iter().try_for_each(|zone| {
         _send_command(
             device,
@@ -75,7 +78,9 @@ pub fn set_perf_mode(device: &impl HidTransport, perf_mode: PerfMode) -> Result<
 /// of the cosmetic "Modes do not match" line seen in `auto info`. A disagreement is now
 /// re-read once before failing, which resolves the race in the common case.
 pub fn get_perf_mode(device: &impl HidTransport) -> Result<(PerfMode, FanMode)> {
-    fn read_zones(device: &impl HidTransport) -> Result<((PerfMode, FanMode), (PerfMode, FanMode))> {
+    fn read_zones(
+        device: &impl HidTransport,
+    ) -> Result<((PerfMode, FanMode), (PerfMode, FanMode))> {
         let [r1, r2]: [Result<(PerfMode, FanMode)>; 2] = [1, 2].map(|zone| {
             let response = device.send(Packet::new(0x0d82, &[0, zone, 0, 0]))?;
             Ok((
@@ -151,12 +156,10 @@ pub fn get_fan_actual_rpm(device: &impl HidTransport, fan_zone: FanZone) -> Resu
     Ok(response.get_args()[2] as u16 * 100)
 }
 
-
 pub fn send_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;
     Ok(response)
 }
-
 
 pub fn set_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode) -> Result<()> {
     ensure!(
@@ -187,7 +190,12 @@ pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> 
 
 /// Like [`custom_command`], but send at a caller-chosen transaction id (for probing
 /// commands the reference drivers issue at an id other than our default 0x1F).
-pub fn custom_command_tx(device: &impl HidTransport, command: u16, args: &[u8], tx: u8) -> Result<()> {
+pub fn custom_command_tx(
+    device: &impl HidTransport,
+    command: u16,
+    args: &[u8],
+    tx: u8,
+) -> Result<()> {
     let report = Packet::try_new_with_tx(command, args, tx)?;
     println!("Report   {:?}", report);
     let response = device.send(report)?;
@@ -302,7 +310,10 @@ pub fn get_lights_always_on(device: &impl HidTransport) -> Result<LightsAlwaysOn
 /// `LightsAlwaysOn::Disable` (0x00) = Normal/hardware mode; `Enable` (0x03) = Driver mode,
 /// which disables the EC's native Fn media keys (see module docs). The tray only ever sets
 /// Normal mode; "keyboard always-on" is a Normal-mode keep-alive, not Driver mode.
-pub fn set_lights_always_on(device: &impl HidTransport, lights_always_on: LightsAlwaysOn) -> Result<()> {
+pub fn set_lights_always_on(
+    device: &impl HidTransport,
+    lights_always_on: LightsAlwaysOn,
+) -> Result<()> {
     let args = &[lights_always_on as u8, 0];
     ensure!(device
         .send(Packet::new(0x0004, args))?
@@ -347,8 +358,14 @@ mod tests {
         assert_eq!(
             mock.sent(),
             vec![
-                (0x0d02, vec![0x01, 1, PerfMode::Performance as u8, FanMode::Auto as u8]),
-                (0x0d02, vec![0x01, 2, PerfMode::Performance as u8, FanMode::Auto as u8]),
+                (
+                    0x0d02,
+                    vec![0x01, 1, PerfMode::Performance as u8, FanMode::Auto as u8]
+                ),
+                (
+                    0x0d02,
+                    vec![0x01, 2, PerfMode::Performance as u8, FanMode::Auto as u8]
+                ),
             ]
         );
     }
@@ -364,7 +381,10 @@ mod tests {
     fn set_battery_care_emits_single_byte_register() {
         let mock = MockTransport::echo();
         set_battery_care(&mock, BatteryCare::Percent80).unwrap();
-        assert_eq!(mock.sent(), vec![(0x0712, vec![BatteryCare::Percent80 as u8])]);
+        assert_eq!(
+            mock.sent(),
+            vec![(0x0712, vec![BatteryCare::Percent80 as u8])]
+        );
     }
 
     #[test]
@@ -416,7 +436,10 @@ mod tests {
         let mock = MockTransport::with_responder(|_| {
             reply(&[0, 0, PerfMode::Custom as u8, FanMode::Manual as u8])
         });
-        assert_eq!(get_perf_mode(&mock).unwrap(), (PerfMode::Custom, FanMode::Manual));
+        assert_eq!(
+            get_perf_mode(&mock).unwrap(),
+            (PerfMode::Custom, FanMode::Manual)
+        );
     }
 
     #[test]
@@ -424,7 +447,11 @@ mod tests {
         // Respond per zone (args[1]) so the two reads conflict -> ensure! trips.
         let mock = MockTransport::with_responder(|req| {
             let zone = req.get_args()[1];
-            let perf = if zone == 1 { PerfMode::Performance } else { PerfMode::Silent };
+            let perf = if zone == 1 {
+                PerfMode::Performance
+            } else {
+                PerfMode::Silent
+            };
             reply(&[0, 0, perf as u8, FanMode::Auto as u8])
         });
         assert!(get_perf_mode(&mock).is_err());
@@ -488,10 +515,8 @@ mod tests {
             _ => reply(&[0x01, Cluster::Cpu as u8, CpuBoost::Boost as u8]),
         });
         set_cpu_boost(&custom, CpuBoost::Boost).unwrap();
-        assert!(custom
-            .sent()
-            .iter()
-            .any(|(cmd, args)| *cmd == 0x0d07 && args == &[0x01, Cluster::Cpu as u8, CpuBoost::Boost as u8]));
+        assert!(custom.sent().iter().any(|(cmd, args)| *cmd == 0x0d07
+            && args == &[0x01, Cluster::Cpu as u8, CpuBoost::Boost as u8]));
 
         // Not in Custom mode -> the boost write must be refused.
         let balanced = MockTransport::with_responder(|_| {
@@ -523,7 +548,11 @@ mod tests {
         let (perf, fan) = get_perf_mode(&mock).expect("a mid-read mode change must not be fatal");
         assert_eq!(perf, PerfMode::Balanced);
         assert_eq!(fan, FanMode::Auto);
-        assert_eq!(mock.sent_count(), 4, "two zone reads, then two more to settle it");
+        assert_eq!(
+            mock.sent_count(),
+            4,
+            "two zone reads, then two more to settle it"
+        );
     }
 
     #[test]
@@ -543,7 +572,10 @@ mod tests {
         });
 
         let err = get_perf_mode(&mock).unwrap_err().to_string();
-        assert!(err.contains("Modes do not match"), "unexpected error: {err}");
+        assert!(
+            err.contains("Modes do not match"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -555,6 +587,10 @@ mod tests {
             get_perf_mode(&mock).unwrap(),
             (PerfMode::Balanced, FanMode::Auto)
         );
-        assert_eq!(mock.sent_count(), 2, "agreement must not cost an extra round-trip");
+        assert_eq!(
+            mock.sent_count(),
+            2,
+            "agreement must not cost an extra round-trip"
+        );
     }
 }

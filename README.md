@@ -51,6 +51,39 @@ service, no Synapse.
 
 ## Changelog
 
+### 2026-07 — portability & correctness pass (pre-publication)
+Groundwork for making this usable on Blades other than the one it was written on. Everything below
+was verified on `0x029F` where hardware could verify it; the parts that inherently cannot be
+(other chassis) are marked.
+
+- **Report checksum is now computed.** Every outgoing packet carries the real XOR-of-bytes-2..88
+  checksum that OpenRazer and razer-laptop-control both send, instead of the hard-coded `0x00` we
+  used to ship. HW-verified 2026-07-25: this Blade's EC accepts `crc = 0` *and* a correct CRC
+  equally, so this fixes no bug you can see here — it removes a whole class of silent failure on a
+  model whose firmware does validate the field.
+- **An unrecognized Blade no longer refuses to start.** A `RZ09-` SKU missing from `SUPPORTED` gets
+  a generic profile (all features offered, no init sequence guessed) and a loud warning naming the
+  SKU, rather than a hard "not supported" exit whose only workaround was `manual --pid`. Unsupported
+  commands answer `NotSupported` and fail fast, so a missing control degrades to one clean error.
+- **Per-PID fan envelopes for 44 uncatalogued chassis.** Transcribed from the community device
+  tables so the generic profile offers that machine's real fan range. *Transcribed, not tested* —
+  this project owns one Blade. Catalogued models in `SUPPORTED` always win.
+- **Resume detection now uses the OS power broadcast.** `PBT_APMRESUMESUSPEND` replaces the
+  "a tick gap over 30 s means we slept" heuristic, which misfired on this machine: running at
+  `IDLE_PRIORITY_CLASS` under EcoQoS, the loop was starved for **54.9 s while wide awake** and
+  logged a resume that never happened, firing a spurious re-assert.
+- **`DeviceState::read()` costs 11 HID round-trips, down from 13.** It was calling `get_perf_mode()`
+  twice — once for the perf mode, once for the fan mode — and each call reads both fan zones. A test
+  pins the budget so it can't quietly regress.
+- **`librazer` is usable as a library.** `HidTransport::send` takes a `Packet`, but `packet` was a
+  private module, so no outside crate could implement the trait — the seam was unusable by exactly
+  the consumers it exists for. `tests/public_api.rs` compiles as a separate crate and pins this.
+- **CI actually gates.** It now runs the test suite (it never did), builds `windows-msvc` (the
+  configuration we ship — it was building `windows-gnu`), and drops `cargo fmt --check`, which
+  conflicts with this tree's deliberate hand-formatting. Clippy stays gated. `Cargo.lock` is now
+  committed, as it should be for a repo that ships binaries.
+
+
 ### 2026-07 — keyboard lighting (effects-only)
 All HW-verified on a **single physical unit — a Razer Blade 16 (2023), `RZ09-0483U`, PID `0x029F`**
 (no other model was tested for lighting).
@@ -176,12 +209,15 @@ Two ways to build now: `cargo xwin` cross-build from the iMac (offline), or nati
 
 Rules for this fork:
 - Don't push, and don't add a remote. The `local` branch moves between machines via `git bundle`.
+  (This changes when the repo goes public — see the publication plan.)
 - `librazer/src/descriptor.rs` holds hand-maintained hardware descriptors — edit deliberately. Every
   entry now has to declare its `fan_rpm_range`, so adding a model means giving its real fan envelope.
-- Don't run `cargo fmt` — it rewrites the hand-formatting and touches `descriptor.rs`.
+- The tree is `rustfmt`-clean and CI gates on it. (The old "don't run `cargo fmt`" rule is retired:
+  it protected hand-formatting in `descriptor.rs` from when this Blade wasn't in any upstream table.
+  It is now, and rustfmt's changes there were cosmetic.)
 
 ## Credits
 
 Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)); multi-model fork
 by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). This local fork is maintained by
-sqmagellan, developed with McClaude (Claude Opus 5).
+sqmagellan, developed with Claude Opus 5.

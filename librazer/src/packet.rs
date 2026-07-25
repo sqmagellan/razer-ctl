@@ -217,11 +217,44 @@ impl Packet {
         self.classify_response(report)
             .map_err(|e| anyhow::anyhow!("{}", e))
     }
+
+    /// Byte offset of the `crc` field in the serialized 90-byte report.
+    const CRC_OFFSET: usize = 88;
+    /// Range of bytes the checksum covers: everything from the transaction id up to
+    /// (not including) the checksum itself.
+    const CRC_RANGE: std::ops::Range<usize> = 2..88;
+
+    /// The report checksum: a plain XOR of bytes 2..88.
+    ///
+    /// Matches OpenRazer's `razer_calculate_crc` (`driver/razercommon.c`) and
+    /// razer-laptop-control's `calc_crc`, which are independent decodes of the same
+    /// protocol and agree on both the algorithm and the range.
+    ///
+    /// We previously shipped a hard-coded `crc: 0x00` on every outgoing packet.
+    /// That is *accepted* by the Blade 16 (2023) firmware -- HW-verified 2026-07-25
+    /// on PID 0x029F: a zero-CRC write returns status 0x02 (success) -- so this is
+    /// not a fix for any observed failure. It is a portability fix: both reference
+    /// drivers compute it for every Razer device, so a model whose firmware *does*
+    /// validate the field would have rejected every command we sent, and on hardware
+    /// we cannot test that would look like "razer-ctl just doesn't work on my Blade".
+    /// Sending a correct checksum costs one XOR pass and removes the whole class of
+    /// failure.
+    fn compute_crc(bytes: &[u8]) -> u8 {
+        bytes[Self::CRC_RANGE].iter().fold(0u8, |crc, b| crc ^ b)
+    }
 }
 
 impl From<&Packet> for Vec<u8> {
     fn from(packet: &Packet) -> Vec<u8> {
-        bincode::serialize(packet).unwrap()
+        // The wire layout is a fixed 90-byte `#[repr(C)]` struct of plain integers, so
+        // bincode cannot fail here; if it somehow did, an all-zero report would be
+        // silently wrong on the bus, and a panic is the honest outcome.
+        let mut bytes = bincode::serialize(packet)
+            .expect("Packet is a fixed-size POD struct; serialization cannot fail");
+        // Stamp the checksum over the serialized form -- this is the single choke
+        // point where a packet becomes wire bytes, so nothing can bypass it.
+        bytes[Packet::CRC_OFFSET] = Packet::compute_crc(&bytes);
+        bytes
     }
 }
 
@@ -268,9 +301,56 @@ mod tests {
         assert_eq!(bytes[5], 4, "data_size = args.len()");
         assert_eq!(bytes[6], 0x0d, "command_class = high byte of command");
         assert_eq!(bytes[7], 0x02, "command_id = low byte of command");
-        assert_eq!(&bytes[8..12], &[0x01, 0x02, 0x00, 0x00], "args copied verbatim");
-        assert_eq!(bytes[88], 0x00, "crc");
+        assert_eq!(
+            &bytes[8..12],
+            &[0x01, 0x02, 0x00, 0x00],
+            "args copied verbatim"
+        );
+        // bytes[88] is the checksum, asserted in the crc tests below.
         assert_eq!(bytes[89], 0x00, "reserved");
+    }
+
+    #[test]
+    fn crc_is_xor_of_bytes_2_to_88() {
+        // Independently recompute the checksum the way OpenRazer's
+        // razer_calculate_crc does, and require the serialized packet to carry it.
+        let pkt = Packet::new(0x0d02, &[0x01, 0x02, 0x03, 0x04]);
+        let bytes: Vec<u8> = (&pkt).into();
+
+        let expected = bytes[2..88].iter().fold(0u8, |c, b| c ^ b);
+        assert_eq!(bytes[88], expected, "crc must be the XOR of bytes 2..88");
+
+        // Sanity: this packet has non-zero payload, so a zero crc would mean the
+        // field simply wasn't stamped -- the pre-fix behavior this test guards.
+        assert_ne!(
+            bytes[88], 0x00,
+            "a packet with payload must have a non-zero crc"
+        );
+
+        // The checksum must not be computed over itself or the trailing reserved byte.
+        assert_eq!(bytes[89], 0x00, "reserved stays zero");
+    }
+
+    #[test]
+    fn crc_changes_with_the_payload() {
+        // A checksum that ignored the args would be worse than useless -- it would
+        // look correct while failing to detect exactly the corruption it exists for.
+        let a: Vec<u8> = (&Packet::new(0x0d02, &[0x01])).into();
+        let b: Vec<u8> = (&Packet::new(0x0d02, &[0x02])).into();
+        assert_ne!(a[88], b[88], "differing payloads must yield differing crcs");
+
+        // Same for the command id.
+        let c: Vec<u8> = (&Packet::new(0x0d03, &[0x01])).into();
+        assert_ne!(a[88], c[88], "differing commands must yield differing crcs");
+    }
+
+    #[test]
+    fn crc_of_an_all_zero_body_is_zero() {
+        // Degenerate case: a command of 0x0000 with no args XORs to zero. Pinned so
+        // the "non-zero crc" assertion above is understood as payload-dependent, not
+        // a universal invariant.
+        let bytes: Vec<u8> = (&Packet::new(0x0000, &[])).into();
+        assert_eq!(bytes[2..88].iter().fold(0u8, |c, b| c ^ b), bytes[88]);
     }
 
     #[test]
@@ -293,8 +373,14 @@ mod tests {
     fn try_new_rejects_oversized_args() {
         // The CLI `cmd` probe forwards user-supplied bytes. The args buffer is 80 wide,
         // so 81 used to panic in copy_from_slice; it must now be a clean error.
-        assert!(Packet::try_new(0x0d82, &[0u8; 80]).is_ok(), "80 args is the limit");
-        assert!(Packet::try_new(0x0d82, &[0u8; 81]).is_err(), "81 args must error");
+        assert!(
+            Packet::try_new(0x0d82, &[0u8; 80]).is_ok(),
+            "80 args is the limit"
+        );
+        assert!(
+            Packet::try_new(0x0d82, &[0u8; 81]).is_err(),
+            "81 args must error"
+        );
         // 256 would also have wrapped data_size (u8) to 0 rather than overflowing.
         assert!(Packet::try_new(0x0d82, &[0u8; 256]).is_err());
         assert!(Packet::try_new_with_tx(0x0d82, &[0u8; 81], 0xff).is_err());
@@ -309,7 +395,10 @@ mod tests {
 
         let tx = Packet::try_new_with_tx(0x0f02, &[9], 0xff).unwrap();
         let bytes: Vec<u8> = (&tx).into();
-        assert_eq!(bytes[1], 0xff, "explicit transaction id overrides the default");
+        assert_eq!(
+            bytes[1], 0xff,
+            "explicit transaction id overrides the default"
+        );
     }
 
     /// Build a response that echoes `req`'s routing fields, then stamp `status`.
@@ -374,7 +463,9 @@ mod tests {
             .ensure_matches_report(&req)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("busy"), "busy should be named in the error: {err}");
+        assert!(
+            err.contains("busy"),
+            "busy should be named in the error: {err}"
+        );
     }
 }
-

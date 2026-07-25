@@ -7,11 +7,12 @@ use std::collections::HashMap;
 use strum::IntoEnumIterator;
 
 use librazer::types::{BatteryCare, CpuBoost, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode};
-use tray_icon::menu::{
-    CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
-};
+use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::state::{percent_to_brightness, DeviceState, DeviceStateDelta, FanSpeed, LightsMode, PerfMode, FAN_RPM_STEP};
+use crate::state::{
+    percent_to_brightness, DeviceState, DeviceStateDelta, FanSpeed, LightsMode, PerfMode,
+    FAN_RPM_STEP,
+};
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
 /// (current intent) via checkmarks; `enforce` drives the Windows-only Enforce toggle.
@@ -131,35 +132,33 @@ pub fn build(
         None,
     )]
     .into_iter()
-    .chain(
-        fan_rpms.into_iter().map(|rpm| {
-            let event_id = format!("fan_speeds:{}", rpm);
-            event_handlers.insert(
-                event_id.clone(),
-                DeviceState {
-                    fan_speed: FanSpeed::Manual(rpm),
-                    ..*dstate
-                },
-            );
-            // Label the extremes so it's clear these are the chassis's real limits
-            // (below min the EC floors the fan, above max it clamps). Range is per-device
-            // (Descriptor::fan_rpm_range), so this stays honest on every supported chassis.
-            let label = if rpm == fan_min {
-                format!("{} RPM (min)", rpm)
-            } else if rpm == fan_max {
-                format!("{} RPM (max)", rpm)
-            } else {
-                format!("{} RPM", rpm)
-            };
-            CheckMenuItem::with_id(
-                event_id,
-                label,
-                dstate.fan_speed != FanSpeed::Manual(rpm),
-                dstate.fan_speed == FanSpeed::Manual(rpm),
-                None,
-            )
-        }),
-    )
+    .chain(fan_rpms.into_iter().map(|rpm| {
+        let event_id = format!("fan_speeds:{}", rpm);
+        event_handlers.insert(
+            event_id.clone(),
+            DeviceState {
+                fan_speed: FanSpeed::Manual(rpm),
+                ..*dstate
+            },
+        );
+        // Label the extremes so it's clear these are the chassis's real limits
+        // (below min the EC floors the fan, above max it clamps). Range is per-device
+        // (Descriptor::fan_rpm_range), so this stays honest on every supported chassis.
+        let label = if rpm == fan_min {
+            format!("{} RPM (min)", rpm)
+        } else if rpm == fan_max {
+            format!("{} RPM (max)", rpm)
+        } else {
+            format!("{} RPM", rpm)
+        };
+        CheckMenuItem::with_id(
+            event_id,
+            label,
+            dstate.fan_speed != FanSpeed::Manual(rpm),
+            dstate.fan_speed == FanSpeed::Manual(rpm),
+            None,
+        )
+    }))
     .collect();
     event_handlers.insert(
         "fan_speeds:auto".to_string(),
@@ -206,7 +205,10 @@ pub fn build(
     menu.append(&Submenu::with_items(
         "Logo lighting",
         true,
-        &modes.iter().map(|i| i as &dyn IsMenuItem).collect::<Vec<_>>(),
+        &modes
+            .iter()
+            .map(|i| i as &dyn IsMenuItem)
+            .collect::<Vec<_>>(),
     )?)?;
 
     // Keyboard lighting (RGB / Chroma). Write-only intent -- Chroma has no getter on this
@@ -376,8 +378,7 @@ pub fn build(
 
     // gpu task killer
     menu.append(&PredefinedMenuItem::separator())?;
-    let terminate_item =
-        MenuItem::with_id("dgpu_terminate_proc", "Close GPU apps", true, None);
+    let terminate_item = MenuItem::with_id("dgpu_terminate_proc", "Close GPU apps", true, None);
     menu.append(&terminate_item)?;
     // footer
     menu.append(&PredefinedMenuItem::separator())?;

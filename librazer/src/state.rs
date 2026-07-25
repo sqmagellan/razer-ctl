@@ -5,9 +5,12 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{BatteryCare, CpuBoost, FanMode, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode, MaxFanSpeedMode};
 use crate::command;
 use crate::transport::HidTransport;
+use crate::types::{
+    BatteryCare, CpuBoost, FanMode, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
+    MaxFanSpeedMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FanSpeed {
@@ -93,22 +96,28 @@ impl DeviceState {
     /// profiles). Returns Err on any transient HID failure; callers should swallow
     /// that and keep the last known-good values rather than propagating it.
     pub fn read(device: &impl HidTransport) -> Result<Self> {
-        let perf_mode = match command::get_perf_mode(device)? {
-            (crate::types::PerfMode::Battery, _) => PerfMode::Battery,
-            (crate::types::PerfMode::Silent, _) => PerfMode::Silent,
-            (crate::types::PerfMode::Balanced, _) => PerfMode::Balanced,
-            (crate::types::PerfMode::Performance, _) => PerfMode::Performance,
-            (crate::types::PerfMode::Hyperboost, _) => PerfMode::Hyperboost,
-            (crate::types::PerfMode::Custom, _) => {
+        // One read serves both the perf mode and the fan mode: they come back in the
+        // same 0x0d82 response. This used to call get_perf_mode() twice -- and since
+        // each call reads *both* fan zones, that was 4 HID round-trips where 2 suffice.
+        // On the hover path (read + fan RPM) the whole exchange was 15 round-trips.
+        let (raw_perf_mode, raw_fan_mode) = command::get_perf_mode(device)?;
+
+        let perf_mode = match raw_perf_mode {
+            crate::types::PerfMode::Battery => PerfMode::Battery,
+            crate::types::PerfMode::Silent => PerfMode::Silent,
+            crate::types::PerfMode::Balanced => PerfMode::Balanced,
+            crate::types::PerfMode::Performance => PerfMode::Performance,
+            crate::types::PerfMode::Hyperboost => PerfMode::Hyperboost,
+            crate::types::PerfMode::Custom => {
                 let cpu_boost = command::get_cpu_boost(device)?;
                 let gpu_boost = command::get_gpu_boost(device)?;
                 PerfMode::Custom(cpu_boost, gpu_boost)
             }
         };
 
-        let fan_speed = match command::get_perf_mode(device)? {
-            (_, FanMode::Auto) => FanSpeed::Auto,
-            (_, FanMode::Manual) => {
+        let fan_speed = match raw_fan_mode {
+            FanMode::Auto => FanSpeed::Auto,
+            FanMode::Manual => {
                 let rpm = command::get_fan_rpm(device, crate::types::FanZone::Zone1)?;
                 FanSpeed::Manual(rpm)
             }
@@ -158,8 +167,12 @@ impl DeviceState {
             PerfMode::Battery => command::set_perf_mode(device, crate::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, crate::types::PerfMode::Silent),
             PerfMode::Balanced => command::set_perf_mode(device, crate::types::PerfMode::Balanced),
-            PerfMode::Performance => command::set_perf_mode(device, crate::types::PerfMode::Performance),
-            PerfMode::Hyperboost => command::set_perf_mode(device, crate::types::PerfMode::Hyperboost),
+            PerfMode::Performance => {
+                command::set_perf_mode(device, crate::types::PerfMode::Performance)
+            }
+            PerfMode::Hyperboost => {
+                command::set_perf_mode(device, crate::types::PerfMode::Hyperboost)
+            }
             PerfMode::Custom(cpu_boost, gpu_boost) => {
                 command::set_perf_mode(device, crate::types::PerfMode::Custom)
                     .and_then(|_| command::set_cpu_boost(device, cpu_boost))
@@ -373,7 +386,9 @@ pub struct ConfigState {
 impl Default for ConfigState {
     fn default() -> Self {
         Self {
-            ac_state: DeviceState { ..Default::default() },
+            ac_state: DeviceState {
+                ..Default::default()
+            },
             battery_state: DeviceState {
                 perf_mode: PerfMode::Battery,
                 ..Default::default()
@@ -510,8 +525,20 @@ mod tests {
     #[test]
     fn matching_app_profile_first_match_wins_case_insensitive() {
         let profiles = vec![
-            AppProfile { process: "game.exe".into(), perf_mode: Some(PerfMode::Hyperboost), fan_speed: None, logo_mode: None, keyboard_effect: None },
-            AppProfile { process: "editor.exe".into(), perf_mode: Some(PerfMode::Balanced), fan_speed: None, logo_mode: None, keyboard_effect: None },
+            AppProfile {
+                process: "game.exe".into(),
+                perf_mode: Some(PerfMode::Hyperboost),
+                fan_speed: None,
+                logo_mode: None,
+                keyboard_effect: None,
+            },
+            AppProfile {
+                process: "editor.exe".into(),
+                perf_mode: Some(PerfMode::Balanced),
+                fan_speed: None,
+                logo_mode: None,
+                keyboard_effect: None,
+            },
         ];
         // No listed process running -> None.
         let running = vec!["explorer.exe".to_string(), "svchost.exe".to_string()];
@@ -578,7 +605,10 @@ mod tests {
             keyboard_effect: Some(KeyboardEffect::Spectrum),
         };
         let out = lit.overlay(&base);
-        assert_eq!(out.lights_mode.keyboard_effect, Some(KeyboardEffect::Spectrum));
+        assert_eq!(
+            out.lights_mode.keyboard_effect,
+            Some(KeyboardEffect::Spectrum)
+        );
         assert_eq!(out.perf_mode, base.perf_mode);
         assert_eq!(out.fan_speed, base.fan_speed);
     }
@@ -592,7 +622,10 @@ mod tests {
         let none_mock = MockTransport::echo();
         DeviceState::default().apply(&none_mock).unwrap();
         let cmds: Vec<u16> = none_mock.sent().iter().map(|(c, _)| *c).collect();
-        assert!(!cmds.contains(&0x0f02), "no effect configured -> no 0x0f02 write");
+        assert!(
+            !cmds.contains(&0x0f02),
+            "no effect configured -> no 0x0f02 write"
+        );
 
         // With an effect set, apply() emits 0x0f02 AND re-asserts brightness (0x0303) after it,
         // so the effect write can't leave the backlight at the wrong brightness.
@@ -602,9 +635,18 @@ mod tests {
         let lit_mock = MockTransport::echo();
         lit.apply(&lit_mock).unwrap();
         let sent: Vec<u16> = lit_mock.sent().iter().map(|(c, _)| *c).collect();
-        let effect_at = sent.iter().position(|c| *c == 0x0f02).expect("effect written");
-        let bright_at = sent.iter().position(|c| *c == 0x0303).expect("brightness written");
-        assert!(effect_at < bright_at, "brightness must be re-asserted after the effect write");
+        let effect_at = sent
+            .iter()
+            .position(|c| *c == 0x0f02)
+            .expect("effect written");
+        let bright_at = sent
+            .iter()
+            .position(|c| *c == 0x0303)
+            .expect("brightness written");
+        assert!(
+            effect_at < bright_at,
+            "brightness must be re-asserted after the effect write"
+        );
     }
 
     // ---- device-facing logic, exercised through MockTransport (no hardware) ------
@@ -624,8 +666,8 @@ mod tests {
         use crate::types::{FanMode, PerfMode as Wire};
         let mock = MockTransport::with_responder(|req| match req.command() {
             0x0d82 => reply(&[0, 0, Wire::Performance as u8, FanMode::Auto as u8]),
-            0x0380 => reply(&[1, 4, 0]),                 // logo power off -> LogoMode::Off
-            0x0383 => reply(&[1, 5, 200]),               // keyboard brightness (id 5)
+            0x0380 => reply(&[1, 4, 0]), // logo power off -> LogoMode::Off
+            0x0383 => reply(&[1, 5, 200]), // keyboard brightness (id 5)
             0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),
             0x0792 => reply(&[BatteryCare::Percent80 as u8]),
             other => panic!("unexpected command {other:#06x}"),
@@ -653,7 +695,11 @@ mod tests {
             // _get_boost echoes the cluster at args[1]; cpu(1)->Boost, gpu(2)->High.
             0x0d87 => {
                 let cluster = req.get_args()[1];
-                let boost = if cluster == 1 { CpuBoost::Boost as u8 } else { GpuBoost::High as u8 };
+                let boost = if cluster == 1 {
+                    CpuBoost::Boost as u8
+                } else {
+                    GpuBoost::High as u8
+                };
                 reply(&[0, cluster, boost])
             }
             0x0380 => reply(&[1, 4, 0]),
@@ -680,16 +726,31 @@ mod tests {
         let apply_mock = MockTransport::echo();
         state.apply(&apply_mock).unwrap();
         let applied: Vec<u16> = apply_mock.sent().iter().map(|(c, _)| *c).collect();
-        assert!(applied.contains(&0x0303), "apply writes keyboard brightness");
+        assert!(
+            applied.contains(&0x0303),
+            "apply writes keyboard brightness"
+        );
         assert!(applied.contains(&0x0712), "apply writes battery care");
-        assert!(!applied.contains(&0x0004), "apply must NOT set device mode (driver mode breaks Fn keys)");
+        assert!(
+            !applied.contains(&0x0004),
+            "apply must NOT set device mode (driver mode breaks Fn keys)"
+        );
 
         let enforce_mock = MockTransport::echo();
         state.enforce_to(&enforce_mock).unwrap();
         let enforced: Vec<u16> = enforce_mock.sent().iter().map(|(c, _)| *c).collect();
-        assert!(enforced.contains(&0x0712), "enforce_to still asserts battery care");
-        assert!(!enforced.contains(&0x0303), "enforce_to must not touch brightness");
-        assert!(!enforced.contains(&0x0004), "enforce_to must not touch device mode");
+        assert!(
+            enforced.contains(&0x0712),
+            "enforce_to still asserts battery care"
+        );
+        assert!(
+            !enforced.contains(&0x0303),
+            "enforce_to must not touch brightness"
+        );
+        assert!(
+            !enforced.contains(&0x0004),
+            "enforce_to must not touch device mode"
+        );
     }
 
     #[test]
@@ -718,7 +779,10 @@ mod tests {
     #[test]
     fn profile_for_power_switches_only_on_mismatch() {
         let ac = DeviceState::default(); // Performance
-        let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
+        let batt = DeviceState {
+            perf_mode: PerfMode::Battery,
+            ..Default::default()
+        };
 
         // On AC but currently running the battery profile -> switch to AC.
         assert_eq!(profile_for_power(true, &batt, &ac, &batt, None), Some(ac));
@@ -737,7 +801,10 @@ mod tests {
         // AC/battery check saw the override as drift and reverted it on the next ~1s
         // tick -- so an app profile held for about a second and then died.
         let ac = DeviceState::default(); // Performance
-        let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
+        let batt = DeviceState {
+            perf_mode: PerfMode::Battery,
+            ..Default::default()
+        };
         let rule = AppProfile {
             process: "game.exe".into(),
             perf_mode: Some(PerfMode::Hyperboost),
@@ -767,7 +834,10 @@ mod tests {
         // Unplugging while a rule is active must still switch to the battery profile,
         // but the running app's settings have to survive the switch.
         let ac = DeviceState::default(); // Performance
-        let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
+        let batt = DeviceState {
+            perf_mode: PerfMode::Battery,
+            ..Default::default()
+        };
         // A fan-only rule, so we can see the base perf mode change underneath it.
         let rule = AppProfile {
             process: "game.exe".into(),
@@ -851,5 +921,69 @@ mod tests {
         };
         let mock = crate::transport::MockTransport::echo();
         assert!(state.apply_perf_fan_logo(&mock).is_ok());
+    }
+
+    /// Pin the HID cost of a `read()`.
+    ///
+    /// `read()` runs on the tray's hover and Mirror paths, so its round-trip count is a
+    /// user-visible latency budget, not a micro-optimisation. It previously called
+    /// `get_perf_mode()` twice -- once for the perf mode, once for the fan mode -- and
+    /// because each call reads both fan zones that cost 4 round-trips where 2 do. A
+    /// number here is worth more than a comment: if a future edit reintroduces a
+    /// duplicate read, this fails loudly instead of quietly doubling the poll cost.
+    #[test]
+    fn read_does_not_issue_duplicate_perf_mode_queries() {
+        use crate::transport::MockTransport;
+
+        // Custom + Manual fan: the most expensive branch (adds boost and setpoint reads).
+        let mock = MockTransport::with_responder(|req| {
+            let mut p = crate::packet::Packet::new(req.command(), &[]);
+            match req.command() {
+                0x0d82 => p.set_args(&[
+                    0,
+                    0,
+                    crate::types::PerfMode::Custom as u8,
+                    crate::types::FanMode::Manual as u8,
+                ]),
+                // Answer per cluster: GpuBoost only decodes 0..=2, so echoing the CPU
+                // value (Boost = 3) at the GPU would fail the conversion, not the count.
+                0x0d87 => {
+                    let cluster = req.get_args()[1];
+                    let value = if cluster == crate::types::Cluster::Cpu as u8 {
+                        CpuBoost::Boost as u8
+                    } else {
+                        GpuBoost::High as u8
+                    };
+                    p.set_args(&[0, cluster, value])
+                }
+                0x0d81 => p.set_args(&[0, req.get_args()[1], 30]),
+                0x0380 => p.set_args(&[1, 4, 1]),
+                0x0382 => p.set_args(&[1, 4, 2]),
+                0x0383 => p.set_args(&[1, 5, 200]),
+                0x0084 => p.set_args(&[0, 0]),
+                0x0792 => p.set_args(&[BatteryCare::Percent80 as u8]),
+                0x078f => p.set_args(&[MaxFanSpeedMode::Disable as u8]),
+                other => panic!("unexpected command {other:#06x}"),
+            }
+            p
+        });
+
+        DeviceState::read(&mock).expect("the canned device should read cleanly");
+
+        // The perf/fan register (0x0d82) is two round-trips -- one per fan zone -- and
+        // must be read exactly once for the whole state, not once per field.
+        let perf_reads = mock.sent().iter().filter(|(c, _)| *c == 0x0d82).count();
+        assert_eq!(
+            perf_reads, 2,
+            "0x0d82 should be read once (= 2 zone round-trips); a second call means \
+             the perf-mode and fan-mode reads have drifted apart again"
+        );
+
+        // Whole-state budget. Bump deliberately if a genuinely new register is added.
+        assert_eq!(
+            mock.sent_count(),
+            11,
+            "read() round-trip budget changed; was 13 before the duplicate was removed"
+        );
     }
 }

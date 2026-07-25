@@ -11,7 +11,10 @@ use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
 use crate::menu;
-use crate::state::{get_fan_rpm, brightness_to_percent, AppProfile, ConfigState, DeviceState, FanRpm, FanSpeed, PerfMode};
+use crate::state::{
+    brightness_to_percent, get_fan_rpm, AppProfile, ConfigState, DeviceState, FanRpm, FanSpeed,
+    PerfMode,
+};
 
 pub struct ProgramState {
     pub device_state: DeviceState,
@@ -128,11 +131,19 @@ impl ProgramState {
         if s.max_fan {
             write!(&mut info, " (max)")?;
         }
-        write!(&mut info, " · {}/{} RPM", self.fan_actual.fan1, self.fan_actual.fan2)?;
+        write!(
+            &mut info,
+            " · {}/{} RPM",
+            self.fan_actual.fan1, self.fan_actual.fan2
+        )?;
 
         write!(&mut info, "\nLogo: {:?}", s.lights_mode.logo_mode)?;
         if s.lights_mode.keyboard_brightness > 0 {
-            write!(&mut info, " · 🔆 {}%", brightness_to_percent(s.lights_mode.keyboard_brightness))?;
+            write!(
+                &mut info,
+                " · 🔆 {}%",
+                brightness_to_percent(s.lights_mode.keyboard_brightness)
+            )?;
         }
         // 💡 reflects the always-on *intent* (the keep-alive), not the device-mode
         // read in `observed` -- we keep the device in Normal mode, so that read is
@@ -165,12 +176,12 @@ impl ProgramState {
                 (img.into_raw(), w, h)
             };
             [
-                decode(include_bytes!("../icons/razer-blue.png")),   // 0 Battery
+                decode(include_bytes!("../icons/razer-blue.png")), // 0 Battery
                 decode(include_bytes!("../icons/razer-yellow.png")), // 1 Silent
-                decode(include_bytes!("../icons/razer-green.png")),  // 2 Balanced
-                decode(include_bytes!("../icons/razer-red.png")),    // 3 Performance
+                decode(include_bytes!("../icons/razer-green.png")), // 2 Balanced
+                decode(include_bytes!("../icons/razer-red.png")),  // 3 Performance
                 decode(include_bytes!("../icons/razer-violet.png")), // 4 Hyperboost
-                decode(include_bytes!("../icons/razer-brown.png")),  // 5 Custom
+                decode(include_bytes!("../icons/razer-brown.png")), // 5 Custom
             ]
         });
 
@@ -183,7 +194,8 @@ impl ProgramState {
             PerfMode::Custom(_, _) => 5,
         };
         let (rgba, width, height) = &icons[idx];
-        tray_icon::Icon::from_rgba(rgba.clone(), *width, *height).expect("failed to build tray icon")
+        tray_icon::Icon::from_rgba(rgba.clone(), *width, *height)
+            .expect("failed to build tray icon")
     }
 
     /// Apply `new_device_state` to the device and refresh the tray UI (icon/tooltip/menu)
@@ -200,7 +212,8 @@ impl ProgramState {
         // A change is the new ground truth until Mirror reads again, so the tooltip/icon
         // (which render from `observed`) reflect it immediately.
         self.observed = self.device_state;
-        (self.menu, self.event_handlers) = menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
+        (self.menu, self.event_handlers) =
+            menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
         self.fan_actual = get_fan_rpm(device)?;
         tray_icon.set_icon(Some(self.icon()))?;
         tray_icon.set_tooltip(Some(self.tooltip()?))?;
@@ -260,7 +273,11 @@ impl ProgramState {
     /// Synapse. Best-effort: read/apply errors are logged and swallowed so a transient
     /// HID hiccup can't abort startup. Refreshes the tray icon/tooltip from the real read
     /// so the display is honest immediately, not on the next input-gated poll.
-    pub fn reconcile_startup(&mut self, tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) {
+    pub fn reconcile_startup(
+        &mut self,
+        tray_icon: &mut tray_icon::TrayIcon,
+        device: &device::Device,
+    ) {
         let observed = match DeviceState::read(device) {
             Ok(o) => o,
             Err(e) => {

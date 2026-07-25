@@ -5,7 +5,7 @@ edition = "2021"
 
 authors = ["sqmagellan, forked from blauzim and Tarek Dakhran"]
 homepage = "https://github.com/blauzim/razer-ctl"
-description = "A tray icon for controlling Razer Blade features without Synapse. Current version developed with help from McClaude (Claude Opus 5)."
+description = "A tray icon for controlling Razer Blade features without Synapse. Developed by sqmagellan with Claude Opus 5."
 
 [dependencies]
 anyhow = "1.0.80"

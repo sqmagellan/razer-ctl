@@ -46,9 +46,11 @@ macro_rules! impl_unary_handle_cli {
 macro_rules! impl_unary_handle_with_arg_cli {
     (<$arg_type:ty>($matches:ident, $device:ident, $name:literal, $arg_name:literal, $arg2:literal, $setter:path)) => {
         match $matches.subcommand() {
-            Some(($name, matches)) => {
-                $setter($device, *matches.get_one::<$arg_type>($arg_name).unwrap(), $arg2)?
-            }
+            Some(($name, matches)) => $setter(
+                $device,
+                *matches.get_one::<$arg_type>($arg_name).unwrap(),
+                $arg2,
+            )?,
             _ => (),
         }
     };
@@ -106,33 +108,31 @@ impl Cli for feature::BatteryCare {
 
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
-            Some((ident, sub_matches)) if ident == self.name() => {
-                match sub_matches.subcommand() {
-                    Some(("set", set_matches)) => {
-                        let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
-                        let mode = BatteryCare::from_percent(percent)?;
-                        command::set_battery_care(device, mode)?;
-                        println!("Battery care set to {}% limit", mode.to_percent());
-                        Ok(())
-                    }
-                    Some(("enable", _)) => {
-                        command::set_battery_care(device, BatteryCare::Percent80)?;
-                        println!("Battery care enabled (charge limit set to 80%)");
-                        Ok(())
-                    }
-                    Some(("disable", _)) => {
-                        command::set_battery_care(device, BatteryCare::Disable)?;
-                        println!("Battery care disabled (will charge to 100%)");
-                        Ok(())
-                    }
-                    Some(("get", _)) => {
-                        let current = command::get_battery_care(device)?;
-                        println!("Current battery care: {}%", current.to_percent());
-                        Ok(())
-                    }
-                    _ => Ok(()),
+            Some((ident, sub_matches)) if ident == self.name() => match sub_matches.subcommand() {
+                Some(("set", set_matches)) => {
+                    let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
+                    let mode = BatteryCare::from_percent(percent)?;
+                    command::set_battery_care(device, mode)?;
+                    println!("Battery care set to {}% limit", mode.to_percent());
+                    Ok(())
                 }
-            }
+                Some(("enable", _)) => {
+                    command::set_battery_care(device, BatteryCare::Percent80)?;
+                    println!("Battery care enabled (charge limit set to 80%)");
+                    Ok(())
+                }
+                Some(("disable", _)) => {
+                    command::set_battery_care(device, BatteryCare::Disable)?;
+                    println!("Battery care disabled (will charge to 100%)");
+                    Ok(())
+                }
+                Some(("get", _)) => {
+                    let current = command::get_battery_care(device)?;
+                    println!("Current battery care: {}%", current.to_percent());
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
             Some(("info", _)) => {
                 let current = command::get_battery_care(device)?;
                 println!("{}: {}%", self.name(), current.to_percent());
@@ -220,7 +220,10 @@ impl Cli for CustomCommand {
                 let tx = matches.get_one::<u8>("tx").copied();
                 match tx {
                     Some(t) => {
-                        println!("Running custom command @ tx {:#04x}: {:x?} {:?}", t, cmd, args);
+                        println!(
+                            "Running custom command @ tx {:#04x}: {:x?} {:?}",
+                            t, cmd, args
+                        );
                         command::custom_command_tx(device, cmd, &args, t)
                     }
                     None => {
@@ -261,7 +264,9 @@ impl Cli for feature::Fan {
             }
             Some(("info", _)) => {
                 match command::get_perf_mode(device) {
-                    Ok((_, fan_mode @ FanMode::Auto)) => {println!("Fan: {:?}", fan_mode)},
+                    Ok((_, fan_mode @ FanMode::Auto)) => {
+                        println!("Fan: {:?}", fan_mode)
+                    }
                     Ok((_, fan_mode @ FanMode::Manual)) => {
                         println!(
                             "Fan set to: {:?}@{:?} RPM",
@@ -325,7 +330,7 @@ impl Cli for feature::Perf {
                     device,
                     0x0d88,
                     &[0, 1, 0]);
-                    println!("Rssponse: {:?}",response); 
+                    println!("Rssponse: {:?}",response);
                 */
                 Ok(())
             }
@@ -503,7 +508,7 @@ fn gen_cli_features(feature_list: &[&str]) -> Vec<Box<dyn Cli>> {
 
 fn main() -> Result<()> {
     env_logger::init();
-    
+
     let info_cmd = clap::Command::new("info").about("Get device info");
     let json_cmd = clap::Command::new("json").about("Print full device state as JSON");
     let auto_cmd = clap::Command::new("auto")
@@ -563,7 +568,7 @@ fn main() -> Result<()> {
                 name: "Unknown",
                 pid: *submatches.get_one::<u16>("pid").unwrap(),
                 features: feature::ALL_FEATURES,
-                init_cmds : &[],
+                init_cmds: &[],
                 fan_rpm_range: (2200, 5000), // unknown chassis: safe modern-Blade default; EC clamps
             })?;
             handle(&device, submatches, &cli_features)?;

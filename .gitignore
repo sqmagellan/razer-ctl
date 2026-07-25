@@ -11,8 +11,12 @@ data/wireshark_dump_raw_startup.csv
 data/wireshark_dump_raw_startup2.csv
 data/wireshark_dump_raw_startup.csv
 data/wireshark_dump_silent_0 fan speed.csv
-*.lock
-Cargo.lock
+# NOTE: Cargo.lock is deliberately NOT ignored (and `*.lock` is not blanket-ignored,
+# which used to catch it). This workspace produces shipped
+# *binaries* (razer-tray.exe / razer-cli.exe), and for binaries Cargo's own guidance
+# is to commit the lockfile: it makes a release build reproducible and makes a
+# dependency change visible in review rather than silently picked up on someone
+# else's machine. (It is left out of version control only for libraries.)
 
 # Workspace and cursor files (keep local only)
 *.code-workspace

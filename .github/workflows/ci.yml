@@ -2,7 +2,7 @@ name: razer-ctl-ci
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "local"]
   pull_request:
     branches: ["main"]
 
@@ -12,9 +12,12 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  build:
+  # Host-testable logic: the protocol/state layer is pure code over the HidTransport
+  # seam, so the whole librazer test suite (unit + the tests/ public-API crate) runs
+  # on a plain Linux runner with no Razer hardware attached. This is the gate that
+  # actually catches regressions; the build jobs below only prove it compiles.
+  test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
       - name: Run sccache-cache
@@ -22,15 +25,51 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev librust-atk-dev libgtk-3-dev gcc-mingw-w64
+          sudo apt-get install --no-install-recommends -y libudev-dev
+      - name: Run librazer tests
+        run: cargo test -p librazer --verbose
 
-      - name: Install target for Windows
-        run: rustup target add x86_64-pc-windows-gnu
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev librust-atk-dev libgtk-3-dev
+      # The tree is rustfmt-clean as of 2026-07-25. It previously wasn't -- 71 hunks --
+      # and the no-fmt rule existed because descriptor.rs was hand-formatted around a
+      # model this project had to add itself. That model is now in the upstream device
+      # tables, so the hand-formatting no longer carries information worth protecting,
+      # and rustfmt's changes to it were cosmetic anyway (`init_cmds :` -> `init_cmds:`).
       - name: Run fmt
         run: cargo fmt --all --check
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -Dwarnings
-      - name: Build for Windows
-        run: cargo build --verbose --release --target x86_64-pc-windows-gnu
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build with the MSVC toolchain: that is what the released binaries use
+      # (`cargo xwin ... --target x86_64-pc-windows-msvc` locally), and the tray
+      # links Win32 APIs whose bindings differ subtly between msvc and gnu. CI used
+      # to build windows-gnu, which meant the configuration we ship was never the
+      # configuration CI proved.
+      - name: Build for Windows (msvc)
+        run: cargo build --verbose --release --target x86_64-pc-windows-msvc
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev librust-atk-dev libgtk-3-dev
       - name: Build for Linux
         run: cargo build --verbose --release

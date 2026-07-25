@@ -95,14 +95,14 @@ pub enum LightsAlwaysOn {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BatteryCare {
-    Percent50 = 0xB2,      // 50% limit (178 decimal) - VERIFIED from BIOS
-    Percent55 = 0xB7,      // 55% limit (183 decimal) - VERIFIED works
-    Percent60 = 0xBC,      // 60% limit (188 decimal) - VERIFIED works
-    Percent65 = 0xC1,      // 65% limit (193 decimal) - calculated from pattern
-    Percent70 = 0xC6,      // 70% limit (198 decimal) - calculated from pattern
-    Percent75 = 0xCB,      // 75% limit (203 decimal) - calculated from pattern
-    Percent80 = 0xD0,      // 80% limit (208 decimal) - VERIFIED from protocol capture
-    Disable = 0x50,        // 100% - no limit (80 decimal) - VERIFIED
+    Percent50 = 0xB2, // 50% limit (178 decimal) - VERIFIED from BIOS
+    Percent55 = 0xB7, // 55% limit (183 decimal) - VERIFIED works
+    Percent60 = 0xBC, // 60% limit (188 decimal) - VERIFIED works
+    Percent65 = 0xC1, // 65% limit (193 decimal) - calculated from pattern
+    Percent70 = 0xC6, // 70% limit (198 decimal) - calculated from pattern
+    Percent75 = 0xCB, // 75% limit (203 decimal) - calculated from pattern
+    Percent80 = 0xD0, // 80% limit (208 decimal) - VERIFIED from protocol capture
+    Disable = 0x50,   // 100% - no limit (80 decimal) - VERIFIED
 }
 
 impl TryFrom<u8> for GpuBoost {
@@ -204,7 +204,10 @@ impl BatteryCare {
             73..=77 => Ok(BatteryCare::Percent75),
             78..=90 => Ok(BatteryCare::Percent80),
             91..=100 => Ok(BatteryCare::Disable),
-            _ => bail!("Invalid battery care percentage: {} (must be 50-100)", percent),
+            _ => bail!(
+                "Invalid battery care percentage: {} (must be 50-100)",
+                percent
+            ),
         }
     }
 
@@ -278,7 +281,11 @@ mod tests {
             BatteryCare::Disable,
         ] {
             let pct = mode.to_percent();
-            assert_eq!(BatteryCare::from_percent(pct).unwrap(), mode, "round-trip {pct}%");
+            assert_eq!(
+                BatteryCare::from_percent(pct).unwrap(),
+                mode,
+                "round-trip {pct}%"
+            );
         }
     }
 
@@ -309,7 +316,13 @@ mod tests {
         ] {
             assert_eq!(PerfMode::try_from(v as u8).unwrap(), v);
         }
-        for v in [CpuBoost::Low, CpuBoost::Medium, CpuBoost::High, CpuBoost::Boost, CpuBoost::Undervolt] {
+        for v in [
+            CpuBoost::Low,
+            CpuBoost::Medium,
+            CpuBoost::High,
+            CpuBoost::Boost,
+            CpuBoost::Undervolt,
+        ] {
             assert_eq!(CpuBoost::try_from(v as u8).unwrap(), v);
         }
         for v in [GpuBoost::Low, GpuBoost::Medium, GpuBoost::High] {

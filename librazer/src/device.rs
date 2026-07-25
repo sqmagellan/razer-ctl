@@ -163,14 +163,42 @@ impl Device {
     pub fn detect() -> Result<Device> {
         let (pid_list, model_number_prefix) = Device::enumerate()?;
 
-        match crate::matching::find_descriptor(&model_number_prefix, SUPPORTED) {
-            Some(supported) => Device::new(supported.clone()),
-            None => anyhow::bail!(
-                "Model {} with PIDs {:0>4x?} is not supported",
-                model_number_prefix,
-                pid_list
-            ),
+        if let Some(supported) = crate::matching::find_descriptor(&model_number_prefix, SUPPORTED) {
+            return Device::new(supported.clone());
         }
+
+        // Unknown SKU. The Razer laptop command set is shared across the line -- the
+        // reference drivers cover 50 models through one code path -- so an unlisted
+        // `RZ09-` machine is far more likely to be uncatalogued than unsupported.
+        // Refusing to start made those users unreachable; instead, try each PID the
+        // machine actually exposes with a generic profile. `Device::new` still probes
+        // the interface before accepting it, so a PID that isn't the control interface
+        // is rejected here exactly as it would be for a known model.
+        log::warn!(
+            "Model {} is not in the supported list; continuing with a generic profile \
+             (fan range {:?}, all features offered). Controls this chassis lacks will \
+             report 'not supported'. Please open an issue with this SKU so it can be added.",
+            model_number_prefix,
+            crate::matching::FALLBACK_FAN_RPM_RANGE
+        );
+        let mut last_err = None;
+        for pid in &pid_list {
+            match Device::new(crate::matching::fallback_descriptor(*pid)) {
+                Ok(device) => return Ok(device),
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        anyhow::bail!(
+            "Model {} with PIDs {:0>4x?} is not supported, and no generic fallback could \
+             open a control interface{}",
+            model_number_prefix,
+            pid_list,
+            match last_err {
+                Some(e) => format!(": {e}"),
+                None => String::new(),
+            }
+        )
     }
 }
 

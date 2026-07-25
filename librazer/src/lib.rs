@@ -16,4 +16,11 @@ pub mod transport;
 pub mod types;
 
 pub mod descriptor;
-mod packet;
+
+// `packet` is public because it is unavoidably part of this crate's public API:
+// `HidTransport::send` takes and returns a `Packet`, so an outside crate cannot
+// implement the trait -- the seam's whole purpose -- without naming the type.
+// While it was private, `impl HidTransport for MyThing` failed to compile outside
+// this crate with E0603 (`module packet is private`). The wire *fields* stay
+// private to the module; callers go through the constructors and accessors.
+pub mod packet;

@@ -118,7 +118,11 @@ fn main() -> Result<()> {
 
     let device = match device::Device::detect() {
         Ok(d) => {
-            log::info!("detected device: {} (0x{:04X})", d.info().name, d.info().pid);
+            log::info!(
+                "detected device: {} (0x{:04X})",
+                d.info().name,
+                d.info().pid
+            );
             d
         }
         Err(e) => {
@@ -149,10 +153,6 @@ fn main() -> Result<()> {
     // (the EC fades it after ~4s idle). This records the last keep-alive tick.
     #[cfg(target_os = "windows")]
     let mut last_keepalive_timestamp = std::time::Instant::now();
-    // Tracks wall-clock between event-loop ticks. The loop ticks ~every second;
-    // a gap far larger than that means the process was suspended (system sleep),
-    // which we use as a cheap, API-free "resumed from sleep" signal.
-    let mut last_tick_timestamp = std::time::Instant::now();
     // Throttles the on-hover Mirror refresh (tray-icon Enter/Move events fire rapidly).
     let mut last_hover_refresh = std::time::Instant::now();
 
@@ -181,8 +181,6 @@ fn main() -> Result<()> {
 
     event_loop.run(move |_, _, control_flow| {
         let now = std::time::Instant::now();
-        let since_last_tick = now.duration_since(last_tick_timestamp);
-        last_tick_timestamp = now;
         *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
 
         if let Err(e) = (|| -> Result<()> {
@@ -197,7 +195,8 @@ fn main() -> Result<()> {
                         log::warn!("Failed to persist enforce flag: {:?}", e);
                     }
                     // Rebuild the menu so the checkmark reflects the new state.
-                    let (m, h) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
+                    let (m, h) =
+                        menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
                     state.menu = m;
                     state.event_handlers = h;
                     tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -209,7 +208,8 @@ fn main() -> Result<()> {
                             log::warn!("Failed to toggle autostart: {:?}", e);
                         }
                         // Rebuild the menu so the checkmark reflects the new state.
-                        let (m, h) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
+                        let (m, h) =
+                            menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
                         state.menu = m;
                         state.event_handlers = h;
                         tray_icon.set_menu(Some(Box::new(state.menu.clone())));
@@ -263,7 +263,9 @@ fn main() -> Result<()> {
             // active the switch is TRANSIENT: the target includes the overlay, and
             // persisting it would bake the app's settings into the saved AC/battery
             // profile we're supposed to revert to when the app exits.
-            let active_rule = active_app_rule.and_then(|i| state.app_profiles.get(i)).cloned();
+            let active_rule = active_app_rule
+                .and_then(|i| state.app_profiles.get(i))
+                .cloned();
             if let Some(new_device_state) = state::profile_for_power(
                 state.ac_power,
                 &state.device_state,
@@ -279,16 +281,17 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Resume-from-sleep reassert. The event loop is frozen while the machine
-            // sleeps, so a tick gap far larger than our ~1s cadence means we just woke.
-            // When Enforce is on, re-assert immediately rather than waiting for the next
-            // poll. (The always-on keep-alive needs no resume handling -- it simply
-            // resumes ticking, and brightness is left to the Fn-key adopt path.)
-            if since_last_tick > std::time::Duration::from_secs(30) {
-                log::info!("resume detected (tick gap {:?})", since_last_tick);
+            // Resume-from-sleep reassert, driven by the OS power broadcast
+            // (PBT_APMRESUMESUSPEND) rather than by noticing a gap in our own ticks.
+            // The old heuristic -- "a tick gap over 30s means we were suspended" --
+            // misfired on this very machine: the tray runs at IDLE priority with
+            // EcoQoS throttling, so a busy system starved the loop for 54.9s while
+            // awake and it logged a resume that never happened. See platform::RESUMED.
+            if platform::take_resumed() {
+                log::info!("resume detected (OS power broadcast)");
                 // A just-woken EC can drop the perf mode the same way a just-booted one
                 // does (the startup-reconcile case). Re-assert the intended enforced
-                // fields on wake. This now fires whenever `reassert_on_resume` is set
+                // fields on wake. This fires whenever `reassert_on_resume` is set
                 // (the default) OR `enforce` is on -- previously it was enforce-only, so
                 // the common case (enforce off) silently kept whatever the EC reset to.
                 // The AC/battery switch above already corrected `device_state` for the
@@ -408,12 +411,15 @@ fn main() -> Result<()> {
                         if state.ac_power {
                             state.ac_state.lights_mode.keyboard_brightness = observed_brightness;
                         } else {
-                            state.battery_state.lights_mode.keyboard_brightness = observed_brightness;
+                            state.battery_state.lights_mode.keyboard_brightness =
+                                observed_brightness;
                         }
                         if let Err(e) = state.persist() {
                             log::warn!("failed to persist adopted brightness: {:?}", e);
                         }
-                        if let Ok((menu, handlers)) = menu::build(&state.device_state, state.enforce, state.fan_rpm_range) {
+                        if let Ok((menu, handlers)) =
+                            menu::build(&state.device_state, state.enforce, state.fan_rpm_range)
+                        {
                             state.menu = menu;
                             state.event_handlers = handlers;
                             tray_icon.set_menu(Some(Box::new(state.menu.clone())));

@@ -35,12 +35,10 @@ pub fn get_power_state() -> Result<bool> {
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         match GetSystemPowerStatus(&mut status) {
-            Ok(()) => {
-                match status.ACLineStatus {
-                    0 => ac_power = false,
-                    _ => ac_power = true,
-                }
-            }
+            Ok(()) => match status.ACLineStatus {
+                0 => ac_power = false,
+                _ => ac_power = true,
+            },
             Err(e) => {
                 log::warn!("Failed to get power status: {:?}", e);
             }
@@ -153,7 +151,8 @@ pub fn gpu_taskkill() -> Result<()> {
         // read -- it emits a bracketed placeholder like "[Insufficient Permissions]"
         // for protected/elevated processes, and killing a PID whose name we can't
         // even read is unsafe.
-        let unreadable = name.starts_with('[') || name.eq_ignore_ascii_case("Insufficient Permissions");
+        let unreadable =
+            name.starts_with('[') || name.eq_ignore_ascii_case("Insufficient Permissions");
         if unreadable || librazer::process_guard::is_protected_process(name) {
             log::info!("Skipping protected/unreadable process: {} ({})", pid, name);
         } else {
@@ -269,8 +268,36 @@ pub fn last_input_tick() -> Option<u32> {
     None
 }
 
+/// Set when Windows tells us the system has resumed from sleep. The event loop
+/// consumes (and clears) it to trigger the profile re-assert.
+///
+/// This replaces a tick-gap heuristic: the loop ran once a second, and a gap over 30 s
+/// was read as "we must have been suspended". That was wrong in both directions. The
+/// tray runs at `IDLE_PRIORITY_CLASS` with EcoQoS throttling (see `efficiency_mode`),
+/// so a busy machine can starve it far longer than the threshold while wide awake --
+/// observed 2026-07-25 on the Blade: a **54.9 s** gap logged as "resume detected" with
+/// no sleep involved, firing a spurious re-assert. In the other direction a short sleep
+/// could go unnoticed. `PBT_APMRESUMESUSPEND` is the OS telling us directly, so it is
+/// both precise and free.
+#[cfg(target_os = "windows")]
+pub static RESUMED: AtomicBool = AtomicBool::new(false);
+
+/// True exactly once per resume event, clearing the flag.
+#[cfg(target_os = "windows")]
+pub fn take_resumed() -> bool {
+    RESUMED.swap(false, Ordering::Relaxed)
+}
+
+/// No OS resume notification wired up off Windows; the caller keeps its previous
+/// behavior (never fires) rather than guessing from wall-clock.
+#[cfg(not(target_os = "windows"))]
+pub fn take_resumed() -> bool {
+    false
+}
+
 /// Window procedure for the hidden message-only window that receives power
-/// notifications. Updates DISPLAY_ON from GUID_CONSOLE_DISPLAY_STATE events.
+/// notifications. Updates DISPLAY_ON from GUID_CONSOLE_DISPLAY_STATE events and
+/// RESUMED from system suspend/resume broadcasts.
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn power_wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -281,20 +308,35 @@ unsafe extern "system" fn power_wnd_proc(
     use windows::Win32::System::Power::POWERBROADCAST_SETTING;
     use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST,
+        DefWindowProcW, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_POWERSETTINGCHANGE,
+        WM_POWERBROADCAST,
     };
 
-    if msg == WM_POWERBROADCAST && wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
-        // SAFETY: for a PBT_POWERSETTINGCHANGE message Windows guarantees lparam points
-        // to a POWERBROADCAST_SETTING valid for the duration of this call; we only read it.
-        let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
-        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
-            // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
-            let on = setting.Data[0] != 0;
-            DISPLAY_ON.store(on, Ordering::Relaxed);
-            log::info!("console display state: {}", if on { "on" } else { "off" });
+    if msg == WM_POWERBROADCAST {
+        match wparam.0 as u32 {
+            PBT_POWERSETTINGCHANGE => {
+                // SAFETY: for a PBT_POWERSETTINGCHANGE message Windows guarantees lparam points
+                // to a POWERBROADCAST_SETTING valid for the duration of this call; we only read it.
+                let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
+                if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
+                    // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
+                    let on = setting.Data[0] != 0;
+                    DISPLAY_ON.store(on, Ordering::Relaxed);
+                    log::info!("console display state: {}", if on { "on" } else { "off" });
+                }
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+            // Both arrive on wake: RESUMEAUTOMATIC always, RESUMESUSPEND additionally
+            // when the resume was user-initiated. Treating either as the signal (and
+            // latching a bool rather than counting) means the pair collapses into one
+            // re-assert.
+            PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                RESUMED.store(true, Ordering::Relaxed);
+                log::info!("system resume broadcast received");
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+            _ => {}
         }
-        return windows::Win32::Foundation::LRESULT(1);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -316,7 +358,8 @@ pub fn spawn_display_state_monitor() {
         use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
-            DEVICE_NOTIFY_WINDOW_HANDLE, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+            DEVICE_NOTIFY_WINDOW_HANDLE, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+            WNDCLASSW,
         };
 
         let hinstance: HINSTANCE = match GetModuleHandleW(None) {

@@ -15,6 +15,14 @@ use anyhow::Result;
 ///
 /// Implementors own the wire details (retries, report-id framing, response
 /// matching); callers above this trait deal only in `Packet`s.
+///
+/// This trait is implementable from *outside* the crate -- that is the point of a
+/// seam, and it is what lets a downstream consumer supply its own transport (a
+/// simulator, a remote proxy, a replay harness). That requires [`Packet`] to be
+/// nameable externally, so `librazer::packet` is a public module; see the doc
+/// comment on `mod packet` in lib.rs. The `external_impl_compiles` test below
+/// pins the property so a future `pub` -> private change fails the build here
+/// rather than silently in someone else's crate.
 pub trait HidTransport {
     fn send(&self, packet: Packet) -> Result<Packet>;
 }
