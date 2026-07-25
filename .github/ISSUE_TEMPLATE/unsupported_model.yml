@@ -1,0 +1,84 @@
+name: Unsupported / untested Blade
+description: You ran this on a Razer laptop that isn't catalogued. Report what happened so it can get a real descriptor.
+title: "[model] Razer Blade <model/year> — PID 0x____"
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is maintained by one person with one laptop (a Blade 16 2023). Everything else
+        runs on a *generic* profile, so your report is the only way another model becomes properly
+        supported.
+
+        Nothing here is urgent — partial reports are still useful. If a section doesn't apply,
+        say so rather than guessing: a guessed fan ceiling is worse than a blank one.
+  - type: input
+    id: model
+    attributes:
+      label: Model and year
+      description: As printed/marketed, e.g. "Razer Blade 14 (2024)".
+    validations:
+      required: true
+  - type: input
+    id: sku
+    attributes:
+      label: SKU
+      description: The RZ09-… string, usually on the underside label or in `msinfo32`.
+      placeholder: RZ09-0483
+    validations:
+      required: false
+  - type: textarea
+    id: enumerate
+    attributes:
+      label: Output of `razer-cli enumerate`
+      description: This gives the USB product ID, which is the key everything else hangs off.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `razer-cli auto json`
+      description: Paste it as-is, even if it errored — the error is the useful part.
+      render: json
+    validations:
+      required: false
+  - type: checkboxes
+    id: worked
+    attributes:
+      label: What actually worked
+      description: Only tick what you personally observed working on the hardware.
+      options:
+        - label: Performance modes (Balanced / Silent / Performance / …) change fan noise or behaviour
+        - label: Manual fan RPM
+        - label: Keyboard brightness
+        - label: Keyboard lighting effects (Spectrum / Wave / Breathing / Off)
+        - label: Logo lighting
+        - label: Charge limit (battery care)
+        - label: The Fn media keys still work while the tray is running
+  - type: textarea
+    id: fan_range
+    attributes:
+      label: Fan range, if you measured it
+      description: |
+        Only if you actually tested it. Set a manual RPM, then read `fan_actual_rpm` from
+        `razer-cli auto json`. The useful numbers are the lowest setpoint that changes anything and
+        the highest the EC will honour. **Leave blank if you're unsure** — a blank is better than a
+        guess, since this value goes straight into the device table.
+    validations:
+      required: false
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: false
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant lines from the log
+      description: "`%TEMP%\\razer-tray.log`. Startup lines and anything with WARN/ERROR."
+      render: text
+    validations:
+      required: false

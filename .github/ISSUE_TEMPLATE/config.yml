@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Upstream multi-model project
+    url: https://github.com/blauzim/razer-ctl
+    about: This is a fork. If your question is about the wider multi-model project, start there.
+  - name: Original project
+    url: https://github.com/tdakhran/razer-ctl
+    about: The project both forks descend from.

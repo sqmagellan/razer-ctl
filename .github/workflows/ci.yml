@@ -60,6 +60,11 @@ jobs:
       # configuration CI proved.
       - name: Build for Windows (msvc)
         run: cargo build --verbose --release --target x86_64-pc-windows-msvc
+      # The tray crate can only be built for Windows, so its tests cannot run on the
+      # Linux `test` job above -- this is the only place they execute in CI. Without
+      # this they were hand-run on a physical Blade, which is not a gate.
+      - name: Run razer-tray tests
+        run: cargo test --release --target x86_64-pc-windows-msvc -p razer-tray
 
   build-linux:
     runs-on: ubuntu-latest

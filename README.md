@@ -1,12 +1,18 @@
-# razer-ctl (local fork) — Blade control without Synapse
+# razer-ctl — Razer Blade control without Synapse
 
-**TL;DR:** a tray app + CLI that drive a Razer Blade's performance, fans, lighting, and battery care
-straight over HID, so you don't need Synapse running. Local-only fork — never pushed. Validated on a
-Razer Blade 16 (2023), `RZ09-0483`, USB PID `0x029F`, Windows 11.
+**TL;DR:** a tray app + CLI that drive a Razer Blade's performance modes, fans, lighting, and battery
+care straight over HID, so you don't need Synapse running. No installer, no service, no background
+account. The tray binary is 1.8 MB.
 
-> This fork lives on a local-only `local` branch that's never pushed; `main` tracks upstream. This
-> README documents the local build; `README.upstream.md` covers the wider multi-model project.
-> Upstream lists other Blade models, but only the 2023 16" has had hands-on testing here.
+**Honest scope, up front:** this is a fork maintained by one person with **one** laptop. Everything
+here is hardware-verified on a Razer Blade 16 (2023) — `RZ09-0483`, USB PID `0x029F`, Windows 11 — and
+nothing else. It is built to *degrade gracefully* on other Blades rather than to claim support it
+hasn't earned: an unrecognised model gets a generic profile instead of refusing to start, and any
+command the firmware doesn't implement fails with one clean error. If you have a different Blade,
+the [device support](#device-support) section says exactly what to expect and how to report what you
+find.
+
+`README.upstream.md` covers the wider multi-model project this forked from.
 
 ## What it is
 
@@ -43,6 +49,48 @@ and only writes to the device when you ask it to.
 
 Config lives at `%APPDATA%\razer-tray\config\default-config.toml`; the log at `%TEMP%\razer-tray.log`
 (Info level, capped at 10 MiB, wiped on rollover).
+
+## Device support
+
+**Tested:** Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11. One physical unit. Every
+hardware claim in this README was verified there and nowhere else.
+
+**Catalogued** — these ship a specific profile (feature set, init sequence, fan envelope) inherited
+from the upstream project's tables. They are *not* tested here:
+
+| Model | USB PID | Manual fan range |
+|---|---|---|
+| Razer Blade 16 (2023) — **tested** | `0x029F` | 2200–5000 RPM |
+| Razer Blade 16 (2023) Black | `0x029F` | 2200–5000 RPM |
+| Razer Blade 14 (2023) Mercury | `0x029D` | 2200–5000 RPM |
+| Razer Blade 16 (2024) | `0x02B7` | 2200–5000 RPM |
+| Razer Blade 16 (2025) RTX 5070 / 5080 / 5090 | `0x02C6` | 2200–5000 RPM |
+| Razer Blade 15 (2022) | `0x028A` | 3500–5000 RPM |
+
+**Everything else:** an unrecognised Razer laptop starts anyway on a generic profile — all features
+offered, a fan envelope looked up from a table of 44 further PIDs (transcribed from community data,
+*not* tested), and deliberately **no init sequence**, because inventing a plausible one is worse than
+having none. A command the firmware doesn't implement answers `NotSupported` and fails immediately
+with one clear error, so a missing control costs you an error message rather than a hang or a wrong
+write.
+
+So on an uncatalogued Blade, expect perf modes and fans to work, expect some lighting or battery
+features possibly not to, and expect to be told which. If you try it, please
+[open an issue](../../issues/new/choose) — the "unsupported model" template asks for the handful of
+values (`razer-cli enumerate` output, SKU, what worked) needed to turn a guess into a real
+descriptor.
+
+### What is NOT here, on purpose
+
+- **No arbitrary keyboard colour.** It requires Razer "driver mode", which disables the Fn media
+  keys. Effects (Spectrum/Wave/Breathing/Off) work in Normal mode; see Quirks.
+- **No CPU/GPU temperature-driven fan curve.** An honest CPU temperature on Windows needs a kernel
+  driver; the usual one (WinRing0) carries CVE-2020-14979, a local privilege-escalation flaw, and
+  has been quarantined by Defender since March 2025. Not worth it for a fan curve. Windows' own ACPI
+  thermal zones were tested here and are frozen stubs — they held *exactly* 45.1 °C and 27.9 °C
+  through a 25-second four-core load — so they are not a substitute. dGPU temperature via NVIDIA is
+  real and is in the tooltip.
+- **No Synapse-style cloud profiles, macros, or per-key lighting.**
 
 ## Install
 
@@ -260,24 +308,43 @@ the highlights:
 
 ## Building
 
-Two ways to build now: `cargo xwin` cross-build from the iMac (offline), or natively on the Blade itself
-(VS 2022 Build Tools + the stable-MSVC toolchain). Either way, the gate is the same:
+Stable Rust, no nightly features. Natively on Windows you need the VS 2022 Build Tools and the
+MSVC toolchain; from macOS or Linux, [`cargo xwin`](https://github.com/rust-cross/cargo-xwin)
+cross-builds the shipped target offline.
 
 ```
-.local-notes/check.sh    # clippy -D warnings + Windows cross-build + host tests; must end "ALL GREEN"
+cargo test -p librazer                                 # host-testable logic; runs anywhere
+cargo clippy --all-targets -- -D warnings
+cargo build --release --target x86_64-pc-windows-msvc   # or: cargo xwin build --release --target ...
 ```
 
-Rules for this fork:
-- Don't push, and don't add a remote. The `local` branch moves between machines via `git bundle`.
-  (This changes when the repo goes public — see the publication plan.)
-- `librazer/src/descriptor.rs` holds hand-maintained hardware descriptors — edit deliberately. Every
-  entry now has to declare its `fan_rpm_range`, so adding a model means giving its real fan envelope.
-- The tree is `rustfmt`-clean and CI gates on it. (The old "don't run `cargo fmt`" rule is retired:
-  it protected hand-formatting in `descriptor.rs` from when this Blade wasn't in any upstream table.
-  It is now, and rustfmt's changes there were cosmetic.)
+`-p librazer` is not laziness: `librazer::device` is gated to Windows and Linux (it needs `hidapi`),
+so a bare `cargo test` fails to compile `razer-cli` on macOS. On Windows or Linux the whole workspace
+tests, and `cargo test -p razer-tray` additionally covers the tray-only logic.
+
+CI runs the tests, clippy, `cargo fmt --check`, and builds both `x86_64-pc-windows-msvc` (what we
+ship) and Linux.
+
+Conventions worth knowing before you send a patch:
+- **`librazer` is the testable core.** It holds the HID protocol, the device model, and every pure
+  helper, and it builds and tests on any host. The tray crate can only be built for Windows, so
+  logic placed there is logic the test suite can never reach — if a function is pure, it belongs in
+  `librazer`.
+- **`librazer/src/descriptor.rs` is hand-maintained hardware data.** Every entry must declare its
+  real `fan_rpm_range`, so adding a model means supplying that model's measured fan envelope rather
+  than a guess.
+- **The tree is `rustfmt`-clean and CI gates on it.**
+- **Don't guess at hardware.** A wrong RPM ceiling or init sequence is worse than an absent one: the
+  generic profile deliberately ships *no* init commands rather than inventing a plausible sequence.
 
 ## Credits
 
-Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)); multi-model fork
-by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). This local fork is maintained by
-sqmagellan, developed with Claude Opus 5.
+Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)); multi-model
+fork by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). Both MIT, and this fork
+stays MIT. This fork is maintained by sqmagellan, developed with Claude Opus 5.
+
+Protocol knowledge came from reading [OpenRazer](https://github.com/openrazer/openrazer) and
+[razer-laptop-control](https://github.com/Razer-Linux/razer-laptop-control-no-dkms) — both GPL — for
+the *facts* they document (command IDs, the checksum algorithm, that `0x0004` is device mode and not
+a backlight flag). No code was copied from either; the implementations here are written from those
+facts. Facts about hardware aren't copyrightable; expression is, and none was taken.

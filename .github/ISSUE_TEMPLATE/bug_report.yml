@@ -1,0 +1,45 @@
+name: Bug report
+description: Something behaves incorrectly on a model that is already catalogued.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please include the log. The tray logs the exact tooltip it hands to Windows, the dGPU
+        telemetry sample, device detection, and every state change — most reports are diagnosable
+        from it alone, and without it a UI symptom usually isn't.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include whether Synapse is installed/running — it competes for the same device.
+    validations:
+      required: false
+  - type: input
+    id: model
+    attributes:
+      label: Model and USB PID
+      description: From `razer-cli enumerate`.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From the tray's About item, or `razer-cli --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: "`%TEMP%\\razer-tray.log`"
+      render: text
+    validations:
+      required: false
