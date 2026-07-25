@@ -64,6 +64,12 @@ HW-verified on `0x029F` (2026-07-25).
   profiles.
 - **Keyboard effect is read back from the device** (`0x0f82`), so the menu and `auto json` show what
   the firmware is actually running. This corrects a claim in this README: the getter does exist.
+- **dGPU temperature and power in the tooltip**, sampled on a background thread so the UI
+  never blocks on a subprocess, and failing open: no NVIDIA tools or no dGPU simply omits the
+  fields rather than showing "0°C". The monitor tolerates ~a minute of failures before giving
+  up, because the tray starts at login — exactly when the driver is least likely to answer — and
+  quitting on the first sample turned a transient startup condition into an empty tooltip for
+  the whole session.
 - **Tray binary is 1.84 MB, down from 3.40 MB.** The six icons are decoded and downscaled to 64×64
   raw RGBA at build time, so the `image` crate — a full PNG/JPEG/GIF/WebP decoder, present for six
   fixed icons — is no longer linked into a binary we're about to sign. (`embed-resource` was also a
@@ -219,6 +225,17 @@ the highlights:
 - **Device-loss recovery isn't runtime-tested on this unit.** The control interface rides the internal
   keyboard's USB composite, which Windows won't let you disable, so the recovery backoff is code-reviewed only.
 - **`battery-care get` can read stale right after a `set`** (~1–2 s firmware lag) — re-read to confirm.
+- **The tray tooltip really holds 63 characters, not 128.** `NOTIFYICONDATAW::szTip` is
+  declared `[u16; 128]` and the modern shell honours all 128 — but only when `cbSize` names a
+  struct version that has the long field. `tray-icon` 0.19 builds the struct with
+  `..std::mem::zeroed()`, leaving `cbSize` at **0**, which matches no declared version; the shell
+  accepts the call *without error* and then behaves like the original layout, where `szTip` was
+  `[u16; 64]`. Measured on `0x029F`: an 83-unit tooltip was accepted, yet the display cut
+  mid-way through the 🔋 surrogate pair, and the cut point moved with the length of the perf-mode
+  name. So the tooltip is *budgeted*, not appended-to: fields carry a priority and the least
+  important ones (logo mode first, then always-on, then GPU watts) drop out when a long
+  `Custom (CPU …, GPU …)` label crowds them. Appending and then truncating is what hid the GPU
+  fields entirely — truncation always eats the newest field.
 - **Tooltip refresh is hover-driven (tray-icon 0.19).** The tooltip/icon freshen when you actually hover
   the tray — which means you're at the machine, so the backlight's already awake and the read can't cause
   a visible pulse (Move is throttled to 500 ms). That let me delete the entire global `WH_KEYBOARD_LL`

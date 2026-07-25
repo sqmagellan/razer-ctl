@@ -16,29 +16,19 @@ use crate::state::{
     PerfMode,
 };
 
-/// `Shell_NotifyIcon`'s `szTip` holds 128 UTF-16 code units including the terminator, and
-/// silently truncates past that -- mid-character, if you're unlucky.
-const TOOLTIP_MAX_UTF16: usize = 120;
-
-/// Trim `s` to fit the tray tooltip, counting the units Windows actually counts.
+/// UTF-16 code units the tray tooltip may occupy.
 ///
-/// The previous guard took 120 *chars*, but every emoji in the tooltip (🔆 💡 🔋) is a
-/// surrogate pair -- two UTF-16 units -- so a char count under-reports the real length and
-/// a tooltip could exceed the limit while looking safely short. Truncation happens on a
-/// char boundary so a surrogate pair is never split.
-fn truncate_to_tooltip_limit(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut units = 0usize;
-    for c in s.chars() {
-        let w = c.len_utf16();
-        if units + w > TOOLTIP_MAX_UTF16 {
-            break;
-        }
-        out.push(c);
-        units += w;
-    }
-    out
-}
+/// MEASURED, not from the docs. `NOTIFYICONDATAW::szTip` is declared `[u16; 128]` and the
+/// modern shell honours 128 -- but only when `cbSize` identifies a struct version that has
+/// the long field. `tray-icon` 0.19 builds its `NOTIFYICONDATAW` with `..std::mem::zeroed()`,
+/// leaving **`cbSize` = 0**, which matches no declared version; the shell accepts the call
+/// (it does not return an error) and then behaves like the original layout, where `szTip` was
+/// `[u16; 64]`.
+///
+/// Confirmed on hardware: an 83-unit tooltip was accepted without error, yet the display cut
+/// mid-way through the 🔋 surrogate pair, and the cut point moved with the length of the perf
+/// mode name. 63 leaves room for the NUL terminator inside those 64 units.
+const TOOLTIP_MAX_UTF16: usize = 63;
 
 /// Push a tooltip to the tray icon, logging the first OS rejection.
 ///
@@ -161,70 +151,82 @@ impl ProgramState {
     }
 
     pub fn tooltip(&self) -> Result<String> {
-        use std::fmt::Write;
-
         // Render from `observed` (the device's last-read real state) so the tray
         // reflects reality, including changes made outside the tray (e.g. Fn keys).
         let s = &self.observed;
 
-        // Keep this compact: the Windows tray tooltip (Shell_NotifyIcon szTip) is
-        // capped at 128 UTF-16 units and silently truncates past that. We build a
-        // terse, few-line string and hard-cap it below as a final guard.
-        let mut info = String::new();
+        // Priorities: 0 is never dropped, larger numbers are shed first when the layout
+        // exceeds TOOLTIP_MAX_UTF16. Ordered by how much the field tells you that you
+        // can't already see: the perf mode is the app's whole identity, dGPU temp is
+        // invisible without us, and the logo colour is literally visible on the lid.
+        const P_MODE: u8 = 0;
+        const P_FAN: u8 = 1;
+        const P_GPU_TEMP: u8 = 2;
+        const P_FAN_RPM: u8 = 3;
+        const P_CHARGE: u8 = 4;
+        const P_BRIGHTNESS: u8 = 5;
+        const P_GPU_WATTS: u8 = 6;
+        const P_ALWAYS_ON: u8 = 7;
+        const P_LOGO: u8 = 8;
 
-        match s.perf_mode {
-            PerfMode::Battery => write!(&mut info, "Battery")?,
-            PerfMode::Silent => write!(&mut info, "Silent")?,
-            PerfMode::Balanced => write!(&mut info, "Balanced")?,
-            PerfMode::Performance => write!(&mut info, "Performance")?,
-            PerfMode::Hyperboost => write!(&mut info, "Hyperboost")?,
+        let mode = match s.perf_mode {
+            PerfMode::Battery => "Battery".to_string(),
+            PerfMode::Silent => "Silent".to_string(),
+            PerfMode::Balanced => "Balanced".to_string(),
+            PerfMode::Performance => "Performance".to_string(),
+            PerfMode::Hyperboost => "Hyperboost".to_string(),
             PerfMode::Custom(cpu_boost, gpu_boost) => {
-                write!(&mut info, "Custom (CPU {cpu_boost:?}, GPU {gpu_boost:?})")?
+                format!("Custom (CPU {cpu_boost:?}, GPU {gpu_boost:?})")
+            }
+        };
+
+        let fan = match (s.fan_speed, s.max_fan) {
+            (FanSpeed::Auto, false) => "Fan Auto".to_string(),
+            (FanSpeed::Auto, true) => "Fan Auto (max)".to_string(),
+            (FanSpeed::Manual(rpm), false) => format!("Fan {rpm} set"),
+            (FanSpeed::Manual(rpm), true) => format!("Fan {rpm} set (max)"),
+        };
+
+        let mut fan_line = vec![(P_FAN, fan)];
+        fan_line.push((
+            P_FAN_RPM,
+            format!("{}/{}", self.fan_actual.fan1, self.fan_actual.fan2),
+        ));
+
+        // dGPU telemetry, when a reading is available. Omitted entirely otherwise -- a
+        // machine with no dGPU must not see "0°C", which reads as a measurement.
+        let mut gpu_line = Vec::new();
+        if let Some((temp_c, watts)) = crate::platform::gpu_telemetry() {
+            gpu_line.push((P_GPU_TEMP, format!("GPU {temp_c}°C")));
+            if watts > 0.0 {
+                gpu_line.push((P_GPU_WATTS, format!("{watts:.0}W")));
             }
         }
 
-        match s.fan_speed {
-            FanSpeed::Auto => write!(&mut info, "\nFan: Auto")?,
-            FanSpeed::Manual(rpm) => write!(&mut info, "\nFan: {rpm} set")?,
+        let mut lights_line = Vec::new();
+        if s.battery_care != BatteryCare::DISABLE {
+            lights_line.push((P_CHARGE, format!("🔋 {}%", s.battery_care.to_percent())));
         }
-        if s.max_fan {
-            write!(&mut info, " (max)")?;
-        }
-        write!(
-            &mut info,
-            " · {}/{} RPM",
-            self.fan_actual.fan1, self.fan_actual.fan2
-        )?;
-
-        write!(&mut info, "\nLogo: {:?}", s.lights_mode.logo_mode)?;
         if s.lights_mode.keyboard_brightness > 0 {
-            write!(
-                &mut info,
-                " · 🔆 {}%",
-                brightness_to_percent(s.lights_mode.keyboard_brightness)
-            )?;
+            lights_line.push((
+                P_BRIGHTNESS,
+                format!(
+                    "🔆 {}%",
+                    brightness_to_percent(s.lights_mode.keyboard_brightness)
+                ),
+            ));
         }
         // 💡 reflects the always-on *intent* (the keep-alive), not the device-mode
         // read in `observed` -- we keep the device in Normal mode, so that read is
         // always Disable.
         if self.device_state.lights_mode.always_on == LightsAlwaysOn::Enable {
-            write!(&mut info, " · 💡")?;
+            lights_line.push((P_ALWAYS_ON, "💡".to_string()));
         }
+        lights_line.push((P_LOGO, format!("Logo {:?}", s.lights_mode.logo_mode)));
 
-        if s.battery_care != BatteryCare::DISABLE {
-            write!(&mut info, "\n🔋 {}%", s.battery_care.to_percent())?;
-        }
+        let layout = vec![vec![(P_MODE, mode)], fan_line, gpu_line, lights_line];
 
-        // dGPU telemetry, when a reading is available. Omitted entirely otherwise -- a
-        // machine with no dGPU must not see "0°C", which reads as a measurement.
-        if let Some((temp_c, watts)) = crate::platform::gpu_telemetry() {
-            write!(&mut info, "\nGPU {temp_c}°C")?;
-            if watts > 0.0 {
-                write!(&mut info, " · {watts:.0}W")?;
-            }
-        }
-
-        let out = truncate_to_tooltip_limit(&info);
+        let out = crate::state::fit_tooltip(&layout, TOOLTIP_MAX_UTF16);
         log_tooltip_transition(&out);
         Ok(out)
     }
@@ -383,35 +385,78 @@ impl ProgramState {
 mod tests {
     use super::*;
 
+    /// The layout must fit the real szTip budget for every perf mode, including the
+    /// longest possible Custom label -- that mode name is what pushed the old tooltip
+    /// past the limit and made Windows cut the battery emoji in half.
     #[test]
-    fn truncate_counts_utf16_units_not_chars() {
-        // Emoji are surrogate pairs: 2 UTF-16 units each. A char-based cap (the old guard)
-        // would let 120 emoji through = 240 units, double what szTip holds.
-        let emoji = "🔋".repeat(100);
-        let out = truncate_to_tooltip_limit(&emoji);
-        let units: usize = out.chars().map(char::len_utf16).sum();
-        assert!(units <= TOOLTIP_MAX_UTF16, "{units} units exceeds the cap");
-        assert_eq!(out.chars().count(), TOOLTIP_MAX_UTF16 / 2);
+    fn every_perf_mode_fits_the_tooltip_budget() {
+        use librazer::types::{CpuBoost, GpuBoost};
+        use strum::IntoEnumIterator;
+
+        let mut modes: Vec<PerfMode> = vec![
+            PerfMode::Battery,
+            PerfMode::Silent,
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Hyperboost,
+        ];
+        for cpu in CpuBoost::iter() {
+            for gpu in GpuBoost::iter() {
+                modes.push(PerfMode::Custom(cpu, gpu));
+            }
+        }
+
+        for mode in modes {
+            let mut state = ProgramState::new(
+                DeviceState {
+                    perf_mode: mode,
+                    ..DeviceState::default()
+                },
+                FanRpm {
+                    fan1: 2600,
+                    fan2: 2500,
+                },
+                false,
+                true,
+                Vec::new(),
+                (2200, 5000),
+            )
+            .expect("state builds");
+            state.observed = state.device_state;
+
+            let tip = state.tooltip().expect("tooltip renders");
+            let units = librazer::state::utf16_units(&tip);
+            assert!(
+                units <= TOOLTIP_MAX_UTF16,
+                "{mode:?} rendered {units} units (limit {TOOLTIP_MAX_UTF16}): {tip:?}"
+            );
+        }
     }
 
+    /// The perf mode is priority 0, so it survives no matter how much has to be shed.
     #[test]
-    fn truncate_leaves_short_ascii_untouched() {
-        let s = "Balanced\nFan: Auto";
-        assert_eq!(truncate_to_tooltip_limit(s), s);
-    }
+    fn the_perf_mode_is_never_dropped() {
+        let mut state = ProgramState::new(
+            DeviceState {
+                perf_mode: PerfMode::Custom(
+                    librazer::types::CpuBoost::Undervolt,
+                    librazer::types::GpuBoost::High,
+                ),
+                ..DeviceState::default()
+            },
+            FanRpm {
+                fan1: 2600,
+                fan2: 2500,
+            },
+            false,
+            true,
+            Vec::new(),
+            (2200, 5000),
+        )
+        .expect("state builds");
+        state.observed = state.device_state;
 
-    #[test]
-    fn truncate_never_splits_a_surrogate_pair() {
-        // An odd-length prefix must drop the whole emoji, not half of it -- a lone
-        // surrogate would render as a replacement glyph.
-        let s = format!("{}🔋", "a".repeat(TOOLTIP_MAX_UTF16 - 1));
-        let out = truncate_to_tooltip_limit(&s);
-        let units: usize = out.chars().map(char::len_utf16).sum();
-        assert_eq!(
-            units,
-            TOOLTIP_MAX_UTF16 - 1,
-            "the emoji must not be half-included"
-        );
-        assert!(!out.ends_with('\u{FFFD}'));
+        let tip = state.tooltip().expect("tooltip renders");
+        assert!(tip.starts_with("Custom"), "mode was dropped: {tip:?}");
     }
 }

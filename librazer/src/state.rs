@@ -116,6 +116,90 @@ pub fn nearest_brightness_percent(brightness: u8) -> u8 {
         .unwrap_or(0)
 }
 
+/// UTF-16 code units in `s` -- the unit Windows counts, not characters.
+pub fn utf16_units(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// Trim `s` to at most `limit` UTF-16 units, never splitting a surrogate pair.
+///
+/// A blind cut can land between the two halves of an astral character (every emoji), and a
+/// lone surrogate renders as a replacement glyph.
+pub fn truncate_utf16(s: &str, limit: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut units = 0usize;
+    for c in s.chars() {
+        let w = c.len_utf16();
+        if units + w > limit {
+            break;
+        }
+        out.push(c);
+        units += w;
+    }
+    out
+}
+
+/// Assemble a tray tooltip that fits `limit` UTF-16 units, shedding its least important
+/// fields rather than letting the shell cut the string.
+///
+/// `lines` is the desired layout: each inner `Vec` is one line of `(priority, text)` parts
+/// joined by a space, and lines are joined by `\n`. A *lower* priority number means "keep
+/// this harder", so `0` is the field we never drop. While the whole thing is over budget the
+/// largest priority number is removed and the layout re-rendered; a line left with no parts
+/// disappears entirely, taking its newline with it.
+///
+/// This exists because appending a field and then hard-truncating is not budgeting: the
+/// truncation always eats the *last* thing added, so the newest field is the one that
+/// silently never appears. Dropping by declared priority makes the loss deliberate and
+/// predictable instead.
+///
+/// Pure, and deliberately in the library so the host test suite covers it -- the tray crate
+/// cannot be built on a non-Windows host at all, so a test placed there would never run.
+pub fn fit_tooltip(lines: &[Vec<(u8, String)>], limit: usize) -> String {
+    fn render(lines: &[Vec<(u8, String)>]) -> String {
+        lines
+            .iter()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let mut lines: Vec<Vec<(u8, String)>> = lines.to_vec();
+    loop {
+        let rendered = render(&lines);
+        if utf16_units(&rendered) <= limit {
+            return rendered;
+        }
+
+        // Drop the least important remaining part. Ties go to the later one, so a line's
+        // trailing decoration goes before the field it decorates.
+        let mut worst: Option<(usize, usize, u8)> = None;
+        let mut remaining = 0usize;
+        for (li, line) in lines.iter().enumerate() {
+            remaining += line.len();
+            for (pi, (priority, _)) in line.iter().enumerate() {
+                if worst.is_none_or(|(_, _, w)| *priority >= w) {
+                    worst = Some((li, pi, *priority));
+                }
+            }
+        }
+
+        match worst {
+            // One part left and still too long: nothing to shed, so cut it safely.
+            Some((li, pi, _)) if remaining > 1 => {
+                lines[li].remove(pi);
+            }
+            _ => return truncate_utf16(&rendered, limit),
+        }
+    }
+}
+
 /// The next perf mode in the tray's left-click cycle.
 ///
 /// Pure, and deliberately in the library so it is exercised by the host test suite; the
@@ -494,6 +578,79 @@ pub fn profile_for_power(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: one line of parts at ascending priority.
+    fn line(parts: &[(u8, &str)]) -> Vec<(u8, String)> {
+        parts.iter().map(|(p, t)| (*p, (*t).to_string())).collect()
+    }
+
+    #[test]
+    fn utf16_units_counts_surrogate_pairs_as_two() {
+        // The bug this whole helper exists for: a char count says 1, Windows says 2.
+        assert_eq!("🔋".chars().count(), 1);
+        assert_eq!(utf16_units("🔋"), 2);
+        assert_eq!(utf16_units("ab🔋"), 4);
+    }
+
+    #[test]
+    fn fit_tooltip_leaves_a_layout_that_already_fits() {
+        let layout = vec![line(&[(0, "Balanced")]), line(&[(1, "Fan Auto")])];
+        assert_eq!(fit_tooltip(&layout, 63), "Balanced\nFan Auto");
+    }
+
+    #[test]
+    fn fit_tooltip_drops_the_highest_priority_number_first() {
+        // "Logo Static" is the most expendable field, so it goes before the charge limit.
+        let layout = vec![
+            line(&[(0, "Balanced")]),
+            line(&[(4, "🔋 80%"), (8, "Logo Static")]),
+        ];
+        let out = fit_tooltip(&layout, 20);
+        assert!(
+            out.contains("🔋 80%"),
+            "charge limit lost too early: {out:?}"
+        );
+        assert!(
+            !out.contains("Logo"),
+            "logo should have been dropped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn fit_tooltip_removes_the_newline_of_an_emptied_line() {
+        // A line whose every part was shed must not leave a blank line behind.
+        let layout = vec![line(&[(0, "Balanced")]), line(&[(9, "Logo Static")])];
+        let out = fit_tooltip(&layout, 10);
+        assert_eq!(out, "Balanced");
+    }
+
+    #[test]
+    fn fit_tooltip_never_drops_priority_zero() {
+        let layout = vec![
+            line(&[(0, "Custom (CPU Undervolt, GPU High)")]),
+            line(&[(1, "Fan Auto"), (3, "2600/2500")]),
+            line(&[(4, "🔋 80%"), (5, "🔆 82%")]),
+        ];
+        let out = fit_tooltip(&layout, 40);
+        assert!(out.starts_with("Custom"), "mode was dropped: {out:?}");
+        assert!(utf16_units(&out) <= 40);
+    }
+
+    #[test]
+    fn fit_tooltip_hard_truncates_a_single_oversized_field() {
+        // Nothing left to shed: cut it, but never mid-surrogate-pair.
+        let layout = vec![line(&[(0, "🔋🔋🔋🔋🔋")])];
+        let out = fit_tooltip(&layout, 5);
+        assert_eq!(utf16_units(&out), 4, "an emoji was split: {out:?}");
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn truncate_utf16_respects_the_budget_and_pair_boundaries() {
+        assert_eq!(truncate_utf16("abcdef", 3), "abc");
+        assert_eq!(truncate_utf16("a🔋b", 2), "a");
+        assert_eq!(truncate_utf16("a🔋b", 3), "a🔋");
+    }
 
     #[test]
     fn percent_to_brightness_spans_full_range() {
