@@ -106,6 +106,11 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     platform::spawn_display_state_monitor();
 
+    // Sample dGPU temp/power in the background for the tooltip. Fails open: no NVIDIA
+    // tools or no dGPU means the tooltip simply omits those fields.
+    #[cfg(target_os = "windows")]
+    platform::spawn_gpu_telemetry_monitor();
+
     // Create a named mutex (unique string for your app)
     let instance = SingleInstance::new("razer-tray").unwrap();
     if !instance.is_single() {

@@ -16,6 +16,30 @@ use crate::state::{
     PerfMode,
 };
 
+/// `Shell_NotifyIcon`'s `szTip` holds 128 UTF-16 code units including the terminator, and
+/// silently truncates past that -- mid-character, if you're unlucky.
+const TOOLTIP_MAX_UTF16: usize = 120;
+
+/// Trim `s` to fit the tray tooltip, counting the units Windows actually counts.
+///
+/// The previous guard took 120 *chars*, but every emoji in the tooltip (🔆 💡 🔋) is a
+/// surrogate pair -- two UTF-16 units -- so a char count under-reports the real length and
+/// a tooltip could exceed the limit while looking safely short. Truncation happens on a
+/// char boundary so a surrogate pair is never split.
+fn truncate_to_tooltip_limit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut units = 0usize;
+    for c in s.chars() {
+        let w = c.len_utf16();
+        if units + w > TOOLTIP_MAX_UTF16 {
+            break;
+        }
+        out.push(c);
+        units += w;
+    }
+    out
+}
+
 pub struct ProgramState {
     pub device_state: DeviceState,
     pub observed: DeviceState,
@@ -149,9 +173,16 @@ impl ProgramState {
             write!(&mut info, "\n🔋 {}%", s.battery_care.to_percent())?;
         }
 
-        // Hard cap well under the 128-UTF-16-unit limit (emoji are 2 units each;
-        // counting scalar chars with margin keeps us safe without counting UTF-16).
-        Ok(info.chars().take(110).collect())
+        // dGPU telemetry, when a reading is available. Omitted entirely otherwise -- a
+        // machine with no dGPU must not see "0°C", which reads as a measurement.
+        if let Some((temp_c, watts)) = crate::platform::gpu_telemetry() {
+            write!(&mut info, "\nGPU {temp_c}°C")?;
+            if watts > 0.0 {
+                write!(&mut info, " · {watts:.0}W")?;
+            }
+        }
+
+        Ok(truncate_to_tooltip_limit(&info))
     }
 
     pub fn icon(&self) -> tray_icon::Icon {
@@ -301,5 +332,42 @@ impl ProgramState {
         if let Ok(tooltip) = self.tooltip() {
             let _ = tray_icon.set_tooltip(Some(tooltip));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_counts_utf16_units_not_chars() {
+        // Emoji are surrogate pairs: 2 UTF-16 units each. A char-based cap (the old guard)
+        // would let 120 emoji through = 240 units, double what szTip holds.
+        let emoji = "🔋".repeat(100);
+        let out = truncate_to_tooltip_limit(&emoji);
+        let units: usize = out.chars().map(char::len_utf16).sum();
+        assert!(units <= TOOLTIP_MAX_UTF16, "{units} units exceeds the cap");
+        assert_eq!(out.chars().count(), TOOLTIP_MAX_UTF16 / 2);
+    }
+
+    #[test]
+    fn truncate_leaves_short_ascii_untouched() {
+        let s = "Balanced\nFan: Auto";
+        assert_eq!(truncate_to_tooltip_limit(s), s);
+    }
+
+    #[test]
+    fn truncate_never_splits_a_surrogate_pair() {
+        // An odd-length prefix must drop the whole emoji, not half of it -- a lone
+        // surrogate would render as a replacement glyph.
+        let s = format!("{}🔋", "a".repeat(TOOLTIP_MAX_UTF16 - 1));
+        let out = truncate_to_tooltip_limit(&s);
+        let units: usize = out.chars().map(char::len_utf16).sum();
+        assert_eq!(
+            units,
+            TOOLTIP_MAX_UTF16 - 1,
+            "the emoji must not be half-included"
+        );
+        assert!(!out.ends_with('\u{FFFD}'));
     }
 }

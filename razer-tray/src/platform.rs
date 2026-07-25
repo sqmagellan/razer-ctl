@@ -268,6 +268,116 @@ pub fn last_input_tick() -> Option<u32> {
     None
 }
 
+/// Latest dGPU telemetry, published by [`spawn_gpu_telemetry_monitor`] and read by the
+/// tooltip. Packed into atomics so the UI thread never blocks on a subprocess.
+///
+/// [`GPU_UNAVAILABLE`] means "no reading": no NVIDIA tools, no dGPU, or the query failed.
+/// The tooltip omits the fields entirely in that case rather than showing a zero, because
+/// "0 °C" reads as a measurement and would be a lie.
+#[cfg(target_os = "windows")]
+pub static GPU_TEMP_C: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(GPU_UNAVAILABLE);
+/// dGPU board power in centiwatts (so one decimal survives an integer atomic).
+#[cfg(target_os = "windows")]
+pub static GPU_POWER_CW: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(GPU_UNAVAILABLE);
+
+/// Sentinel for "we have no valid reading".
+pub const GPU_UNAVAILABLE: u32 = u32::MAX;
+
+/// How often to sample the dGPU. Slow on purpose: this is a tooltip garnish, and each
+/// sample costs an `nvidia-smi` process (~60-80 ms measured on the Blade 16 2023).
+#[cfg(target_os = "windows")]
+const GPU_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Current dGPU temperature (°C) and board power (watts), if a reading is available.
+///
+/// `watts` is 0.0 when the temperature is known but power isn't (some GPUs don't report
+/// `power.draw`); callers should treat that as "no power figure" rather than "0 W".
+#[cfg(target_os = "windows")]
+pub fn gpu_telemetry() -> Option<(u32, f32)> {
+    use std::sync::atomic::Ordering;
+    let temp = GPU_TEMP_C.load(Ordering::Relaxed);
+    if temp == GPU_UNAVAILABLE {
+        return None;
+    }
+    let watts = match GPU_POWER_CW.load(Ordering::Relaxed) {
+        GPU_UNAVAILABLE => 0.0,
+        cw => cw as f32 / 100.0,
+    };
+    Some((temp, watts))
+}
+
+/// No dGPU telemetry source wired up off Windows, so the tooltip omits those fields.
+#[cfg(not(target_os = "windows"))]
+pub fn gpu_telemetry() -> Option<(u32, f32)> {
+    None
+}
+
+/// Poll dGPU temperature and power on a background thread.
+///
+/// Deliberately a *subprocess* (`nvidia-smi`) rather than FFI into `nvml.dll`, even though
+/// the DLL is present in System32 on this machine. Getting an NVML signature subtly wrong
+/// is a crash in the user's tray, and this is decoration -- a slow, safe, obviously-correct
+/// query on its own thread costs nothing on the UI path. FFI is the natural optimization if
+/// the sample rate ever needs to be high.
+///
+/// Fails open and silent: a machine with no NVIDIA tools, or no dGPU, simply never gets a
+/// reading and the tooltip omits those fields. The thread stops after the first failure so
+/// we don't spawn a doomed process every few seconds forever.
+#[cfg(target_os = "windows")]
+pub fn spawn_gpu_telemetry_monitor() {
+    use std::os::windows::process::CommandExt;
+    use std::sync::atomic::Ordering;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    std::thread::spawn(|| loop {
+        let output = procCommand::new("nvidia-smi")
+            .args([
+                "--query-gpu=temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        let parsed = match &output {
+            Ok(o) if o.status.success() => {
+                // "54, 28.33" -- nounits keeps it to bare numbers.
+                let text = String::from_utf8_lossy(&o.stdout);
+                let first = text.lines().next().unwrap_or_default().to_string();
+                let mut fields = first.split(',').map(str::trim);
+                let temp = fields.next().and_then(|t| t.parse::<u32>().ok());
+                let watts = fields.next().and_then(|w| w.parse::<f32>().ok());
+                temp.map(|t| (t, watts))
+            }
+            _ => None,
+        };
+
+        match parsed {
+            Some((temp, watts)) => {
+                GPU_TEMP_C.store(temp, Ordering::Relaxed);
+                GPU_POWER_CW.store(
+                    watts
+                        .map(|w| (w * 100.0).round() as u32)
+                        .unwrap_or(GPU_UNAVAILABLE),
+                    Ordering::Relaxed,
+                );
+            }
+            None => {
+                // Give up permanently rather than respawning a failing process forever.
+                // Values stay at the unavailable sentinel, so the tooltip just omits them.
+                log::info!("dGPU telemetry unavailable; not polling further");
+                GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+                GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+                return;
+            }
+        }
+
+        std::thread::sleep(GPU_POLL_INTERVAL);
+    });
+}
+
 /// Set when Windows tells us the system has resumed from sleep. The event loop
 /// consumes (and clears) it to trigger the profile re-assert.
 ///
