@@ -146,19 +146,29 @@ impl DeviceState {
     /// `enforce_to()` (the Synapse tug-of-war reassert). Kept in one place so the two
     /// can't drift. Fan failures are logged but non-fatal (manual RPM can be rejected
     /// depending on mode); a logo/perf failure propagates.
+    ///
+    /// The perf/fan/logo writes are *independent* EC commands, so a failure in one is
+    /// not a reason to skip the rest: bailing early used to leave the device in the new
+    /// perf mode with the fan and logo still on their previous settings. Every write is
+    /// now attempted, and the first hard error is returned once the sequence completes.
     fn apply_perf_fan_logo(&self, device: &impl HidTransport) -> Result<()> {
-        match self.perf_mode {
+        // Boosts are only meaningful once Custom is set, so that inner chain still stops
+        // on error -- but it no longer aborts the fan/logo writes below.
+        let perf_result = match self.perf_mode {
             PerfMode::Battery => command::set_perf_mode(device, crate::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, crate::types::PerfMode::Silent),
             PerfMode::Balanced => command::set_perf_mode(device, crate::types::PerfMode::Balanced),
             PerfMode::Performance => command::set_perf_mode(device, crate::types::PerfMode::Performance),
             PerfMode::Hyperboost => command::set_perf_mode(device, crate::types::PerfMode::Hyperboost),
             PerfMode::Custom(cpu_boost, gpu_boost) => {
-                command::set_perf_mode(device, crate::types::PerfMode::Custom)?;
-                command::set_cpu_boost(device, cpu_boost)?;
-                command::set_gpu_boost(device, gpu_boost)
+                command::set_perf_mode(device, crate::types::PerfMode::Custom)
+                    .and_then(|_| command::set_cpu_boost(device, cpu_boost))
+                    .and_then(|_| command::set_gpu_boost(device, gpu_boost))
             }
-        }?;
+        };
+        if let Err(e) = &perf_result {
+            log::warn!("perf mode command failed: {:?}", e);
+        }
 
         // Max fan speed is Custom-only (the EC rejects the command otherwise). Match intent
         // while in Custom; leaving Custom clears it in the EC. Non-fatal, like the fan write.
@@ -181,7 +191,14 @@ impl DeviceState {
             log::warn!("fan command failed: {:?}", e);
         }
 
-        command::set_logo_mode(device, self.lights_mode.logo_mode)
+        let logo_result = command::set_logo_mode(device, self.lights_mode.logo_mode);
+        if let Err(e) = &logo_result {
+            log::warn!("logo command failed: {:?}", e);
+        }
+
+        // Perf mode is the more consequential of the two hard-failure paths, so it wins
+        // when both fail; the logo error still surfaces when perf succeeded.
+        perf_result.and(logo_result)
     }
 
     pub fn apply(&self, device: &impl HidTransport) -> Result<()> {
@@ -767,5 +784,72 @@ mod tests {
         assert_eq!(target.perf_mode, PerfMode::Battery);
         // ...while the rule's fan setting was re-applied on top.
         assert_eq!(target.fan_speed, FanSpeed::Manual(3000));
+    }
+
+    // ---- apply_perf_fan_logo: one failed write must not skip the others -----------
+
+    /// A transport that fails a chosen command and echoes everything else, recording
+    /// which commands were attempted.
+    fn failing_on(command: u16) -> crate::transport::MockTransport {
+        crate::transport::MockTransport::with_responder(move |req| {
+            if req.command() == command {
+                // A non-echoing reply fails the `starts_with(args)` check in
+                // `_send_command`, which is how a rejected write surfaces.
+                Packet::new(req.command(), &[0xff, 0xff, 0xff, 0xff])
+            } else {
+                Packet::new(req.command(), req.get_args())
+            }
+        })
+    }
+
+    #[test]
+    fn apply_still_writes_fan_and_logo_when_the_perf_write_fails() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Manual(3000),
+            ..DeviceState::default()
+        };
+
+        // 0x0d02 is the perf-mode write. Before the fix its failure aborted the whole
+        // sequence, leaving the fan and logo on their previous settings.
+        let mock = failing_on(0x0d02);
+        let err = state.apply_perf_fan_logo(&mock);
+        assert!(err.is_err(), "a failed perf write must still be reported");
+
+        let commands: Vec<u16> = mock.sent().into_iter().map(|(c, _)| c).collect();
+        // The fan write shares command 0x0d02 with the perf write (set_fan_mode re-sends
+        // the perf packet with a new fan mode), so a second 0x0d02 is the fan attempt.
+        assert!(
+            commands.iter().filter(|&&c| c == 0x0d02).count() >= 2,
+            "fan write must still be attempted, got {commands:04x?}"
+        );
+        assert!(
+            commands.contains(&0x0300),
+            "logo write must still be attempted, got {commands:04x?}"
+        );
+    }
+
+    #[test]
+    fn apply_reports_a_logo_failure_when_perf_succeeded() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            ..DeviceState::default()
+        };
+        let mock = failing_on(0x0300);
+        assert!(
+            state.apply_perf_fan_logo(&mock).is_err(),
+            "a failed logo write must not be swallowed"
+        );
+    }
+
+    #[test]
+    fn apply_succeeds_when_every_write_is_accepted() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Manual(3000),
+            ..DeviceState::default()
+        };
+        let mock = crate::transport::MockTransport::echo();
+        assert!(state.apply_perf_fan_logo(&mock).is_ok());
     }
 }

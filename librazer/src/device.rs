@@ -1,5 +1,5 @@
 use crate::descriptor::{Descriptor, SUPPORTED};
-use crate::packet::Packet;
+use crate::packet::{Packet, ResponseError};
 use crate::transport::HidTransport;
 
 use anyhow::{anyhow, Context, Result};
@@ -81,6 +81,10 @@ impl Device {
         //println!("Report {:?}", report);
 
         const MAX_RETRIES: usize = 5;
+        // A busy EC (status 0x01) is asking us to come back shortly, so retry fast;
+        // anything else that's still worth retrying gets the original slow backoff.
+        const BUSY_BACKOFF: time::Duration = time::Duration::from_millis(20);
+        const RETRY_BACKOFF: time::Duration = time::Duration::from_millis(500);
 
         for attempt in 0..MAX_RETRIES {
             thread::sleep(time::Duration::from_micros(1000));
@@ -107,14 +111,30 @@ impl Device {
             let response = <&[u8] as TryInto<Packet>>::try_into(&response_buf[1..])?;
             //println!("Response {:?}", response);
 
-            if response.ensure_matches_report(&report).is_ok() {
-                return Ok(response);
-            } else if attempt == MAX_RETRIES - 1 {
-                return Err(anyhow!("Failed to match report after {} attempts", MAX_RETRIES));
+            let err = match response.classify_response(&report) {
+                Ok(()) => return Ok(response),
+                Err(e) => e,
+            };
+
+            // NotSupported is a definitive answer from the firmware -- the command will
+            // never succeed on this device, so retrying just burns ~2.5s before failing.
+            if err == ResponseError::NotSupported {
+                return Err(anyhow!("{}", err));
             }
 
-            // Add a small delay before retrying
-            thread::sleep(time::Duration::from_millis(500));
+            if attempt == MAX_RETRIES - 1 {
+                return Err(anyhow!(
+                    "Failed to match report after {} attempts: {}",
+                    MAX_RETRIES,
+                    err
+                ));
+            }
+
+            thread::sleep(if err.is_busy() {
+                BUSY_BACKOFF
+            } else {
+                RETRY_BACKOFF
+            });
         }
 
         Err(anyhow!("Failed to send feature report"))

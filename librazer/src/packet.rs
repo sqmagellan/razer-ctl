@@ -23,8 +23,45 @@ pub struct Packet {
 
 enum CommandStatus {
     New = 0x00,
+    Busy = 0x01,
     Successful = 0x02,
+    Failure = 0x03,
     NotSupported = 0x05,
+}
+
+/// Why a response failed to match its request. `Device::send` retries on any of
+/// these, but the reason picks the backoff: a `Busy` EC is asking us to come back
+/// shortly, whereas the rest are either hard rejections or a desynchronised bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseError {
+    /// Status 0x01 -- firmware is busy and the command was not actioned. Transient
+    /// under write-heavy sequences (`apply()` issues six-plus writes back to back).
+    Busy,
+    /// Status 0x03 -- firmware actioned and rejected the command.
+    Failure,
+    /// Status 0x05 -- command unsupported on this device.
+    NotSupported,
+    /// Header mismatch, or a status byte outside the documented set. The response
+    /// may belong to a different transaction, so the bus may be out of step.
+    Mismatch,
+}
+
+impl ResponseError {
+    /// Whether the EC is merely asking us to retry rather than refusing outright.
+    pub fn is_busy(self) -> bool {
+        self == ResponseError::Busy
+    }
+}
+
+impl std::fmt::Display for ResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResponseError::Busy => write!(f, "Device busy (status 0x01)"),
+            ResponseError::Failure => write!(f, "Command failed (status 0x03)"),
+            ResponseError::NotSupported => write!(f, "Command not supported (status 0x05)"),
+            ResponseError::Mismatch => write!(f, "Response does not match the report"),
+        }
+    }
 }
 
 impl Packet {
@@ -125,6 +162,13 @@ impl Packet {
         &self.args
     }
 
+    /// Stamp a raw status byte, so tests can synthesise the firmware replies
+    /// (`0x01` busy, `0x03` failure, ...) that only real hardware produces.
+    #[cfg(test)]
+    pub fn set_status_for_test(&mut self, status: u8) {
+        self.status = status;
+    }
+
     /// The 16-bit command (class<<8 | id) this packet carries -- the inverse of the
     /// `command` argument to `new`. Lets tests/inspection recover which command a
     /// packet represents without reaching into the private wire fields.
@@ -138,32 +182,40 @@ impl Packet {
         self.data_size as usize
     }
 
+    /// Classify a response against the request that produced it.
+    ///
+    /// Split out from [`Packet::ensure_matches_report`] so the retry loop can tell a
+    /// *busy* EC (come back in a moment) apart from a hard rejection -- previously
+    /// every non-success collapsed into one opaque error and drew the same flat
+    /// backoff. `Ok(())` means the response is a genuine success for this request.
+    pub fn classify_response(&self, report: &Packet) -> Result<(), ResponseError> {
+        if (report.command_class, report.command_id, report.id)
+            != (self.command_class, self.command_id, self.id)
+        {
+            return Err(ResponseError::Mismatch);
+        }
+
+        // 0x0792 (battery health optimizer) and 0x078f (max fan speed mode) legitimately
+        // answer with a different remaining_packets than they were asked with.
+        let remaining_ok = self.remaining_packets == report.remaining_packets
+            || (self.command_class, self.command_id) == (0x07, 0x92)
+            || (self.command_class, self.command_id) == (0x07, 0x8f);
+        if !remaining_ok {
+            return Err(ResponseError::Mismatch);
+        }
+
+        match self.status {
+            s if s == CommandStatus::Successful as u8 => Ok(()),
+            s if s == CommandStatus::Busy as u8 => Err(ResponseError::Busy),
+            s if s == CommandStatus::Failure as u8 => Err(ResponseError::Failure),
+            s if s == CommandStatus::NotSupported as u8 => Err(ResponseError::NotSupported),
+            _ => Err(ResponseError::Mismatch),
+        }
+    }
+
     pub fn ensure_matches_report(&self, report: &Packet) -> Result<()> {
-        ensure!(
-            (report.command_class, report.command_id, report.id)
-                == (self.command_class, self.command_id, self.id),
-            "Response does not match the report"
-        );
-
-        ensure!(
-            self.remaining_packets == report.remaining_packets
-            || (self.command_class, self.command_id) == (0x07, 0x92) /* 0x0792 (bho) has special handling */
-            || (self.command_class, self.command_id) == (0x07, 0x8f), /* 0x078f max fan speed mode has special handling */
-            "Response command does not match the report"
-        );
-
-        ensure!(
-            self.status != CommandStatus::NotSupported as u8,
-            "Command not supported"
-        );
-
-        ensure!(
-            self.status == CommandStatus::Successful as u8,
-            "Command failed with unknown status: {:02X?}",
-            self.status
-        );
-
-        Ok(())
+        self.classify_response(report)
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 }
 
@@ -258,6 +310,71 @@ mod tests {
         let tx = Packet::try_new_with_tx(0x0f02, &[9], 0xff).unwrap();
         let bytes: Vec<u8> = (&tx).into();
         assert_eq!(bytes[1], 0xff, "explicit transaction id overrides the default");
+    }
+
+    /// Build a response that echoes `req`'s routing fields, then stamp `status`.
+    fn response_to(req: &Packet, status: u8) -> Packet {
+        let mut resp = Packet::new(req.command(), &req.get_args()[..req.data_len()]);
+        resp.set_status_for_test(status);
+        resp
+    }
+
+    #[test]
+    fn classify_response_distinguishes_busy_from_failure() {
+        let req = Packet::new(0x0d02, &[0x00, 0x01, 0x02, 0x00]);
+
+        // Before the fix these three collapsed into one "unknown status" error, so the
+        // retry loop could not tell "come back shortly" from a hard rejection.
+        assert_eq!(
+            response_to(&req, 0x01).classify_response(&req),
+            Err(ResponseError::Busy)
+        );
+        assert_eq!(
+            response_to(&req, 0x03).classify_response(&req),
+            Err(ResponseError::Failure)
+        );
+        assert_eq!(
+            response_to(&req, 0x05).classify_response(&req),
+            Err(ResponseError::NotSupported)
+        );
+        assert_eq!(response_to(&req, 0x02).classify_response(&req), Ok(()));
+
+        // Only Busy should trigger the fast-retry path.
+        assert!(ResponseError::Busy.is_busy());
+        assert!(!ResponseError::Failure.is_busy());
+        assert!(!ResponseError::NotSupported.is_busy());
+    }
+
+    #[test]
+    fn classify_response_reports_undocumented_status_as_mismatch() {
+        let req = Packet::new(0x0d02, &[0x00, 0x01, 0x02, 0x00]);
+        assert_eq!(
+            response_to(&req, 0x7f).classify_response(&req),
+            Err(ResponseError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn classify_response_rejects_a_different_command() {
+        let req = Packet::new(0x0d02, &[0x00, 0x01, 0x02, 0x00]);
+        let other = response_to(&Packet::new(0x0d82, &[0, 1, 0, 0]), 0x02);
+        assert_eq!(
+            other.classify_response(&req),
+            Err(ResponseError::Mismatch),
+            "a response for another command must never be accepted"
+        );
+    }
+
+    #[test]
+    fn ensure_matches_report_still_wraps_classification() {
+        let req = Packet::new(0x0d02, &[0x00, 0x01, 0x02, 0x00]);
+        assert!(response_to(&req, 0x02).ensure_matches_report(&req).is_ok());
+
+        let err = response_to(&req, 0x01)
+            .ensure_matches_report(&req)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("busy"), "busy should be named in the error: {err}");
     }
 }
 

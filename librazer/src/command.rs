@@ -67,26 +67,41 @@ pub fn set_perf_mode(device: &impl HidTransport, perf_mode: PerfMode) -> Result<
     _set_perf_mode(device, perf_mode, FanMode::Auto)
 }
 
+/// Read the perf/fan mode, which the EC mirrors across its two zones.
+///
+/// The two zones are separate HID round-trips, so a mode change landing between them
+/// (a tray Actions transition, an AC/battery switch, Synapse) makes the reads disagree
+/// through no fault of the device. That used to be a hard error -- and it is the source
+/// of the cosmetic "Modes do not match" line seen in `auto info`. A disagreement is now
+/// re-read once before failing, which resolves the race in the common case.
 pub fn get_perf_mode(device: &impl HidTransport) -> Result<(PerfMode, FanMode)> {
-    let [r1, r2]: [Result<(PerfMode, FanMode)>; 2] = [1, 2].map(|zone| {
-        let response = device.send(Packet::new(0x0d82, &[0, zone, 0, 0]))?;
-        Ok((
-            PerfMode::try_from(response.get_args()[2])?,
-            FanMode::try_from(response.get_args()[3])?,
-        ))
-    });
+    fn read_zones(device: &impl HidTransport) -> Result<((PerfMode, FanMode), (PerfMode, FanMode))> {
+        let [r1, r2]: [Result<(PerfMode, FanMode)>; 2] = [1, 2].map(|zone| {
+            let response = device.send(Packet::new(0x0d82, &[0, zone, 0, 0]))?;
+            Ok((
+                PerfMode::try_from(response.get_args()[2])?,
+                FanMode::try_from(response.get_args()[3])?,
+            ))
+        });
 
-    ensure!(
-        r1.is_ok() && r2.is_ok(),
-        "Failed to get performance mode and fan mode: r1 = {:?}, r2 = {:?}",
-        r1,
-        r2
-    );
+        ensure!(
+            r1.is_ok() && r2.is_ok(),
+            "Failed to get performance mode and fan mode: r1 = {:?}, r2 = {:?}",
+            r1,
+            r2
+        );
 
-    let r1 = r1?;
-    let r2 = r2?;
+        Ok((r1?, r2?))
+    }
 
-    //let r1 = r1?;
+    let (r1, r2) = read_zones(device)?;
+    if r1 == r2 {
+        return Ok(r1);
+    }
+
+    // Disagreement: either a mode changed mid-read (transient -- a re-read agrees) or the
+    // zones genuinely diverged (persists).
+    let (r1, r2) = read_zones(device)?;
     ensure!(r1 == r2, "Modes do not match: r1 = {:?}, r2 = {:?}", r1, r2);
 
     Ok(r1)
@@ -485,5 +500,61 @@ mod tests {
         assert!(set_cpu_boost(&balanced, CpuBoost::Boost).is_err());
         assert!(!balanced.sent().iter().any(|(cmd, _)| *cmd == 0x0d07));
     }
-}
 
+    // ---- get_perf_mode: tolerate a mode change landing between the two zone reads ----
+
+    #[test]
+    fn get_perf_mode_retries_once_when_zones_disagree() {
+        use std::cell::Cell;
+        // Zone reads alternate 1,2,1,2. The first pair straddles a mode change
+        // (Silent then Balanced); the re-read is consistent.
+        let calls = Cell::new(0);
+        let mock = MockTransport::with_responder(move |_req| {
+            let n = calls.get();
+            calls.set(n + 1);
+            let perf = match n {
+                0 => PerfMode::Silent as u8,
+                1 => PerfMode::Balanced as u8,
+                _ => PerfMode::Balanced as u8,
+            };
+            reply(&[0, 0, perf, FanMode::Auto as u8])
+        });
+
+        let (perf, fan) = get_perf_mode(&mock).expect("a mid-read mode change must not be fatal");
+        assert_eq!(perf, PerfMode::Balanced);
+        assert_eq!(fan, FanMode::Auto);
+        assert_eq!(mock.sent_count(), 4, "two zone reads, then two more to settle it");
+    }
+
+    #[test]
+    fn get_perf_mode_still_fails_when_zones_persistently_disagree() {
+        use std::cell::Cell;
+        // Genuinely divergent zones: zone 1 always Silent, zone 2 always Balanced.
+        let calls = Cell::new(0);
+        let mock = MockTransport::with_responder(move |_req| {
+            let n = calls.get();
+            calls.set(n + 1);
+            let perf = if n % 2 == 0 {
+                PerfMode::Silent as u8
+            } else {
+                PerfMode::Balanced as u8
+            };
+            reply(&[0, 0, perf, FanMode::Auto as u8])
+        });
+
+        let err = get_perf_mode(&mock).unwrap_err().to_string();
+        assert!(err.contains("Modes do not match"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn get_perf_mode_reads_both_zones_once_when_they_agree() {
+        let mock = MockTransport::with_responder(|_req| {
+            reply(&[0, 0, PerfMode::Balanced as u8, FanMode::Auto as u8])
+        });
+        assert_eq!(
+            get_perf_mode(&mock).unwrap(),
+            (PerfMode::Balanced, FanMode::Auto)
+        );
+        assert_eq!(mock.sent_count(), 2, "agreement must not cost an extra round-trip");
+    }
+}
