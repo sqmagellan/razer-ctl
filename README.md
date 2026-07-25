@@ -35,9 +35,13 @@ and only writes to the device when you ask it to.
 - **Charge limit** — any whole percent from 50 to 100 (100 = off). The tray offers presets; the CLI takes
   any value in range.
 - **AC vs battery profiles** — separate profiles, switched automatically when you plug/unplug.
-- **App profiles** — auto-apply a perf mode while a named app is running, then fall back to the
-  power-source profile when it quits (first running match wins, case-insensitive). Opt-in, and a
-  *transient* override, so it never overwrites your saved AC/battery profiles.
+- **App profiles ("Actions")** — auto-apply settings while a named app runs, then fall back to the
+  power-source profile when it quits. Rules can match several executables, carry a `priority` so
+  overlapping rules resolve by intent instead of by file order, be `enabled = false` without being
+  deleted, and be restricted to AC or battery with `require_ac` — which is what stops "force
+  Hyperboost while the game runs" from doing that on a train. A rule overlays only the fields it
+  sets (perf mode, fan, logo, keyboard effect, charge limit, max fan); the rest fall through to your
+  saved profile. Opt-in, and a *transient* override, so it never overwrites the saved profiles.
 - **Keyboard always-on** — keeps the backlight lit while the display's on. It's a Normal-mode keep-alive,
   not Razer's driver-mode flag, so your Fn media keys keep working (see Quirks — this one took a day to get right).
 - **Enforce mode** (opt-in, off by default) — re-asserts perf/fan/logo/charge-limit if Synapse changes
@@ -302,6 +306,12 @@ the highlights:
   anything nvidia-smi can't name, so a few stubborn dGPU users may survive rather than risk the desktop.
 - **Device-loss recovery isn't runtime-tested on this unit.** The control interface rides the internal
   keyboard's USB composite, which Windows won't let you disable, so the recovery backoff is code-reviewed only.
+- **A config the app can't parse is preserved, not eaten.** It used to be loaded with
+  `unwrap_or_default()`, so an unreadable file became silent defaults — and the tray then persisted
+  those defaults over it, losing every saved profile without a word. Found the hard way: a
+  hand-edited file with a duplicate `app_profiles` key reset the AC profile and wrote it back within
+  seconds. Now it logs the parse error and keeps a copy at `default-config.toml.invalid` (the first
+  bad file, so a restart can't overwrite the evidence).
 - **`battery-care get` can read stale right after a `set`** (~1–2 s firmware lag) — re-read to confirm.
 - **The tray tooltip really holds 63 characters, not 128.** `NOTIFYICONDATAW::szTip` is
   declared `[u16; 128]` and the modern shell honours all 128 — but only when `cbSize` names a

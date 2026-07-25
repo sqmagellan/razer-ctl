@@ -62,12 +62,49 @@ fn init_logging_to_file() -> Result<()> {
     Ok(())
 }
 
+/// Load the config, preserving it if it can't be parsed.
+///
+/// `confy::load(..).unwrap_or_default()` is a data-loss bug, not a convenience. A config
+/// the current schema can't read becomes silent defaults, and the tray then persists those
+/// defaults over the user's file on the next change -- every saved profile gone, nothing
+/// said. That is not hypothetical: it happened during testing when a hand-edited file had a
+/// duplicate `app_profiles` key, and the AC profile was reset to defaults and written back
+/// within seconds.
+///
+/// So: complain loudly, and keep a copy the user can fix or salvage. The FIRST bad file is
+/// the one preserved -- a later restart shouldn't overwrite the evidence with a file that
+/// is merely bad in the same way.
+fn load_config(path: &std::path::Path) -> ConfigState {
+    match confy::load::<ConfigState>(PKG_NAME, None) {
+        Ok(config) => config,
+        Err(e) => {
+            log::error!("config at {} could not be parsed: {e}", path.display());
+            let salvage = path.with_extension("toml.invalid");
+            if salvage.exists() {
+                log::error!(
+                    "an earlier unparseable config is already preserved at {};                      continuing with defaults",
+                    salvage.display()
+                );
+            } else {
+                match std::fs::copy(path, &salvage) {
+                    Ok(_) => log::error!(
+                        "kept a copy at {} -- fix that file and restart, or delete it to                          accept defaults. Continuing with defaults for now.",
+                        salvage.display()
+                    ),
+                    Err(copy_err) => log::error!(
+                        "could not preserve the unparseable config ({copy_err});                          continuing with defaults"
+                    ),
+                }
+            }
+            ConfigState::default()
+        }
+    }
+}
+
 fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<ProgramState> {
-    log::info!(
-        "loading config file {}",
-        confy::get_configuration_file_path(PKG_NAME, None)?.display()
-    );
-    let config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
+    let config_path = confy::get_configuration_file_path(PKG_NAME, None)?;
+    log::info!("loading config file {}", config_path.display());
+    let config: ConfigState = load_config(&config_path);
     let fan_actual = get_fan_rpm(device)?;
     let mut state = ProgramState::new(
         config.ac_state,
@@ -352,7 +389,11 @@ fn main() -> Result<()> {
                     .values()
                     .map(|p| p.name().to_string())
                     .collect();
-                let matched = state::matching_app_profile(&state.app_profiles, &running);
+                // Power source is part of selection now: a rule may be restricted to AC
+                // or battery, so an AC/battery transition can change which rule applies
+                // even when the running process set hasn't changed at all.
+                let matched =
+                    state::matching_app_profile(&state.app_profiles, &running, state.ac_power);
                 if matched != active_app_rule {
                     match matched {
                         Some(i) => {
@@ -366,7 +407,12 @@ fn main() -> Result<()> {
                                 state.battery_state
                             };
                             let target = rule.overlay(&base);
-                            log::info!("action: '{}' running -> {:?}", rule.process, target);
+                            log::info!(
+                                "action: '{}' running (priority {}) -> {:?}",
+                                rule.label(),
+                                rule.priority,
+                                target
+                            );
                             state.update_transient(&mut tray_icon, target, &device)?;
                         }
                         None => {

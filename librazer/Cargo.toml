@@ -17,6 +17,11 @@ strum_macros = "0.26.1"
 log = "0.4.22"
 env_logger = "0.11.6"
 
+# Dev-only: the real config format is TOML (via confy in the tray), so the
+# backward-compatibility tests parse TOML rather than a stand-in.
+[dev-dependencies]
+toml = "0.8"
+
 [target.'cfg(windows)'.dependencies]
 winreg = { version = "0.52", features = ["transactions"] }
 hidapi = { version = "2.6.1", features = ["windows-native"] }

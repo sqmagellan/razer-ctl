@@ -452,7 +452,34 @@ impl DeviceStateDelta<GpuBoost> for DeviceState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppProfile {
     /// Executable name to match, case-insensitive, e.g. "cyberpunk2077.exe".
+    ///
+    /// Kept as the primary field for backward compatibility: every config written before
+    /// [`AppProfile::processes`] existed has exactly this key, and the tray loads config
+    /// with `unwrap_or_default()`, so a schema change that failed to parse would silently
+    /// throw away the user's saved profiles rather than complain.
     pub process: String,
+    /// Additional executables the same rule should match, so one rule can cover a
+    /// launcher and its game, or a program that changed its executable name between
+    /// versions, without duplicating the whole rule.
+    #[serde(default)]
+    pub processes: Vec<String>,
+    /// Human label for logs and future UI. Falls back to the matched process name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Set false to keep a rule in the file but stop applying it. Defaults to true so
+    /// every existing rule stays active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Higher wins when several rules match at once. Equal priorities fall back to file
+    /// order, so behaviour is fully determined by the config rather than by which
+    /// process the OS happened to list first.
+    #[serde(default)]
+    pub priority: i32,
+    /// Restrict the rule to a power source: `Some(true)` = only on AC, `Some(false)` =
+    /// only on battery, `None` = either. This is the guard that stops a "force
+    /// Performance while the game runs" rule from doing that on a train.
+    #[serde(default)]
+    pub require_ac: Option<bool>,
     /// Perf mode to switch to while that process runs. Omit to leave perf unchanged.
     #[serde(default)]
     pub perf_mode: Option<PerfMode>,
@@ -466,6 +493,37 @@ pub struct AppProfile {
     /// leave the keyboard lighting unchanged.
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
+    /// Charge limit to apply while it runs. Omit to leave it unchanged.
+    ///
+    /// Useful for the docked-desktop case: cap at 80% while the machine sits plugged in
+    /// running a long build, without touching the saved profile.
+    #[serde(default)]
+    pub battery_care: Option<BatteryCare>,
+    /// Max Fan Speed Mode while it runs. Only honoured in the Custom perf mode -- the EC
+    /// rejects it elsewhere -- so a rule setting this should set `perf_mode` to Custom too.
+    #[serde(default)]
+    pub max_fan: Option<bool>,
+}
+
+/// Hand-written, not derived: `#[derive(Default)]` would make `enabled` false, which is
+/// exactly backwards -- a rule constructed with defaults would silently never fire.
+impl Default for AppProfile {
+    fn default() -> Self {
+        Self {
+            process: String::new(),
+            processes: Vec::new(),
+            name: None,
+            enabled: true,
+            priority: 0,
+            require_ac: None,
+            perf_mode: None,
+            fan_speed: None,
+            logo_mode: None,
+            keyboard_effect: None,
+            battery_care: None,
+            max_fan: None,
+        }
+    }
 }
 
 impl AppProfile {
@@ -487,7 +545,42 @@ impl AppProfile {
         if let Some(e) = self.keyboard_effect {
             s.lights_mode.keyboard_effect = Some(e);
         }
+        if let Some(b) = self.battery_care {
+            s.battery_care = b;
+        }
+        if let Some(m) = self.max_fan {
+            s.max_fan = m;
+        }
         s
+    }
+
+    /// Every executable name this rule matches.
+    pub fn all_processes(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.process.as_str())
+            .chain(self.processes.iter().map(String::as_str))
+            .filter(|p| !p.is_empty())
+    }
+
+    /// Label for logs: the explicit name if given, else the primary process.
+    pub fn label(&self) -> &str {
+        match &self.name {
+            Some(n) if !n.is_empty() => n.as_str(),
+            _ => self.process.as_str(),
+        }
+    }
+
+    /// Whether this rule may apply given the current power source.
+    pub fn allowed_on(&self, ac_power: bool) -> bool {
+        match self.require_ac {
+            Some(required) => required == ac_power,
+            None => true,
+        }
+    }
+
+    /// Whether any of this rule's executables is in `running` (case-insensitive).
+    pub fn matches(&self, running: &[String]) -> bool {
+        self.all_processes()
+            .any(|p| running.iter().any(|r| r.eq_ignore_ascii_case(p)))
     }
 }
 
@@ -531,14 +624,30 @@ impl Default for ConfigState {
     }
 }
 
-/// Index of the first app-profile whose `process` is currently running (case-insensitive
-/// exact match on the executable name), or `None` if none match. Pure so it's unit-tested
-/// without a live process table: the caller passes the running process names (from sysinfo
-/// on the real system). First match wins, so earlier rules take priority.
-pub fn matching_app_profile(profiles: &[AppProfile], running: &[String]) -> Option<usize> {
+/// Index of the app-profile that should be active, or `None` if none applies.
+///
+/// Selection order: enabled, allowed on the current power source, matching a running
+/// executable; then **highest `priority` wins**, and equal priorities fall back to file
+/// order. Ordering by priority matters because the previous rule was "first match wins" on
+/// file order alone, which meant a user with overlapping rules (a launcher rule and a game
+/// rule, say) got whichever they happened to type first -- and reordering a config file is
+/// a poor way to express intent.
+///
+/// Pure, so it is unit-tested without a live process table: the caller passes the running
+/// process names (from sysinfo on the real system) and the power source.
+pub fn matching_app_profile(
+    profiles: &[AppProfile],
+    running: &[String],
+    ac_power: bool,
+) -> Option<usize> {
     profiles
         .iter()
-        .position(|p| running.iter().any(|r| r.eq_ignore_ascii_case(&p.process)))
+        .enumerate()
+        .filter(|(_, p)| p.enabled && p.allowed_on(ac_power) && p.matches(running))
+        // max_by_key returns the LAST maximum; negate the index so ties resolve to the
+        // earliest rule in the file instead of the latest.
+        .max_by_key(|(i, p)| (p.priority, -(*i as i64)))
+        .map(|(i, _)| i)
 }
 
 pub fn get_fan_rpm(device: &impl HidTransport) -> Result<FanRpm> {
@@ -726,42 +835,151 @@ mod tests {
         assert!(cfg.app_profiles.is_empty());
     }
 
+    /// Helper: a rule matching `process`, everything else default.
+    fn rule(process: &str) -> AppProfile {
+        AppProfile {
+            process: process.into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn matching_app_profile_first_match_wins_case_insensitive() {
-        let profiles = vec![
-            AppProfile {
-                process: "game.exe".into(),
-                perf_mode: Some(PerfMode::Hyperboost),
-                fan_speed: None,
-                logo_mode: None,
-                keyboard_effect: None,
-            },
-            AppProfile {
-                process: "editor.exe".into(),
-                perf_mode: Some(PerfMode::Balanced),
-                fan_speed: None,
-                logo_mode: None,
-                keyboard_effect: None,
-            },
-        ];
+    fn matching_app_profile_matches_case_insensitively() {
+        let profiles = vec![rule("game.exe"), rule("editor.exe")];
+
         // No listed process running -> None.
         let running = vec!["explorer.exe".to_string(), "svchost.exe".to_string()];
-        assert_eq!(matching_app_profile(&profiles, &running), None);
+        assert_eq!(matching_app_profile(&profiles, &running, true), None);
 
         // Case-insensitive match on the executable name.
         let running = vec!["Game.EXE".to_string()];
-        assert_eq!(matching_app_profile(&profiles, &running), Some(0));
-
-        // Both running -> earlier rule (index 0) wins.
-        let running = vec!["editor.exe".to_string(), "game.exe".to_string()];
-        assert_eq!(matching_app_profile(&profiles, &running), Some(0));
+        assert_eq!(matching_app_profile(&profiles, &running, true), Some(0));
 
         // Only the second rule's process is up.
         let running = vec!["editor.exe".to_string()];
-        assert_eq!(matching_app_profile(&profiles, &running), Some(1));
+        assert_eq!(matching_app_profile(&profiles, &running, true), Some(1));
 
         // Empty rule set never matches.
-        assert_eq!(matching_app_profile(&[], &running), None);
+        assert_eq!(matching_app_profile(&[], &running, true), None);
+    }
+
+    #[test]
+    fn equal_priority_falls_back_to_file_order() {
+        // Both match at priority 0: the earlier rule wins, as it always did.
+        let profiles = vec![rule("game.exe"), rule("editor.exe")];
+        let running = vec!["editor.exe".to_string(), "game.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running, true), Some(0));
+    }
+
+    #[test]
+    fn higher_priority_beats_file_order() {
+        // The whole point of priority: intent is expressed in the file, not by which
+        // rule the user happened to type first.
+        let profiles = vec![
+            rule("launcher.exe"),
+            AppProfile {
+                priority: 10,
+                ..rule("game.exe")
+            },
+        ];
+        let running = vec!["launcher.exe".to_string(), "game.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running, true), Some(1));
+    }
+
+    #[test]
+    fn a_disabled_rule_never_matches() {
+        let profiles = vec![AppProfile {
+            enabled: false,
+            ..rule("game.exe")
+        }];
+        let running = vec!["game.exe".to_string()];
+        assert_eq!(matching_app_profile(&profiles, &running, true), None);
+    }
+
+    #[test]
+    fn require_ac_gates_on_the_power_source() {
+        // The guard that stops "force Hyperboost while the game runs" from doing that on
+        // battery.
+        let ac_only = vec![AppProfile {
+            require_ac: Some(true),
+            ..rule("game.exe")
+        }];
+        let running = vec!["game.exe".to_string()];
+        assert_eq!(matching_app_profile(&ac_only, &running, true), Some(0));
+        assert_eq!(matching_app_profile(&ac_only, &running, false), None);
+
+        let battery_only = vec![AppProfile {
+            require_ac: Some(false),
+            ..rule("game.exe")
+        }];
+        assert_eq!(
+            matching_app_profile(&battery_only, &running, false),
+            Some(0)
+        );
+        assert_eq!(matching_app_profile(&battery_only, &running, true), None);
+
+        // Unset: either source.
+        let any = vec![rule("game.exe")];
+        assert_eq!(matching_app_profile(&any, &running, true), Some(0));
+        assert_eq!(matching_app_profile(&any, &running, false), Some(0));
+    }
+
+    #[test]
+    fn a_rule_can_list_several_executables() {
+        let profiles = vec![AppProfile {
+            processes: vec!["game_dx12.exe".into(), "game_vulkan.exe".into()],
+            ..rule("game.exe")
+        }];
+        for exe in ["game.exe", "game_dx12.exe", "GAME_VULKAN.EXE"] {
+            assert_eq!(
+                matching_app_profile(&profiles, &[exe.to_string()], true),
+                Some(0),
+                "{exe} should match"
+            );
+        }
+        assert_eq!(
+            matching_app_profile(&profiles, &["other.exe".to_string()], true),
+            None
+        );
+    }
+
+    /// An empty `process` must not match every running executable. Guards the case where
+    /// a rule uses only `processes` and leaves the legacy field blank.
+    #[test]
+    fn an_empty_process_name_matches_nothing() {
+        let profiles = vec![AppProfile {
+            process: String::new(),
+            processes: vec!["game.exe".into()],
+            ..Default::default()
+        }];
+        assert_eq!(
+            matching_app_profile(&profiles, &["anything.exe".to_string()], true),
+            None
+        );
+        assert_eq!(
+            matching_app_profile(&profiles, &["game.exe".to_string()], true),
+            Some(0)
+        );
+    }
+
+    /// Load-bearing back-compat: the tray reads config with `unwrap_or_default()`, so a
+    /// rule the new schema can't parse would silently discard every saved profile rather
+    /// than report an error. A pre-upgrade rule has only `process` and the optional
+    /// overlay fields.
+    #[test]
+    fn a_pre_upgrade_rule_still_deserializes_and_stays_enabled() {
+        let toml = r#"
+            process = "cyberpunk2077.exe"
+            perf_mode = "Hyperboost"
+        "#;
+        let parsed: AppProfile = toml::from_str(toml).expect("legacy rule must still parse");
+        assert_eq!(parsed.process, "cyberpunk2077.exe");
+        assert_eq!(parsed.perf_mode, Some(PerfMode::Hyperboost));
+        assert!(parsed.enabled, "an existing rule must remain active");
+        assert_eq!(parsed.priority, 0);
+        assert_eq!(parsed.require_ac, None);
+        assert!(parsed.processes.is_empty());
+        assert_eq!(parsed.label(), "cyberpunk2077.exe");
     }
 
     #[test]
@@ -778,6 +996,7 @@ mod tests {
             fan_speed: None,
             logo_mode: None,
             keyboard_effect: None,
+            ..Default::default()
         };
         let out = perf_only.overlay(&base);
         assert_eq!(out.perf_mode, PerfMode::Hyperboost);
@@ -791,6 +1010,7 @@ mod tests {
             fan_speed: Some(FanSpeed::Manual(3000)),
             logo_mode: None,
             keyboard_effect: None,
+            ..Default::default()
         };
         let out = fan_only.overlay(&base);
         assert_eq!(out.perf_mode, PerfMode::Balanced);
@@ -807,6 +1027,7 @@ mod tests {
             fan_speed: None,
             logo_mode: None,
             keyboard_effect: Some(KeyboardEffect::Spectrum),
+            ..Default::default()
         };
         let out = lit.overlay(&base);
         assert_eq!(
@@ -1019,6 +1240,7 @@ mod tests {
             fan_speed: None,
             logo_mode: None,
             keyboard_effect: None,
+            ..Default::default()
         };
 
         // On AC with the rule applied, the live state IS the overlay -> nothing to do.
@@ -1053,6 +1275,7 @@ mod tests {
             fan_speed: Some(FanSpeed::Manual(3000)),
             logo_mode: None,
             keyboard_effect: None,
+            ..Default::default()
         };
 
         let on_ac = rule.overlay(&ac);
