@@ -64,6 +64,13 @@ HW-verified on `0x029F` (2026-07-25).
   profiles.
 - **Keyboard effect is read back from the device** (`0x0f82`), so the menu and `auto json` show what
   the firmware is actually running. This corrects a claim in this README: the getter does exist.
+- **Left-click no longer opens the menu *and* changes the perf mode.** `tray-icon`'s
+  `menu_on_left_click` defaults to true and must be disabled explicitly. Under 0.11.3 the
+  Windows backend showed the menu only on `WM_RBUTTONUP` and ignored the flag; 0.19 honours it,
+  so a single left-click did both — the menu opened on button-*down* while the perf-mode cycle
+  ran on button-*up*, changing the mode behind the popup where you couldn't see it. Worse, each
+  invisible cycle *persisted*, so the saved AC/battery profile quietly drifted. Left-click is
+  ours (cycle the mode), right-click is the menu.
 - **dGPU temperature and power in the tooltip**, sampled on a background thread so the UI
   never blocks on a subprocess, and failing open: no NVIDIA tools or no dGPU simply omits the
   fields rather than showing "0°C". The monitor tolerates ~a minute of failures before giving

@@ -140,7 +140,18 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut tray_icon = TrayIconBuilder::new().build()?;
+    // Left-click is OURS: it cycles the perf mode (see the tray-event handler below).
+    // The menu belongs to right-click.
+    //
+    // `menu_on_left_click` defaults to TRUE, and it must be turned off explicitly. Under
+    // tray-icon 0.11.3 the Windows backend showed the menu only on WM_RBUTTONUP and ignored
+    // this flag, so left-click did nothing but cycle. 0.19 honours it, which made a single
+    // left-click do BOTH: the menu opens on WM_LBUTTONDOWN while our cycle runs on
+    // WM_LBUTTONUP, so the mode changed *behind* the popup and you couldn't see it until you
+    // moved the mouse away and the menu dismissed.
+    let mut tray_icon = TrayIconBuilder::new()
+        .with_menu_on_left_click(false)
+        .build()?;
 
     let mut state: ProgramState = init(&mut tray_icon, &device)?;
 
