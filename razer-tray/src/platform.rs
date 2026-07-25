@@ -290,6 +290,14 @@ pub const GPU_UNAVAILABLE: u32 = u32::MAX;
 #[cfg(target_os = "windows")]
 const GPU_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Consecutive failed samples tolerated before the monitor gives up for the session.
+///
+/// At [`GPU_POLL_INTERVAL`] this is about a minute of grace, which covers a driver that
+/// isn't ready yet at login. The cost on a machine that genuinely has no NVIDIA tools is
+/// this many short-lived failed spawns, once per session.
+#[cfg(target_os = "windows")]
+const GPU_MAX_CONSECUTIVE_FAILURES: u32 = 12;
+
 /// Current dGPU temperature (°C) and board power (watts), if a reading is available.
 ///
 /// `watts` is 0.0 when the temperature is known but power isn't (some GPUs don't report
@@ -323,8 +331,14 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
 /// the sample rate ever needs to be high.
 ///
 /// Fails open and silent: a machine with no NVIDIA tools, or no dGPU, simply never gets a
-/// reading and the tooltip omits those fields. The thread stops after the first failure so
-/// we don't spawn a doomed process every few seconds forever.
+/// reading and the tooltip omits those fields.
+///
+/// It tolerates [`GPU_MAX_CONSECUTIVE_FAILURES`] failures before giving up, rather than
+/// quitting on the first. The tray starts at login, and that is exactly when the NVIDIA
+/// driver is least likely to be ready -- a cold-booted or resumed machine can answer
+/// "couldn't communicate with the NVIDIA driver" for several seconds. Quitting on the
+/// first sample turned a transient startup condition into a permanently empty tooltip
+/// for the whole session.
 #[cfg(target_os = "windows")]
 pub fn spawn_gpu_telemetry_monitor() {
     use std::os::windows::process::CommandExt;
@@ -332,7 +346,8 @@ pub fn spawn_gpu_telemetry_monitor() {
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    std::thread::spawn(|| loop {
+    let mut failures = 0u32;
+    std::thread::spawn(move || loop {
         let output = procCommand::new("nvidia-smi")
             .args([
                 "--query-gpu=temperature.gpu,power.draw",
@@ -356,6 +371,14 @@ pub fn spawn_gpu_telemetry_monitor() {
 
         match parsed {
             Some((temp, watts)) => {
+                failures = 0;
+                // Log the first good sample. Without this, "the tooltip shows no GPU
+                // fields" is undiagnosable from a log: success was previously silent, so
+                // an absent reading and a working one looked identical.
+                static FIRST_SAMPLE: std::sync::Once = std::sync::Once::new();
+                FIRST_SAMPLE.call_once(|| {
+                    log::info!("dGPU telemetry: first sample {temp} C, {watts:?} W");
+                });
                 GPU_TEMP_C.store(temp, Ordering::Relaxed);
                 GPU_POWER_CW.store(
                     watts
@@ -365,12 +388,33 @@ pub fn spawn_gpu_telemetry_monitor() {
                 );
             }
             None => {
-                // Give up permanently rather than respawning a failing process forever.
-                // Values stay at the unavailable sentinel, so the tooltip just omits them.
-                log::info!("dGPU telemetry unavailable; not polling further");
-                GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
-                GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
-                return;
+                failures += 1;
+                // Report why, once, with the tool's own words -- "no dGPU" and "driver
+                // not ready yet" are very different for someone filing a bug.
+                if failures == 1 {
+                    let detail = match &output {
+                        Ok(o) => format!(
+                            "exit {:?}, stdout {:?}, stderr {:?}",
+                            o.status.code(),
+                            String::from_utf8_lossy(&o.stdout).trim(),
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        ),
+                        Err(e) => format!("could not run nvidia-smi: {e}"),
+                    };
+                    log::info!("dGPU telemetry attempt failed ({detail}); will retry");
+                }
+                if failures >= GPU_MAX_CONSECUTIVE_FAILURES {
+                    // Give up rather than respawning a doomed process forever. Values go
+                    // to the unavailable sentinel, so the tooltip just omits the fields.
+                    log::info!(
+                        "dGPU telemetry unavailable after {failures} attempts; not polling further"
+                    );
+                    GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+                    GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+                    return;
+                }
+                // Leave any previous reading in place: a transient failure shouldn't blank
+                // a field that was working a few seconds ago.
             }
         }
 

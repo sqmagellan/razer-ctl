@@ -40,6 +40,48 @@ fn truncate_to_tooltip_limit(s: &str) -> String {
     out
 }
 
+/// Push a tooltip to the tray icon, logging the first OS rejection.
+///
+/// Every call site used to discard this `Result` with `let _ =`, so a rejected update was
+/// completely invisible: the tray would keep displaying a stale tooltip forever with
+/// nothing in the log to say why. If `Shell_NotifyIcon` ever refuses the modify, we want
+/// to know once rather than never.
+pub fn set_tooltip_logged(tray_icon: &tray_icon::TrayIcon, tooltip: &str) {
+    if let Err(e) = tray_icon.set_tooltip(Some(tooltip)) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            log::warn!("set_tooltip rejected by the shell: {e:?}");
+        }
+    }
+}
+
+/// Log the tooltip once at startup, and again whenever the dGPU fields appear or
+/// disappear.
+///
+/// Two lines in normal operation, so it's cheap enough to leave on at Info. It exists
+/// because "the tooltip isn't showing X" was otherwise undiagnosable without a debugger
+/// on the user's desktop: the string handed to Windows was never recorded anywhere. The
+/// UTF-16 count is included because that, not the character count, is what `szTip`
+/// truncates on.
+fn log_tooltip_transition(tooltip: &str) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    /// Neither present nor absent yet, so the first call always logs.
+    const UNKNOWN: u8 = 2;
+    static LAST_HAD_GPU: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+    let has_gpu = u8::from(tooltip.contains("\nGPU "));
+    if LAST_HAD_GPU.swap(has_gpu, Ordering::Relaxed) != has_gpu {
+        log::info!(
+            "tooltip ({} UTF-16 units, dGPU fields {}): {:?}",
+            tooltip.chars().map(char::len_utf16).sum::<usize>(),
+            if has_gpu == 1 { "present" } else { "absent" },
+            tooltip
+        );
+    }
+}
+
 pub struct ProgramState {
     pub device_state: DeviceState,
     pub observed: DeviceState,
@@ -182,7 +224,9 @@ impl ProgramState {
             }
         }
 
-        Ok(truncate_to_tooltip_limit(&info))
+        let out = truncate_to_tooltip_limit(&info);
+        log_tooltip_transition(&out);
+        Ok(out)
     }
 
     pub fn icon(&self) -> tray_icon::Icon {
@@ -232,7 +276,7 @@ impl ProgramState {
             menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
         self.fan_actual = get_fan_rpm(device)?;
         tray_icon.set_icon(Some(self.icon()))?;
-        tray_icon.set_tooltip(Some(self.tooltip()?))?;
+        set_tooltip_logged(tray_icon, &self.tooltip()?);
         tray_icon.set_menu(Some(Box::new(self.menu.clone())));
         Ok(())
     }
@@ -330,7 +374,7 @@ impl ProgramState {
         // correction) shows now rather than waiting for the next input-gated Mirror poll.
         let _ = tray_icon.set_icon(Some(self.icon()));
         if let Ok(tooltip) = self.tooltip() {
-            let _ = tray_icon.set_tooltip(Some(tooltip));
+            crate::program::set_tooltip_logged(tray_icon, &tooltip);
         }
     }
 }

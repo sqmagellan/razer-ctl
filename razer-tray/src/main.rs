@@ -255,7 +255,7 @@ fn main() -> Result<()> {
                         }
                         let _ = tray_icon.set_icon(Some(state.icon()));
                         if let Ok(tooltip) = state.tooltip() {
-                            let _ = tray_icon.set_tooltip(Some(tooltip));
+                            crate::program::set_tooltip_logged(&tray_icon, &tooltip);
                         }
                     }
                     _ => {}
@@ -462,7 +462,7 @@ fn main() -> Result<()> {
                 }
                 let _ = tray_icon.set_icon(Some(state.icon()));
                 if let Ok(tooltip) = state.tooltip() {
-                    let _ = tray_icon.set_tooltip(Some(tooltip));
+                    crate::program::set_tooltip_logged(&tray_icon, &tooltip);
                 }
             }
 
