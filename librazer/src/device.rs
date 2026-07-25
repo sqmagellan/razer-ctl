@@ -1,4 +1,5 @@
 use crate::descriptor::{Descriptor, SUPPORTED};
+use crate::error::DetectError;
 use crate::packet::{Packet, ResponseError};
 use crate::transport::HidTransport;
 
@@ -72,7 +73,13 @@ impl Device {
                 });
             }
         }
-        anyhow::bail!("Failed to open device {:?}", descriptor)
+        // Typed, and readable: this used to dump the whole Descriptor's Debug output at
+        // the user, and returned an unclassifiable string so `manual --pid` on a bad PID
+        // exited 1 instead of "no device" (verified on hardware).
+        Err(anyhow::Error::new(DetectError::InterfaceUnavailable {
+            pid: descriptor.pid,
+            name: descriptor.name.to_string(),
+        }))
     }
 
     pub fn send(&self, report: Packet) -> Result<Packet> {
@@ -118,16 +125,17 @@ impl Device {
 
             // NotSupported is a definitive answer from the firmware -- the command will
             // never succeed on this device, so retrying just burns ~2.5s before failing.
+            // Propagate the ERROR VALUE, not its Display string: callers (the CLI's exit
+            // codes, `feature` probing) need to distinguish "this firmware lacks the
+            // command" from "the bus is out of step", and `anyhow!("{}", err)` erased that.
             if err == ResponseError::NotSupported {
-                return Err(anyhow!("{}", err));
+                return Err(anyhow::Error::new(err));
             }
 
             if attempt == MAX_RETRIES - 1 {
-                return Err(anyhow!(
-                    "Failed to match report after {} attempts: {}",
-                    MAX_RETRIES,
-                    err
-                ));
+                return Err(anyhow::Error::new(err).context(format!(
+                    "failed to match report after {MAX_RETRIES} attempts"
+                )));
             }
 
             thread::sleep(if err.is_busy() {
@@ -150,13 +158,15 @@ impl Device {
             .collect();
 
         if razer_pid_list.is_empty() {
-            anyhow::bail!("No Razer devices found")
+            return Err(anyhow::Error::new(DetectError::NoRazerDevices));
         }
 
         match read_device_model() {
             Ok(model) if model.starts_with("RZ09-") => Ok((razer_pid_list, model)),
-            Ok(model) => anyhow::bail!("Detected model but it's not a Razer laptop: {}", model),
-            Err(e) => anyhow::bail!("Failed to detect model: {}", e),
+            Ok(model) => Err(anyhow::Error::new(DetectError::NotARazerLaptop(model))),
+            Err(e) => Err(anyhow::Error::new(DetectError::ModelUnreadable(
+                e.to_string(),
+            ))),
         }
     }
 
@@ -189,16 +199,14 @@ impl Device {
             }
         }
 
-        anyhow::bail!(
-            "Model {} with PIDs {:0>4x?} is not supported, and no generic fallback could \
-             open a control interface{}",
-            model_number_prefix,
-            pid_list,
-            match last_err {
+        Err(anyhow::Error::new(DetectError::NoControlInterface {
+            model: model_number_prefix.clone(),
+            pids: pid_list.clone(),
+            detail: match last_err {
                 Some(e) => format!(": {e}"),
                 None => String::new(),
-            }
-        )
+            },
+        }))
     }
 }
 

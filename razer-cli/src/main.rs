@@ -344,15 +344,30 @@ impl Cli for feature::Perf {
     }
 }
 
-fn enumerate() -> Result<()> {
+fn enumerate(as_json: bool) -> Result<()> {
     let (pid_list, model_number_prefix) = device::Device::enumerate()?;
+    let catalogued = librazer::descriptor::SUPPORTED
+        .iter()
+        .any(|supported| model_number_prefix == supported.model_number_prefix);
+
+    if as_json {
+        // This is the exact information the "unsupported model" issue template asks for,
+        // so make it copy-pasteable and unambiguous rather than something a reporter has
+        // to retype. PIDs are rendered as hex strings because that's how every table,
+        // descriptor, and bug report writes them.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "model": model_number_prefix,
+                "catalogued": catalogued,
+                "pids": pid_list.iter().map(|p| format!("0x{p:04x}")).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
     println!("Model: {}", model_number_prefix);
-    println!(
-        "Supported: {}",
-        librazer::descriptor::SUPPORTED
-            .iter()
-            .any(|supported| model_number_prefix == supported.model_number_prefix)
-    );
+    println!("Supported: {}", catalogued);
     println!("PID: {:#06x?}", pid_list);
     Ok(())
 }
@@ -515,7 +530,26 @@ fn gen_cli_features(feature_list: &[&str]) -> Vec<Box<dyn Cli>> {
         .collect()
 }
 
-fn main() -> Result<()> {
+/// Exit with a classified status instead of anyhow's blanket 1.
+///
+/// The point is scriptability: a caller needs to tell "no Razer laptop here" (3) from
+/// "this model doesn't implement that command" (4, stop asking) from "the EC was busy"
+/// (5, worth retrying). 2 belongs to clap's usage errors and is not ours to assign.
+/// See `librazer::error::ExitCode` for the contract.
+fn main() -> std::process::ExitCode {
+    match real_main() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            let code = librazer::error::ExitCode::classify(&e);
+            // `{:#}` renders the whole anyhow context chain on one line, which is what a
+            // script's stderr wants; the Debug form spreads it over several.
+            eprintln!("error: {e:#}");
+            std::process::ExitCode::from(code as u8)
+        }
+    }
+}
+
+fn real_main() -> Result<()> {
     env_logger::init();
 
     let info_cmd = clap::Command::new("info").about("Get device info");
@@ -553,23 +587,46 @@ fn main() -> Result<()> {
 
     let cmd = clap::command!()
         .color(clap::ColorChoice::Always)
+        // Documented here as well as in the README, because a script author reaching for
+        // `--help` shouldn't have to go find a web page to learn what a failure means.
+        .after_help(
+            "Exit codes:\n  \
+             0  success\n  \
+             1  unclassified error\n  \
+             2  usage error (emitted by the argument parser)\n  \
+             3  no usable Razer laptop found (retrying will not help)\n  \
+             4  command not supported by this model (definitive; stop asking)\n  \
+             5  device communication error: busy, rejected, or out of step (retryable)",
+        )
         .subcommand_required(true)
         .subcommand(update_cmd(auto_cmd, &cli_features))
         .subcommand(update_cmd(manual_cmd, &cli_features))
-        .subcommand(clap::Command::new("enumerate").about("List discovered Razer devices"))
+        .subcommand(
+            clap::Command::new("enumerate")
+                .about("List discovered Razer devices")
+                .arg(
+                    arg!(--json "Print as JSON (this is what a device-support issue needs)")
+                        .action(clap::ArgAction::SetTrue),
+                ),
+        )
         .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"));
 
     let matches = cmd.get_matches();
 
     match matches.subcommand() {
-        Some(("enumerate", _)) => {
-            enumerate()?;
+        Some(("enumerate", submatches)) => {
+            enumerate(submatches.get_flag("json"))?;
         }
         Some(("taskkill", _)) => {
             taskkill()?;
         }
         Some(("auto", submatches)) => {
-            handle(&device.unwrap(), submatches, &cli_features)?;
+            // Set above when the first argument is `auto`; the expect documents that
+            // coupling rather than leaving a bare unwrap for a future reader to audit.
+            let device = device
+                .as_ref()
+                .expect("auto mode detects the device before parsing arguments");
+            handle(device, submatches, &cli_features)?;
         }
         Some(("manual", submatches)) => {
             let device = device::Device::new(librazer::descriptor::Descriptor {
@@ -582,8 +639,12 @@ fn main() -> Result<()> {
             })?;
             handle(&device, submatches, &cli_features)?;
         }
-        Some((cmd, _)) => unimplemented!("Subcommand not implemented: {}", cmd),
-        None => unreachable!(),
+        // clap enforces `subcommand_required`, so neither of these should be reachable --
+        // but they used to be `unimplemented!()`/`unreachable!()`, i.e. a panic with a
+        // backtrace in a user's terminal if that assumption ever broke. An error costs
+        // nothing and degrades politely.
+        Some((cmd, _)) => anyhow::bail!("unhandled subcommand: {cmd}"),
+        None => anyhow::bail!("no subcommand given (try --help)"),
     };
 
     Ok(())

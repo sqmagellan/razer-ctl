@@ -45,7 +45,22 @@ and only writes to the device when you ask it to.
 - **Close GPU apps** — terminates dGPU-using processes, with a hard safelist so it never takes down the desktop.
 - **Start with Windows** — an `HKCU\…\Run` entry.
 - **Machine-readable status** — `razer-cli auto json` prints the whole device state, including the
-  *actual* fan RPM, as flat JSON — ready for a Home Assistant command-line sensor or a shell status line.
+  *actual* fan RPM, as flat JSON — ready for a Home Assistant command-line sensor or a shell status
+  line. `razer-cli enumerate --json` gives the model/PID block a device-support report needs.
+- **Exit codes that mean something**, so a script can branch without parsing stderr:
+
+  | Code | Meaning |
+  |---|---|
+  | 0 | success — the change actually happened |
+  | 1 | unclassified error |
+  | 2 | usage error (emitted by the argument parser) |
+  | 3 | no usable Razer laptop found — retrying won't help |
+  | 4 | command not supported by this model — definitive, stop asking |
+  | 5 | device communication error (busy / rejected / out of step) — retryable |
+
+  All of these are verified on hardware, 4 by issuing a command this EC genuinely refuses. 2 is
+  skipped deliberately: the argument parser exits 2 from inside its own code, before ours runs, so
+  it can never be reliably ours to assign.
 
 Config lives at `%APPDATA%\razer-tray\config\default-config.toml`; the log at `%TEMP%\razer-tray.log`
 (Info level, capped at 10 MiB, wiped on rollover).

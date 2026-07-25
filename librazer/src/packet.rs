@@ -63,6 +63,15 @@ impl std::fmt::Display for ResponseError {
     }
 }
 
+/// `ResponseError` is a real `std::error::Error`, not just something printable.
+///
+/// `Device::send` used to return `anyhow!("{}", err)`, which flattened this enum into a
+/// string and destroyed the only thing a caller could branch on. A CLI that wants to exit
+/// 3 for "this device doesn't implement that command" and 4 for "the bus is confused" has
+/// to be able to `downcast_ref` its way back to the variant, so the type must survive
+/// propagation.
+impl std::error::Error for ResponseError {}
+
 impl Packet {
     /// Transaction id placed in every outgoing packet. Razer firmware uses this field
     /// to route responses, and the reference drivers use a FIXED id per device family

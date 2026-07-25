@@ -8,6 +8,7 @@ pub mod command;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod device;
 
+pub mod error;
 pub mod feature;
 pub mod matching;
 pub mod process_guard;
