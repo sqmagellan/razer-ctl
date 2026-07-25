@@ -93,16 +93,135 @@ pub enum LightsAlwaysOn {
     Disable = 0x00,
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum BatteryCare {
-    Percent50 = 0xB2, // 50% limit (178 decimal) - VERIFIED from BIOS
-    Percent55 = 0xB7, // 55% limit (183 decimal) - VERIFIED works
-    Percent60 = 0xBC, // 60% limit (188 decimal) - VERIFIED works
-    Percent65 = 0xC1, // 65% limit (193 decimal) - calculated from pattern
-    Percent70 = 0xC6, // 70% limit (198 decimal) - calculated from pattern
-    Percent75 = 0xCB, // 75% limit (203 decimal) - calculated from pattern
-    Percent80 = 0xD0, // 80% limit (208 decimal) - VERIFIED from protocol capture
-    Disable = 0x50,   // 100% - no limit (80 decimal) - VERIFIED
+/// Battery charge limit ("Battery Health Optimizer" in Synapse), as a whole percent.
+///
+/// The wire byte is `bit7 = BHO enabled | bits0..6 = threshold percent`, confirmed
+/// against razer-laptop-control's `bho_to_byte` and BugQuest/razer-blade-bho, and
+/// HW-verified on PID 0x029F (2026-07-25).
+///
+/// **This used to be an 8-variant enum (50/55/.../80 + Disable) and that was our own
+/// restriction, not the firmware's.** Probing the EC showed it accepts *every integer
+/// from 50 to 100*: 0x85 (5%) and 0xAD (45%) return NotSupported, while 50, 51, 85, 95
+/// and 100 all return status 0x02. The exact floor is 50 -- 48 and 49 are refused. So
+/// the old enum hid 43 usable values, including the entire 81-99 band (a light 90%
+/// limit is common battery-longevity advice and was simply unreachable).
+///
+/// 100 means "no limit". It is written as `0x50` -- bit 7 clear, i.e. BHO *disabled* --
+/// which is what this project has always sent and is HW-verified. (`0xE4`, "enabled at
+/// 100%", is also accepted and is what BugQuest's tool uses to defeat a stuck limit;
+/// both achieve no-limit, and we keep the encoding already proven here.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryCare {
+    /// Invariant: always 50..=100. Constructors are the only way in.
+    percent: u8,
+}
+
+impl BatteryCare {
+    /// Lowest limit the EC accepts. HW-verified: 49 and below answer NotSupported.
+    pub const MIN_PERCENT: u8 = 50;
+    /// 100% == charge without a limit.
+    pub const MAX_PERCENT: u8 = 100;
+
+    /// Wire byte meaning "BHO disabled" (no charge limit). Bit 7 clear.
+    const WIRE_DISABLED: u8 = 0x50;
+    /// Bit 7 of the wire byte: BHO enabled.
+    const WIRE_ENABLED_FLAG: u8 = 0x80;
+
+    /// No charge limit (charge to 100%).
+    pub const DISABLE: Self = Self { percent: 100 };
+
+    /// A limit at `percent`, rejecting anything the EC will not accept.
+    ///
+    /// Unlike the old `from_percent`, this does **not** round to a nearby preset: the
+    /// firmware honours every integer in range, so silently moving the user's 63% to
+    /// 65% would be inventing a limitation and lying about it.
+    pub fn from_percent(percent: u8) -> Result<Self> {
+        if !(Self::MIN_PERCENT..=Self::MAX_PERCENT).contains(&percent) {
+            bail!(
+                "Invalid battery care percentage: {} (must be {}-{})",
+                percent,
+                Self::MIN_PERCENT,
+                Self::MAX_PERCENT
+            );
+        }
+        Ok(Self { percent })
+    }
+
+    /// The configured limit as a percent. 100 means no limit.
+    pub fn to_percent(&self) -> u8 {
+        self.percent
+    }
+
+    /// True when no limit is in force.
+    pub fn is_disabled(&self) -> bool {
+        self.percent == Self::MAX_PERCENT
+    }
+
+    /// The byte to put on the wire for this limit.
+    pub fn wire_byte(&self) -> u8 {
+        if self.is_disabled() {
+            Self::WIRE_DISABLED
+        } else {
+            Self::WIRE_ENABLED_FLAG | self.percent
+        }
+    }
+}
+
+impl std::fmt::Display for BatteryCare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_disabled() {
+            write!(f, "off (100%)")
+        } else {
+            write!(f, "{}%", self.percent)
+        }
+    }
+}
+
+/// Serialize as a plain number, so a config reads `battery_care = 80`.
+impl Serialize for BatteryCare {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u8(self.percent)
+    }
+}
+
+/// Accept either the new number form or the legacy enum-variant strings.
+///
+/// **This compatibility shim is load-bearing, not politeness.** `BatteryCare` was a
+/// fieldless enum, so every config ever written by this app persisted it as a serde
+/// variant name -- `battery_care = "Percent80"`, or `"Disable"`. Accepting only a number
+/// would make those files fail to deserialize, and because the tray does
+/// `confy::load(...).unwrap_or_default()` the failure would be *silent*: the user's saved
+/// AC and battery profiles would be replaced by defaults, and the next persist would
+/// overwrite them for good. Keep this shim.
+impl<'de> Deserialize<'de> for BatteryCare {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Percent(u8),
+            Legacy(String),
+        }
+
+        match Repr::deserialize(d)? {
+            Repr::Percent(p) => BatteryCare::from_percent(p).map_err(serde::de::Error::custom),
+            Repr::Legacy(name) => match name.as_str() {
+                "Disable" => Ok(BatteryCare::DISABLE),
+                // "Percent80" -> 80. The old variants were the only values that could
+                // have been written, so anything else is a genuinely malformed config.
+                other => other
+                    .strip_prefix("Percent")
+                    .and_then(|n| n.parse::<u8>().ok())
+                    .map(BatteryCare::from_percent)
+                    .transpose()
+                    .map_err(serde::de::Error::custom)?
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(format!(
+                            "unrecognized battery_care value {other:?}"
+                        ))
+                    }),
+            },
+        }
+    }
 }
 
 impl TryFrom<u8> for GpuBoost {
@@ -176,53 +295,22 @@ impl TryFrom<u8> for LightsAlwaysOn {
 impl TryFrom<u8> for BatteryCare {
     type Error = anyhow::Error;
 
+    /// Decode the wire byte the EC reports (`0x0792`).
+    ///
+    /// Bit 7 set means BHO is enabled and bits 0..6 carry the threshold; bit 7 clear
+    /// means it is off, whatever the low bits say (the EC reports 0x50 there).
+    /// `0xE4` -- enabled at 100% -- is a no-limit state some tools set, so it decodes
+    /// to the same thing as disabled.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0xB2 => Ok(BatteryCare::Percent50),
-            0xB7 => Ok(BatteryCare::Percent55),
-            0xBC => Ok(BatteryCare::Percent60),
-            0xC1 => Ok(BatteryCare::Percent65),
-            0xC6 => Ok(BatteryCare::Percent70),
-            0xCB => Ok(BatteryCare::Percent75),
-            0xD0 => Ok(BatteryCare::Percent80),
-            0x50 => Ok(BatteryCare::Disable),
-            _ => bail!("Failed to convert {:#x} to BatteryCare", value),
+        if value & BatteryCare::WIRE_ENABLED_FLAG == 0 {
+            return Ok(BatteryCare::DISABLE);
         }
-    }
-}
-
-impl BatteryCare {
-    /// Convert percentage value to BatteryCare enum, rounding to nearest supported value
-    /// Synapse supports: 50, 55, 60, 65, 70, 75, 80, 100 (disable)
-    pub fn from_percent(percent: u8) -> Result<Self> {
-        match percent {
-            0..=52 => Ok(BatteryCare::Percent50),
-            53..=57 => Ok(BatteryCare::Percent55),
-            58..=62 => Ok(BatteryCare::Percent60),
-            63..=67 => Ok(BatteryCare::Percent65),
-            68..=72 => Ok(BatteryCare::Percent70),
-            73..=77 => Ok(BatteryCare::Percent75),
-            78..=90 => Ok(BatteryCare::Percent80),
-            91..=100 => Ok(BatteryCare::Disable),
-            _ => bail!(
-                "Invalid battery care percentage: {} (must be 50-100)",
-                percent
-            ),
+        let percent = value & 0x7f;
+        if percent >= BatteryCare::MAX_PERCENT {
+            return Ok(BatteryCare::DISABLE);
         }
-    }
-
-    /// Get the percentage value this enum represents
-    pub fn to_percent(&self) -> u8 {
-        match self {
-            BatteryCare::Percent50 => 50,
-            BatteryCare::Percent55 => 55,
-            BatteryCare::Percent60 => 60,
-            BatteryCare::Percent65 => 65,
-            BatteryCare::Percent70 => 70,
-            BatteryCare::Percent75 => 75,
-            BatteryCare::Percent80 => 80,
-            BatteryCare::Disable => 100,
-        }
+        BatteryCare::from_percent(percent)
+            .map_err(|e| anyhow::anyhow!("Failed to convert {:#x} to BatteryCare: {}", value, e))
     }
 }
 
@@ -242,64 +330,105 @@ impl TryFrom<u8> for MaxFanSpeedMode {
 mod tests {
     use super::*;
 
-    // BatteryCare::from_percent is a rounding table that's easy to break silently.
-    // Lock the bucket boundaries (50/55/.../80, then 100=Disable).
+    // The EC accepts every integer 50..=100 (HW-verified on 0x029F 2026-07-25: 48 and 49
+    // answer NotSupported; 50/51/85/95/100 all return status 0x02). These tests pin that
+    // range, because the previous 8-value rounding table was OUR restriction, not the
+    // firmware's, and quietly reintroducing one would be a regression users can feel.
     #[test]
-    fn battery_care_from_percent_boundaries() {
-        let cases = [
-            (50, BatteryCare::Percent50),
-            (52, BatteryCare::Percent50), // top of the 50% bucket
-            (53, BatteryCare::Percent55), // bottom of the 55% bucket
-            (80, BatteryCare::Percent80),
-            (90, BatteryCare::Percent80), // 78..=90 still maps to 80%
-            (91, BatteryCare::Disable),   // 91..=100 disables the limit
-            (100, BatteryCare::Disable),
-        ];
-        for (pct, expected) in cases {
-            assert_eq!(
-                BatteryCare::from_percent(pct).unwrap(),
-                expected,
-                "from_percent({pct})"
-            );
+    fn battery_care_accepts_every_percent_the_ec_supports() {
+        for pct in BatteryCare::MIN_PERCENT..=BatteryCare::MAX_PERCENT {
+            let bc = BatteryCare::from_percent(pct)
+                .unwrap_or_else(|e| panic!("{pct}% must be accepted: {e}"));
+            // No rounding: the value must survive exactly as given.
+            assert_eq!(bc.to_percent(), pct, "from_percent({pct}) must not round");
         }
-        // Out of range errors (only > 100 is rejected; the u8 max is 255).
-        assert!(BatteryCare::from_percent(101).is_err());
-        assert!(BatteryCare::from_percent(255).is_err());
     }
 
     #[test]
-    fn battery_care_percent_round_trips() {
-        // For every canonical option, percent -> enum -> percent is stable.
-        for mode in [
-            BatteryCare::Percent50,
-            BatteryCare::Percent55,
-            BatteryCare::Percent60,
-            BatteryCare::Percent65,
-            BatteryCare::Percent70,
-            BatteryCare::Percent75,
-            BatteryCare::Percent80,
-            BatteryCare::Disable,
-        ] {
-            let pct = mode.to_percent();
-            assert_eq!(
-                BatteryCare::from_percent(pct).unwrap(),
-                mode,
-                "round-trip {pct}%"
+    fn battery_care_rejects_values_the_ec_refuses() {
+        // 50 is a hard firmware floor, verified by probe.
+        for pct in [0u8, 1, 30, 45, 48, 49] {
+            assert!(
+                BatteryCare::from_percent(pct).is_err(),
+                "{pct}% is below the EC floor and must be rejected"
             );
         }
+        for pct in [101u8, 150, 255] {
+            assert!(
+                BatteryCare::from_percent(pct).is_err(),
+                "{pct}% is out of range"
+            );
+        }
+    }
+
+    #[test]
+    fn battery_care_wire_encoding_is_enabled_flag_plus_percent() {
+        // bit7 = BHO enabled, bits0..6 = threshold. Cross-checked against
+        // razer-laptop-control's bho_to_byte and HW-verified byte-for-byte.
+        assert_eq!(BatteryCare::from_percent(50).unwrap().wire_byte(), 0xB2);
+        assert_eq!(BatteryCare::from_percent(80).unwrap().wire_byte(), 0xD0);
+        assert_eq!(BatteryCare::from_percent(95).unwrap().wire_byte(), 0xDF);
+        // 100 == no limit, written as bit7-CLEAR (0x50), the encoding this project has
+        // always sent and the one verified on hardware.
+        assert_eq!(BatteryCare::DISABLE.wire_byte(), 0x50);
+        assert!(BatteryCare::DISABLE.is_disabled());
+        assert!(!BatteryCare::from_percent(80).unwrap().is_disabled());
     }
 
     #[test]
     fn battery_care_wire_value_round_trips() {
-        // The enum's u8 discriminant is the on-wire byte; try_from must invert it.
-        for mode in [
-            BatteryCare::Percent50,
-            BatteryCare::Percent80,
-            BatteryCare::Disable,
-        ] {
-            assert_eq!(BatteryCare::try_from(mode as u8).unwrap(), mode);
+        for pct in BatteryCare::MIN_PERCENT..=BatteryCare::MAX_PERCENT {
+            let bc = BatteryCare::from_percent(pct).unwrap();
+            assert_eq!(
+                BatteryCare::try_from(bc.wire_byte()).unwrap(),
+                bc,
+                "wire round-trip for {pct}%"
+            );
         }
-        assert!(BatteryCare::try_from(0xFF).is_err());
+    }
+
+    #[test]
+    fn battery_care_decodes_both_no_limit_encodings() {
+        // 0x50: bit7 clear -> BHO off.
+        assert_eq!(BatteryCare::try_from(0x50).unwrap(), BatteryCare::DISABLE);
+        // 0xE4: "enabled at 100%" -- what BugQuest's tool writes to defeat a stuck
+        // limit. Functionally no limit, so it must decode the same way rather than
+        // erroring or reporting a 100% "limit" that differs from Disable.
+        assert_eq!(BatteryCare::try_from(0xE4).unwrap(), BatteryCare::DISABLE);
+        // A bit7-set byte below the floor is genuinely malformed.
+        assert!(BatteryCare::try_from(0x80 | 20).is_err());
+    }
+
+    /// Existing configs persist `battery_care` as the OLD serde enum-variant name.
+    /// Deserialization must still accept them: the tray loads config with
+    /// `unwrap_or_default()`, so a parse failure would SILENTLY discard the user's saved
+    /// AC/battery profiles and then overwrite them on the next persist.
+    #[test]
+    fn battery_care_deserializes_legacy_enum_variant_names() {
+        for (legacy, expected_pct) in [
+            ("\"Percent50\"", 50),
+            ("\"Percent65\"", 65),
+            ("\"Percent80\"", 80),
+            ("\"Disable\"", 100),
+        ] {
+            let bc: BatteryCare = serde_json::from_str(legacy)
+                .unwrap_or_else(|e| panic!("legacy config value {legacy} must load: {e}"));
+            assert_eq!(bc.to_percent(), expected_pct, "legacy {legacy}");
+        }
+    }
+
+    #[test]
+    fn battery_care_serializes_as_a_plain_number_and_round_trips() {
+        let bc = BatteryCare::from_percent(90).unwrap();
+        assert_eq!(serde_json::to_string(&bc).unwrap(), "90");
+        // New form loads too, so a config written today reloads tomorrow.
+        assert_eq!(serde_json::from_str::<BatteryCare>("90").unwrap(), bc);
+        assert_eq!(
+            serde_json::from_str::<BatteryCare>("100").unwrap(),
+            BatteryCare::DISABLE
+        );
+        // A number outside the EC's range must fail loudly, not clamp.
+        assert!(serde_json::from_str::<BatteryCare>("20").is_err());
     }
 
     #[test]

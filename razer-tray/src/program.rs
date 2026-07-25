@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use librazer::device;
-use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn};
+use librazer::types::{BatteryCare, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
 use crate::menu;
@@ -89,14 +89,7 @@ impl ProgramState {
 
     pub fn get_next_perf_mode(&self) -> DeviceState {
         DeviceState {
-            perf_mode: match self.device_state.perf_mode {
-                PerfMode::Battery => PerfMode::Silent,
-                PerfMode::Silent => PerfMode::Balanced,
-                PerfMode::Balanced => PerfMode::Performance,
-                PerfMode::Performance => PerfMode::Hyperboost,
-                PerfMode::Hyperboost => PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
-                PerfMode::Custom(..) => PerfMode::Battery,
-            },
+            perf_mode: crate::state::next_perf_mode(self.device_state.perf_mode),
             ..self.device_state
         }
     }
@@ -152,7 +145,7 @@ impl ProgramState {
             write!(&mut info, " · 💡")?;
         }
 
-        if s.battery_care != BatteryCare::Disable {
+        if s.battery_care != BatteryCare::DISABLE {
             write!(&mut info, "\n🔋 {}%", s.battery_care.to_percent())?;
         }
 
@@ -162,28 +155,19 @@ impl ProgramState {
     }
 
     pub fn icon(&self) -> tray_icon::Icon {
-        use std::sync::OnceLock;
-        // Decode the embedded PNGs once per process. icon() runs on every Mirror
-        // refresh (and every update), so re-decoding a PNG each call was wasted work.
-        // Indexed by perf mode; the decoded RGBA is cheap to clone for from_rgba.
-        static ICONS: OnceLock<[(Vec<u8>, u32, u32); 6]> = OnceLock::new();
-        let icons = ICONS.get_or_init(|| {
-            let decode = |bytes: &[u8]| {
-                let img = image::load_from_memory(bytes)
-                    .expect("embedded icon failed to decode")
-                    .into_rgba8();
-                let (w, h) = img.dimensions();
-                (img.into_raw(), w, h)
-            };
-            [
-                decode(include_bytes!("../icons/razer-blue.png")), // 0 Battery
-                decode(include_bytes!("../icons/razer-yellow.png")), // 1 Silent
-                decode(include_bytes!("../icons/razer-green.png")), // 2 Balanced
-                decode(include_bytes!("../icons/razer-red.png")),  // 3 Performance
-                decode(include_bytes!("../icons/razer-violet.png")), // 4 Hyperboost
-                decode(include_bytes!("../icons/razer-brown.png")), // 5 Custom
-            ]
-        });
+        // Raw RGBA baked by build.rs -- no runtime image decoder, so the `image` crate
+        // stays out of the shipped binary entirely (see build.rs for why). Each blob is
+        // exactly ICON_SIZE^2 * 4 bytes at the size build.rs produced.
+        const ICON_EDGE: u32 = 64;
+        // Indexed by perf mode, in the order build.rs writes them.
+        const ICON_RGBA: [&[u8]; 6] = [
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-blue.rgba")), // 0 Battery
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-yellow.rgba")), // 1 Silent
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-green.rgba")), // 2 Balanced
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-red.rgba")),  // 3 Performance
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-violet.rgba")), // 4 Hyperboost
+            include_bytes!(concat!(env!("OUT_DIR"), "/icon-brown.rgba")), // 5 Custom
+        ];
 
         let idx = match self.observed.perf_mode {
             PerfMode::Battery => 0,
@@ -193,9 +177,10 @@ impl ProgramState {
             PerfMode::Hyperboost => 4,
             PerfMode::Custom(_, _) => 5,
         };
-        let (rgba, width, height) = &icons[idx];
-        tray_icon::Icon::from_rgba(rgba.clone(), *width, *height)
-            .expect("failed to build tray icon")
+        // from_rgba wants an owned Vec; this is a 16 KiB copy on a path that runs at most
+        // a few times a second, and it replaces a full PNG decode.
+        tray_icon::Icon::from_rgba(ICON_RGBA[idx].to_vec(), ICON_EDGE, ICON_EDGE)
+            .expect("baked icon is ICON_EDGE^2 RGBA by construction")
     }
 
     /// Apply `new_device_state` to the device and refresh the tray UI (icon/tooltip/menu)

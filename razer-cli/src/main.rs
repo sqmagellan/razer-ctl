@@ -95,8 +95,13 @@ impl Cli for feature::BatteryCare {
                     clap::Command::new("set")
                         .about("Set battery charge limit percentage")
                         .arg(
-                            arg!(<PERCENT> "Charge limit percentage (50-100, rounds to: 50, 55, 60, 65, 70, 75, 80, 100)")
-                                .value_parser(clap::value_parser!(u8).range(50..=100))
+                            // Any whole percent 50-100: the EC accepts all of them
+                            // (HW-verified), so no rounding and no preset list.
+                            arg!(<PERCENT> "Charge limit percentage (any whole 50-100; 100 = no limit)")
+                                .value_parser(
+                                    clap::value_parser!(u8)
+                                        .range(BatteryCare::MIN_PERCENT as i64..=BatteryCare::MAX_PERCENT as i64),
+                                )
                         )
                 )
                 .subcommand(clap::Command::new("enable").about("Enable battery care (limit to 80%) [deprecated: use 'set 80']"))
@@ -113,29 +118,29 @@ impl Cli for feature::BatteryCare {
                     let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
                     let mode = BatteryCare::from_percent(percent)?;
                     command::set_battery_care(device, mode)?;
-                    println!("Battery care set to {}% limit", mode.to_percent());
+                    println!("Battery care set to {}", mode);
                     Ok(())
                 }
                 Some(("enable", _)) => {
-                    command::set_battery_care(device, BatteryCare::Percent80)?;
+                    command::set_battery_care(device, BatteryCare::from_percent(80).unwrap())?;
                     println!("Battery care enabled (charge limit set to 80%)");
                     Ok(())
                 }
                 Some(("disable", _)) => {
-                    command::set_battery_care(device, BatteryCare::Disable)?;
+                    command::set_battery_care(device, BatteryCare::DISABLE)?;
                     println!("Battery care disabled (will charge to 100%)");
                     Ok(())
                 }
                 Some(("get", _)) => {
                     let current = command::get_battery_care(device)?;
-                    println!("Current battery care: {}%", current.to_percent());
+                    println!("Current battery care: {}", current);
                     Ok(())
                 }
                 _ => Ok(()),
             },
             Some(("info", _)) => {
                 let current = command::get_battery_care(device)?;
-                println!("{}: {}%", self.name(), current.to_percent());
+                println!("{}: {}", self.name(), current);
                 Ok(())
             }
             _ => Ok(()),
@@ -368,6 +373,9 @@ struct JsonStatus {
     fan_actual_rpm: [u16; 2],
     keyboard_brightness_percent: u8,
     logo_mode: String,
+    /// Keyboard backlight effect, read back from the EC (0x0f82). `null` when the device
+    /// reports an effect we don't model (e.g. a Synapse-set Static/Reactive).
+    keyboard_effect: Option<String>,
     battery_care_percent: u8,
     max_fan: bool,
 }
@@ -407,6 +415,7 @@ fn print_json(device: &device::Device) -> Result<()> {
         fan_actual_rpm: [fan.fan1, fan.fan2],
         keyboard_brightness_percent: brightness_to_percent(s.lights_mode.keyboard_brightness),
         logo_mode: format!("{:?}", s.lights_mode.logo_mode),
+        keyboard_effect: s.lights_mode.keyboard_effect.map(|e| format!("{e:?}")),
         battery_care_percent: s.battery_care.to_percent(),
         max_fan: s.max_fan,
     };

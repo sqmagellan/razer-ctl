@@ -25,8 +25,15 @@ pub const FAN_RPM_STEP: u16 = 400;
 /// static range *before* the device is detected (e.g. the CLI arg parser). The per-device
 /// range lives on the [`crate::descriptor::Descriptor`] (`fan_rpm_range`) and is narrower;
 /// the EC clamps anything outside its real range regardless.
-pub const FAN_RPM_MIN_ANY: u16 = 2200;
-pub const FAN_RPM_MAX_ANY: u16 = 5300;
+///
+/// These are the true extremes of every chassis we know of, and there used to be three
+/// disagreeing numbers for the same idea: `command.rs` hard-coded `0..=5500`, this ceiling
+/// was 5300, and the per-PID table reaches 5600 (Blade 14 2025). A caller-supplied RPM was
+/// therefore validated against a bound that matched no real machine. Both ends now come
+/// from the device tables: floor 2000 (Blade 15 2021 Advanced), ceiling 5600.
+/// A test in `descriptor.rs` keeps them consistent with the table.
+pub const FAN_RPM_MIN_ANY: u16 = 2000;
+pub const FAN_RPM_MAX_ANY: u16 = 5600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PerfMode {
@@ -43,12 +50,16 @@ pub struct LightsMode {
     pub logo_mode: LogoMode,
     pub keyboard_brightness: u8,
     pub always_on: LightsAlwaysOn,
-    /// Keyboard backlight effect *intent*. `None` (the default) means "leave the keyboard
-    /// lighting untouched" -- so existing configs and anyone who never picks an effect keep
-    /// today's behavior (brightness-only, no effect write; no regression). `Some(effect)` is
-    /// written on apply. Write-only: Chroma has no getter on this device, so this is never in
-    /// `read()`, `enforced_fields_differ`, or the Mirror poll -- there's nothing to reconcile
-    /// against. Same intent-only treatment as always-on. Effects-only, no color (see
+    /// Keyboard backlight effect. `None` means "unknown / leave the keyboard lighting
+    /// untouched" -- so existing configs and anyone who never picks an effect keep today's
+    /// behavior (brightness-only, no effect write; no regression). `Some(effect)` is written
+    /// on apply.
+    ///
+    /// This IS readable on PID 0x029F via `0x0f82` (HW-verified 2026-07-25), so unlike
+    /// always-on it appears in `read()` and can be reconciled. It is deliberately still
+    /// NOT in `enforced_fields_differ`: the effect is cosmetic, and a read that returns
+    /// `None` on a model whose firmware lacks the getter would otherwise look like
+    /// permanent drift and re-assert on every poll forever. Effects-only, no color (see
     /// [`crate::types::KeyboardEffect`] for why arbitrary color is out of scope).
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
@@ -86,6 +97,39 @@ pub fn percent_to_brightness(percent: u8) -> u8 {
 /// brightness menu offers rather than the raw register value (0..=255).
 pub fn brightness_to_percent(brightness: u8) -> u8 {
     ((brightness as u16 * 100 + 127) / 255) as u8
+}
+
+/// Percent steps the keyboard-brightness menu offers (0, 10, ..., 100).
+pub const BRIGHTNESS_PERCENT_STEP: u8 = 10;
+
+/// The menu step closest to a raw 0..=255 brightness.
+///
+/// The hardware Fn keys walk a 16-step ladder that doesn't line up with our 10% marks, so
+/// an externally-set brightness usually lands *between* steps. Highlighting the nearest one
+/// keeps exactly one checkmark in the menu instead of none. Lives here (not in the tray)
+/// because it's pure arithmetic that the host test suite can actually cover -- the tray
+/// crate can't be built on a non-Windows/Linux host at all.
+pub fn nearest_brightness_percent(brightness: u8) -> u8 {
+    (0u8..=100)
+        .step_by(BRIGHTNESS_PERCENT_STEP as usize)
+        .min_by_key(|p| (percent_to_brightness(*p) as i32 - brightness as i32).abs())
+        .unwrap_or(0)
+}
+
+/// The next perf mode in the tray's left-click cycle.
+///
+/// Pure, and deliberately in the library so it is exercised by the host test suite; the
+/// tray only wraps it with the surrounding `DeviceState`. Entering Custom seeds the
+/// documented boost defaults, matching what picking Custom from the menu does.
+pub fn next_perf_mode(current: PerfMode) -> PerfMode {
+    match current {
+        PerfMode::Battery => PerfMode::Silent,
+        PerfMode::Silent => PerfMode::Balanced,
+        PerfMode::Balanced => PerfMode::Performance,
+        PerfMode::Performance => PerfMode::Hyperboost,
+        PerfMode::Hyperboost => PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+        PerfMode::Custom(..) => PerfMode::Battery,
+    }
 }
 
 impl DeviceState {
@@ -126,10 +170,11 @@ impl DeviceState {
             logo_mode: command::get_logo_mode(device)?,
             keyboard_brightness: command::get_keyboard_brightness(device)?,
             always_on: command::get_lights_always_on(device)?,
-            // The keyboard effect is write-only (no Chroma getter on this device); we can't
-            // read it back, so a freshly-read state reports "unknown" (None). Intent lives in
-            // the persisted config, applied by apply_keyboard_lighting().
-            keyboard_effect: None,
+            // The effect IS readable on this device (0x0f82) -- see get_keyboard_effect.
+            // A read failure is not fatal: the effect is cosmetic and older/other models
+            // may genuinely lack the getter, so fall back to "unknown" (None) rather than
+            // failing the whole state read and blanking the tray.
+            keyboard_effect: command::get_keyboard_effect(device).unwrap_or(None),
         };
 
         let battery_care = command::get_battery_care(device)?;
@@ -289,9 +334,11 @@ impl Default for DeviceState {
                 logo_mode: LogoMode::Off,
                 keyboard_brightness: 0,
                 always_on: LightsAlwaysOn::Disable,
+                // No effect intent by default: a fresh config must not impose lighting
+                // the user never asked for.
                 keyboard_effect: None,
             },
-            battery_care: BatteryCare::Percent80,
+            battery_care: BatteryCare::from_percent(80).unwrap(),
             fan_speed: FanSpeed::Auto,
             max_fan: false,
         }
@@ -669,7 +716,9 @@ mod tests {
             0x0380 => reply(&[1, 4, 0]), // logo power off -> LogoMode::Off
             0x0383 => reply(&[1, 5, 200]), // keyboard brightness (id 5)
             0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),
-            0x0792 => reply(&[BatteryCare::Percent80 as u8]),
+            // 0x0f82: keyboard effect getter (LED region 5 = backlight), id 3 = Spectrum.
+            0x0f82 => reply(&[1, 5, 0x03]),
+            0x0792 => reply(&[BatteryCare::from_percent(80).unwrap().wire_byte()]),
             other => panic!("unexpected command {other:#06x}"),
         });
         let expected = DeviceState {
@@ -678,9 +727,10 @@ mod tests {
                 logo_mode: LogoMode::Off,
                 keyboard_brightness: 200,
                 always_on: LightsAlwaysOn::Disable,
-                keyboard_effect: None,
+                // Now READ back from the device (0x0f82) rather than assumed unknown.
+                keyboard_effect: Some(KeyboardEffect::Spectrum),
             },
-            battery_care: BatteryCare::Percent80,
+            battery_care: BatteryCare::from_percent(80).unwrap(),
             fan_speed: FanSpeed::Auto,
             max_fan: false,
         };
@@ -705,7 +755,8 @@ mod tests {
             0x0380 => reply(&[1, 4, 0]),
             0x0383 => reply(&[1, 5, 0]),
             0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),
-            0x0792 => reply(&[BatteryCare::Percent80 as u8]),
+            0x0f82 => reply(&[1, 5, 0x03]),
+            0x0792 => reply(&[BatteryCare::from_percent(80).unwrap().wire_byte()]),
             0x078f => reply(&[MaxFanSpeedMode::Disable as u8]), // Custom perf -> read() queries max fan
             other => panic!("unexpected command {other:#06x}"),
         });
@@ -772,7 +823,7 @@ mod tests {
         assert!(other_perf.enforced_fields_differ(&base));
 
         let mut other_batt = base;
-        other_batt.battery_care = BatteryCare::Disable;
+        other_batt.battery_care = BatteryCare::DISABLE;
         assert!(other_batt.enforced_fields_differ(&base));
     }
 
@@ -961,7 +1012,8 @@ mod tests {
                 0x0382 => p.set_args(&[1, 4, 2]),
                 0x0383 => p.set_args(&[1, 5, 200]),
                 0x0084 => p.set_args(&[0, 0]),
-                0x0792 => p.set_args(&[BatteryCare::Percent80 as u8]),
+                0x0f82 => p.set_args(&[1, 5, 0x03]),
+                0x0792 => p.set_args(&[BatteryCare::from_percent(80).unwrap().wire_byte()]),
                 0x078f => p.set_args(&[MaxFanSpeedMode::Disable as u8]),
                 other => panic!("unexpected command {other:#06x}"),
             }
@@ -982,8 +1034,79 @@ mod tests {
         // Whole-state budget. Bump deliberately if a genuinely new register is added.
         assert_eq!(
             mock.sent_count(),
-            11,
-            "read() round-trip budget changed; was 13 before the duplicate was removed"
+            12,
+            "read() round-trip budget changed. History: 13 originally, 11 after removing \
+             the duplicate get_perf_mode, 12 once the keyboard-effect getter (0x0f82) \
+             was added. Bump deliberately when a genuinely new register is read."
         );
+    }
+
+    // ---- pure tray logic, now testable on any host --------------------------------
+
+    #[test]
+    fn perf_mode_cycle_visits_every_mode_and_returns_to_start() {
+        // The tray's left-click cycle. A missing arm would strand the user in a subset
+        // of modes -- clicking forever without reaching, say, Silent.
+        let mut seen = Vec::new();
+        let mut mode = PerfMode::Battery;
+        for _ in 0..6 {
+            seen.push(mode);
+            mode = next_perf_mode(mode);
+        }
+        assert_eq!(mode, PerfMode::Battery, "the cycle must close");
+        assert_eq!(seen.len(), 6, "six distinct modes");
+        for expected in [
+            PerfMode::Battery,
+            PerfMode::Silent,
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Hyperboost,
+        ] {
+            assert!(seen.contains(&expected), "cycle must reach {expected:?}");
+        }
+        assert!(
+            seen.iter().any(|m| matches!(m, PerfMode::Custom(..))),
+            "cycle must reach Custom"
+        );
+    }
+
+    #[test]
+    fn perf_mode_cycle_seeds_custom_with_the_documented_boost_defaults() {
+        // Entering Custom via the cycle must match what the menu does, or a left-click
+        // and a menu pick would land on different boost levels.
+        assert_eq!(
+            next_perf_mode(PerfMode::Hyperboost),
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+        );
+        // Leaving Custom ignores the boosts it held.
+        assert_eq!(
+            next_perf_mode(PerfMode::Custom(CpuBoost::Low, GpuBoost::Low)),
+            PerfMode::Battery
+        );
+    }
+
+    #[test]
+    fn nearest_brightness_percent_always_lands_on_a_menu_step() {
+        // Every possible raw value must map to a real 10% step, so the menu always shows
+        // exactly one checkmark -- including the Fn-key ladder values that fall between.
+        for raw in 0u8..=255 {
+            let p = nearest_brightness_percent(raw);
+            assert_eq!(p % BRIGHTNESS_PERCENT_STEP, 0, "raw {raw} -> non-step {p}");
+            assert!(p <= 100);
+        }
+    }
+
+    #[test]
+    fn nearest_brightness_percent_is_exact_on_the_steps_and_rounds_between() {
+        // Exact on our own steps.
+        for p in (0u8..=100).step_by(BRIGHTNESS_PERCENT_STEP as usize) {
+            assert_eq!(nearest_brightness_percent(percent_to_brightness(p)), p);
+        }
+        assert_eq!(nearest_brightness_percent(0), 0);
+        assert_eq!(nearest_brightness_percent(255), 100);
+        // 130 sits just above 50% (128) -> nearest is still 50.
+        assert_eq!(nearest_brightness_percent(130), 50);
+        // 210 is the value the maintainer's config holds; it lies between 80% (204) and 90% (230).
+        assert_eq!(nearest_brightness_percent(210), 80);
     }
 }

@@ -129,7 +129,17 @@ pub fn get_gpu_boost(device: &impl HidTransport) -> Result<GpuBoost> {
 }
 
 pub fn set_fan_rpm(device: &impl HidTransport, rpm: u16, check_mode: bool) -> Result<()> {
-    ensure!((0..=5500).contains(&rpm));
+    // Bound against the widest range any known chassis supports, rather than a magic
+    // 5500 that matched no real machine. The per-device envelope is narrower still
+    // (`Descriptor::fan_rpm_range`, which is what the UI offers) and the EC clamps
+    // anything outside its own limits regardless -- this check only rejects values that
+    // could not be meaningful on any Blade.
+    ensure!(
+        (0..=crate::state::FAN_RPM_MAX_ANY).contains(&rpm),
+        "Fan RPM {} is out of range (max {} across all known chassis)",
+        rpm,
+        crate::state::FAN_RPM_MAX_ANY
+    );
     if check_mode {
         ensure!(
             matches!(get_perf_mode(device)?, (_, FanMode::Manual)),
@@ -300,6 +310,40 @@ pub fn set_keyboard_effect(device: &impl HidTransport, effect: KeyboardEffect) -
     Ok(())
 }
 
+/// Read the keyboard backlight effect back from the EC (`0x0f82`, the get-mirror of `0x0f02`).
+///
+/// **This project previously documented Chroma as write-only with no getter on this device,
+/// and that was wrong.** HW-verified on PID 0x029F (2026-07-25): `0x0f82` with args
+/// `[VARSTORE, backlight, 0]` returns `[0x01, 0x05, <effect id>, <param>, ...]` echoing
+/// exactly what was last written -- Spectrum -> 3, Wave -> 4 (plus its direction byte),
+/// Breathing -> 2, Off -> 0. Confirmed to be a real EC read rather than a process-local
+/// cache by writing in one `razer-cli` process and reading in another.
+///
+/// A `None` return means the EC reported an effect id we do not model (e.g. Reactive or
+/// Static, which need driver mode and a host colour, so we deliberately don't offer them).
+/// That is not an error -- it just means "something we didn't set", and callers should
+/// treat it as unknown rather than fighting it.
+pub fn get_keyboard_effect(device: &impl HidTransport) -> Result<Option<KeyboardEffect>> {
+    let response = device.send(Packet::new(
+        0x0f82,
+        &[KBD_STORE_VAR, KBD_LED_BACKLIGHT, 0x00],
+    ))?;
+    let args = response.get_args();
+    ensure!(
+        args[1] == KBD_LED_BACKLIGHT,
+        "effect read answered for LED region {:#04x}, expected backlight {:#04x}",
+        args[1],
+        KBD_LED_BACKLIGHT
+    );
+    Ok(match args[2] {
+        0x00 => Some(KeyboardEffect::Off),
+        0x02 => Some(KeyboardEffect::Breathing),
+        0x03 => Some(KeyboardEffect::Spectrum),
+        0x04 => Some(KeyboardEffect::Wave),
+        _ => None,
+    })
+}
+
 /// Read the Razer **device mode** (the `0x0084` get-mirror of `0x0004`). See the module
 /// docs: `Disable` (0x00) is Normal/hardware mode, `Enable` (0x03) is Driver mode.
 pub fn get_lights_always_on(device: &impl HidTransport) -> Result<LightsAlwaysOn> {
@@ -327,7 +371,7 @@ pub fn get_battery_care(device: &impl HidTransport) -> Result<BatteryCare> {
 }
 
 pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result<()> {
-    let args = &[mode as u8];
+    let args = &[mode.wire_byte()];
     ensure!(device
         .send(Packet::new(0x0712, args))?
         .get_args()
@@ -380,10 +424,13 @@ mod tests {
     #[test]
     fn set_battery_care_emits_single_byte_register() {
         let mock = MockTransport::echo();
-        set_battery_care(&mock, BatteryCare::Percent80).unwrap();
+        set_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap();
         assert_eq!(
             mock.sent(),
-            vec![(0x0712, vec![BatteryCare::Percent80 as u8])]
+            vec![(
+                0x0712,
+                vec![BatteryCare::from_percent(80).unwrap().wire_byte()]
+            )]
         );
     }
 
@@ -471,9 +518,54 @@ mod tests {
     }
 
     #[test]
+    fn get_keyboard_effect_decodes_the_effect_register() {
+        use crate::types::KeyboardEffect;
+        // 0x0f82 answers [store, led_region, effect_id, ...]. HW-verified ids on 0x029F.
+        for (id, expected) in [
+            (0x00, KeyboardEffect::Off),
+            (0x02, KeyboardEffect::Breathing),
+            (0x03, KeyboardEffect::Spectrum),
+            (0x04, KeyboardEffect::Wave),
+        ] {
+            let mock = MockTransport::with_responder(move |_| reply(&[1, 5, id]));
+            assert_eq!(
+                get_keyboard_effect(&mock).unwrap(),
+                Some(expected),
+                "id {id:#04x}"
+            );
+        }
+
+        // An effect we deliberately don't model (Static/Reactive need driver mode and a
+        // host colour) must read as "unknown", NOT as an error and NOT as a wrong variant
+        // -- otherwise a Synapse-set effect would look like a failed read.
+        let exotic = MockTransport::with_responder(|_| reply(&[1, 5, 0x07]));
+        assert_eq!(get_keyboard_effect(&exotic).unwrap(), None);
+    }
+
+    #[test]
+    fn get_keyboard_effect_rejects_a_reply_for_another_led_region() {
+        // Region 4 is the lid logo. Accepting it would silently report the logo's effect
+        // as the keyboard's.
+        let mock = MockTransport::with_responder(|_| reply(&[1, 4, 0x03]));
+        assert!(get_keyboard_effect(&mock).is_err());
+    }
+
+    #[test]
+    fn get_keyboard_effect_queries_the_backlight_region() {
+        let mock = MockTransport::with_responder(|_| reply(&[1, 5, 0x03]));
+        get_keyboard_effect(&mock).unwrap();
+        assert_eq!(mock.sent(), vec![(0x0f82, vec![0x01, 0x05, 0x00])]);
+    }
+
+    #[test]
     fn get_battery_care_decodes_wire_byte() {
-        let mock = MockTransport::with_responder(|_| reply(&[BatteryCare::Percent80 as u8]));
-        assert_eq!(get_battery_care(&mock).unwrap(), BatteryCare::Percent80);
+        let mock = MockTransport::with_responder(|_| {
+            reply(&[BatteryCare::from_percent(80).unwrap().wire_byte()])
+        });
+        assert_eq!(
+            get_battery_care(&mock).unwrap(),
+            BatteryCare::from_percent(80).unwrap()
+        );
     }
 
     #[test]

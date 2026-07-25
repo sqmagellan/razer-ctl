@@ -273,11 +273,8 @@ pub fn build(
     // up with the 10% marks, so an external (Fn-key) value usually lands between
     // our steps -- we highlight the *nearest* percent step so there's always
     // exactly one check. The exact 0..255 value still shows in the tooltip.
-    let current_brightness = dstate.lights_mode.keyboard_brightness;
-    let nearest_percent: u8 = (0u8..=100)
-        .step_by(10)
-        .min_by_key(|p| (percent_to_brightness(*p) as i32 - current_brightness as i32).abs())
-        .unwrap_or(0);
+    let nearest_percent: u8 =
+        crate::state::nearest_brightness_percent(dstate.lights_mode.keyboard_brightness);
 
     let brightness_modes: Vec<CheckMenuItem> = (0u8..=100)
         .step_by(10)
@@ -315,16 +312,44 @@ pub fn build(
     // battery care submenu
     menu.append(&PredefinedMenuItem::separator())?;
 
-    let battery_care_options = [
-        (BatteryCare::Percent50, "50%", "battery_care_50"),
-        (BatteryCare::Percent55, "55%", "battery_care_55"),
-        (BatteryCare::Percent60, "60%", "battery_care_60"),
-        (BatteryCare::Percent65, "65%", "battery_care_65"),
-        (BatteryCare::Percent70, "70%", "battery_care_70"),
-        (BatteryCare::Percent75, "75%", "battery_care_75"),
-        (BatteryCare::Percent80, "80%", "battery_care_80"),
-        (BatteryCare::Disable, "Off (100%)", "battery_care_disable"),
-    ];
+    // Charge-limit presets. The EC accepts every whole percent 50..=100 (HW-verified), so
+    // this list is a UI convenience, not the limit of what's possible -- the CLI
+    // (`battery-care set <50-100>`) reaches any value, and a config hand-set to e.g. 88
+    // is honoured and shown as the current value below. Presets stop at 5% steps up to 80
+    // (the healthy-longevity band) then add 90/95, which the old 8-variant enum could not
+    // express at all.
+    let battery_care_percents = [50u8, 60, 70, 75, 80, 85, 90, 95];
+    let mut battery_care_options: Vec<(BatteryCare, String, String)> = battery_care_percents
+        .iter()
+        .map(|p| {
+            (
+                BatteryCare::from_percent(*p).expect("preset percents are in range"),
+                format!("{p}%"),
+                format!("battery_care_{p}"),
+            )
+        })
+        .collect();
+    battery_care_options.push((
+        BatteryCare::DISABLE,
+        "Off (100%)".to_string(),
+        "battery_care_disable".to_string(),
+    ));
+
+    // If the active limit isn't one of the presets (set via CLI or hand-edited config),
+    // surface it so the menu still shows exactly one checkmark and never misreports the
+    // device. Without this a custom 88% would display as "no limit set".
+    if !battery_care_options
+        .iter()
+        .any(|(mode, _, _)| *mode == dstate.battery_care)
+    {
+        let pct = dstate.battery_care.to_percent();
+        battery_care_options.push((
+            dstate.battery_care,
+            format!("{pct}% (custom)"),
+            format!("battery_care_{pct}"),
+        ));
+        battery_care_options.sort_by_key(|(mode, _, _)| mode.to_percent());
+    }
 
     let battery_care_items: Vec<CheckMenuItem> = battery_care_options
         .iter()

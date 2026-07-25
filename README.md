@@ -26,7 +26,8 @@ and only writes to the device when you ask it to.
 - **Keyboard lighting** — Off / Spectrum / Wave / Breathing: the EC's built-in animated effects, over
   the same HID path in Normal mode, so the Fn keys keep working. No color picker by design — arbitrary
   color needs Razer driver mode (what Synapse does), which kills the Fn keys (see Quirks).
-- **Charge limit** — 50–80% in 5% steps, or off (100%).
+- **Charge limit** — any whole percent from 50 to 100 (100 = off). The tray offers presets; the CLI takes
+  any value in range.
 - **AC vs battery profiles** — separate profiles, switched automatically when you plug/unplug.
 - **App profiles** — auto-apply a perf mode while a named app is running, then fall back to the
   power-source profile when it quits (first running match wins, case-insensitive). Opt-in, and a
@@ -51,6 +52,29 @@ service, no Synapse.
 
 ## Changelog
 
+### 2026-07 — charge limit, readable lighting, leaner binary
+HW-verified on `0x029F` (2026-07-25).
+
+- **Charge limit is any whole percent 50–100**, not 8 fixed presets. Probing the EC showed it accepts
+  every integer in that range and refuses 49 and below, so the old
+  50/55/…/80 enum was *our* restriction — it hid 43 usable values, including the entire 81–99 band.
+  `battery-care set 88` now does what it says instead of silently rounding to 80.
+  Existing configs (which stored `"Percent80"`) still load; that shim is load-bearing, because the
+  tray loads config with `unwrap_or_default()` and a parse failure would silently discard your saved
+  profiles.
+- **Keyboard effect is read back from the device** (`0x0f82`), so the menu and `auto json` show what
+  the firmware is actually running. This corrects a claim in this README: the getter does exist.
+- **Tray binary is 1.84 MB, down from 3.40 MB.** The six icons are decoded and downscaled to 64×64
+  raw RGBA at build time, so the `image` crate — a full PNG/JPEG/GIF/WebP decoder, present for six
+  fixed icons — is no longer linked into a binary we're about to sign. (`embed-resource` was also a
+  build-dependency with no `build.rs` at all; removed.)
+- **One fan-RPM ceiling instead of three.** `command.rs` bounded RPM at 5500, `FAN_RPM_MAX_ANY` said
+  5300, and the device table reaches 5600 — so a CLI-supplied RPM was checked against a limit no real
+  machine had. Both ends are now derived from the tables (2000–5600) and a test keeps them honest.
+- **The tray's pure logic moved into `librazer`** (perf-mode cycle, nearest-brightness step) where the
+  host test suite can actually reach it — the tray crate can't be built on a non-Windows host, so
+  tests placed there would never have run.
+
 ### 2026-07 — portability & correctness pass (pre-publication)
 Groundwork for making this usable on Blades other than the one it was written on. Everything below
 was verified on `0x029F` where hardware could verify it; the parts that inherently cannot be
@@ -72,16 +96,17 @@ was verified on `0x029F` where hardware could verify it; the parts that inherent
   "a tick gap over 30 s means we slept" heuristic, which misfired on this machine: running at
   `IDLE_PRIORITY_CLASS` under EcoQoS, the loop was starved for **54.9 s while wide awake** and
   logged a resume that never happened, firing a spurious re-assert.
-- **`DeviceState::read()` costs 11 HID round-trips, down from 13.** It was calling `get_perf_mode()`
-  twice — once for the perf mode, once for the fan mode — and each call reads both fan zones. A test
-  pins the budget so it can't quietly regress.
+- **`DeviceState::read()` no longer duplicates its perf-mode query.** It was calling `get_perf_mode()`
+  twice — once for the perf mode, once for the fan mode — and each call reads both fan zones, so 13
+  round-trips became 11. (It is 12 again now that the keyboard-effect getter is read; see below.) A
+  test pins the budget so it can't quietly regress.
 - **`librazer` is usable as a library.** `HidTransport::send` takes a `Packet`, but `packet` was a
   private module, so no outside crate could implement the trait — the seam was unusable by exactly
   the consumers it exists for. `tests/public_api.rs` compiles as a separate crate and pins this.
-- **CI actually gates.** It now runs the test suite (it never did), builds `windows-msvc` (the
-  configuration we ship — it was building `windows-gnu`), and drops `cargo fmt --check`, which
-  conflicts with this tree's deliberate hand-formatting. Clippy stays gated. `Cargo.lock` is now
-  committed, as it should be for a repo that ships binaries.
+- **CI actually gates.** It now runs the test suite (it never did) and builds `windows-msvc` — the
+  configuration we ship; it was building `windows-gnu`. `cargo fmt --check` and clippy are both
+  gated, and the tree is now rustfmt-clean. `Cargo.lock` is committed, as it should be for a repo
+  that ships binaries.
 
 
 ### 2026-07 — keyboard lighting (effects-only)
@@ -90,8 +115,8 @@ All HW-verified on a **single physical unit — a Razer Blade 16 (2023), `RZ09-0
 - **Keyboard RGB effects** — Off / Spectrum / Wave / Breathing, in the tray ("Keyboard lighting"
   submenu) and CLI (`razer-cli auto kbd-lighting effect <off|spectrum|wave|breathing>`). These are the
   EC's built-in animated effects (extended-matrix command `0x0f02`, VARSTORE, our native `0x1F`
-  transaction), so they run in Normal mode and the Fn media keys keep working. Write-only *intent*
-  (no getter on this device) — persisted and re-applied like always-on, never read back or reconciled.
+  transaction), so they run in Normal mode and the Fn media keys keep working. Readable back via
+  `0x0f82`, so the menu and `auto json` reflect what the firmware is actually running.
 - **No keyboard color, by design.** Arbitrary static/per-key color needs Razer *driver mode*
   (host-streamed frames — what Synapse does), which disables the Fn media keys. In Normal mode the EC
   ignores color payloads (falls back to Razer green) and effect-speed parameters (Wave runs at a fixed
@@ -172,10 +197,13 @@ the highlights:
   `0xFF`) and via the custom-frame path, so this is a hardware/design limit, not a missing feature — as
   observed on the one unit tested (`RZ09-0483U`, `0x029F`). For the same reason effect *speed* isn't
   adjustable (Wave runs at a fixed EC rate).
-- **Keyboard effect can't be read back.** Chroma is write-only on this device — no getter — so the tray
-  menu reflects the effect *you last set through the app* (persisted intent), not whatever the firmware
-  is actually running. Set an effect outside the app (Synapse, the raw CLI) and the menu won't show it
-  checked; pick it in-app once and it persists + re-applies on launch.
+- **Keyboard effect *can* be read back** — this README previously said it couldn't. `0x0f82` is a working
+  get-mirror of the `0x0f02` effect write on `0x029F`: it returns the effect id last applied (Spectrum→3,
+  Wave→4 plus direction, Breathing→2, Off→0), verified across separate processes so it's a real EC read
+  rather than a cache. The effect is therefore in `read()` and `auto json`. It is still deliberately
+  *not* enforced: it's cosmetic, and on a model whose firmware lacks the getter an unknown read would
+  look like permanent drift and re-assert forever. An effect id we don't model (a Synapse-set Static or
+  Reactive) reads as unknown rather than as an error.
 - **Always-on used to kill every Fn media key — that's why it's a keep-alive now.** The old "always-on"
   was Razer's device-mode command (`0x0004`); Enable is `0x03` = driver mode, which hands key/light
   handling to a host driver and makes the EC ignore the whole Fn layer — screen brightness, volume, and

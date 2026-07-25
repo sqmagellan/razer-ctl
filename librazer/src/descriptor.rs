@@ -225,3 +225,64 @@ pub fn fan_range_for_pid(pid: u16) -> Option<(u16, u16)> {
         .find(|(p, _)| *p == pid)
         .map(|(_, range)| *range)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The "widest range across all chassis" constants must actually match the data.
+    ///
+    /// These used to be three disagreeing numbers for one idea (`command.rs` bounded RPM
+    /// at 5500, `FAN_RPM_MAX_ANY` said 5300, this table reaches 5600), so a CLI-supplied
+    /// RPM was validated against a limit no real machine had. Deriving the check from the
+    /// tables means adding a chassis with a wider envelope fails here instead of silently
+    /// making the constants wrong.
+    #[test]
+    fn fan_rpm_any_constants_bound_every_known_chassis() {
+        let ranges = FAN_RANGE_BY_PID
+            .iter()
+            .map(|(_, r)| *r)
+            .chain(SUPPORTED.iter().map(|d| d.fan_rpm_range));
+
+        for (min, max) in ranges {
+            assert!(
+                min >= crate::state::FAN_RPM_MIN_ANY,
+                "FAN_RPM_MIN_ANY ({}) is above a real chassis floor ({min})",
+                crate::state::FAN_RPM_MIN_ANY
+            );
+            assert!(
+                max <= crate::state::FAN_RPM_MAX_ANY,
+                "FAN_RPM_MAX_ANY ({}) is below a real chassis ceiling ({max})",
+                crate::state::FAN_RPM_MAX_ANY
+            );
+        }
+    }
+
+    #[test]
+    fn fan_rpm_any_constants_are_tight() {
+        // Not merely valid but exact: some chassis must actually sit at each bound,
+        // otherwise the "widest known range" claim is padding.
+        let all: Vec<(u16, u16)> = FAN_RANGE_BY_PID
+            .iter()
+            .map(|(_, r)| *r)
+            .chain(SUPPORTED.iter().map(|d| d.fan_rpm_range))
+            .collect();
+        assert_eq!(
+            all.iter().map(|(min, _)| *min).min().unwrap(),
+            crate::state::FAN_RPM_MIN_ANY
+        );
+        assert_eq!(
+            all.iter().map(|(_, max)| *max).max().unwrap(),
+            crate::state::FAN_RPM_MAX_ANY
+        );
+    }
+
+    #[test]
+    fn fan_range_lookup_finds_table_entries_and_misses_unknowns() {
+        assert_eq!(fan_range_for_pid(0x026e), Some((2300, 4300)));
+        assert_eq!(fan_range_for_pid(0x02c5), Some((2200, 5600)));
+        // A PID in SUPPORTED is deliberately absent from the fallback table.
+        assert_eq!(fan_range_for_pid(0x029f), None);
+        assert_eq!(fan_range_for_pid(0xFFFF), None);
+    }
+}
