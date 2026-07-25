@@ -64,6 +64,14 @@ HW-verified on `0x029F` (2026-07-25).
   profiles.
 - **Keyboard effect is read back from the device** (`0x0f82`), so the menu and `auto json` show what
   the firmware is actually running. This corrects a claim in this README: the getter does exist.
+- **Tray clicks are no longer queued behind hover events.** The event loop took *one* event
+  per ~1s tick, but `Move` fires at the mouse report rate while the cursor is over the icon and
+  the channel is unbounded — so a click was processed only after every Move that preceded it.
+  Approaching the icon enqueues a hundred-plus events, which pushed the mode switch out by
+  minutes, and because the backlog outgrew the drain rate the lag *accumulated* across a
+  session. Both channels are now drained each pass, with hover events coalesced into at most
+  one refresh and a click superseding them. Throttling the hover work never helped: a skipped
+  event still consumed its whole tick.
 - **Left-click no longer opens the menu *and* changes the perf mode.** `tray-icon`'s
   `menu_on_left_click` defaults to true and must be disabled explicitly. Under 0.11.3 the
   Windows backend showed the menu only on `WM_RBUTTONUP` and ignored the flag; 0.19 honours it,

@@ -200,7 +200,10 @@ fn main() -> Result<()> {
         *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
 
         if let Err(e) = (|| -> Result<()> {
-            if let Ok(event) = menu_channel.try_recv() {
+            // Drain, for the same reason as the tray channel below: one event per ~1s tick
+            // makes a queued selection wait behind everything ahead of it. Menu events are
+            // distinct user choices, so each is handled rather than coalesced.
+            while let Ok(event) = menu_channel.try_recv() {
                 log::info!("Menu Event {:?}", event.id);
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
                     log::info!("match event id");
@@ -237,39 +240,51 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Tray-icon events (tray-icon 0.14+ enum). Left-click cycles the perf mode;
-            // hover (Enter/Move) refreshes the displayed state on demand -- this is what
-            // replaced the old global keyboard hook + input-gated freshness heuristic: we
-            // now read exactly when you look at the tray. Move fires rapidly, so it's
-            // throttled. A hover means you're actively on the machine (trackpad/mouse), so
-            // the backlight is already awake -- the read can't cause a visible pulse.
-            if let Ok(event) = tray_channel.try_recv() {
+            // Tray-icon events. Left-click cycles the perf mode; hover (Enter/Move)
+            // refreshes the displayed state on demand -- this is what replaced the old
+            // global keyboard hook: we read exactly when you look at the tray. A hover
+            // means you're actively on the machine, so the backlight is already awake and
+            // the read can't cause a visible pulse.
+            //
+            // DRAIN the channel, don't take one event per pass. `Move` fires rapidly while
+            // the cursor sits over the icon and the channel is unbounded, so a single event
+            // per ~1s tick meant a click was processed only after every Move that preceded
+            // it: moving onto the icon queues a hundred-plus Moves, which delayed the mode
+            // switch by minutes and read as a broken click. Throttling the hover work did
+            // not help -- a skipped event still consumed its entire tick.
+            //
+            // Draining also coalesces: however many hover events arrived, they collapse into
+            // at most one refresh, and a click supersedes them (its update() re-renders the
+            // icon and tooltip anyway).
+            let mut clicked = false;
+            let mut hovered = false;
+            while let Ok(event) = tray_channel.try_recv() {
                 match event {
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } => {
-                        let new_device_state = state.get_next_perf_mode();
-                        log::info!("new_device_state 2 {:?}", new_device_state);
-                        state.update(&mut tray_icon, new_device_state, &device)?;
-                    }
-                    TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. }
-                        if now > last_hover_refresh + std::time::Duration::from_millis(500) =>
-                    {
-                        last_hover_refresh = now;
-                        if let Ok(observed) = DeviceState::read(&device) {
-                            state.observed = observed;
-                        }
-                        if let Ok(fan) = get_fan_rpm(&device) {
-                            state.fan_actual = fan;
-                        }
-                        let _ = tray_icon.set_icon(Some(state.icon()));
-                        if let Ok(tooltip) = state.tooltip() {
-                            crate::program::set_tooltip_logged(&tray_icon, &tooltip);
-                        }
-                    }
+                    } => clicked = true,
+                    TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. } => hovered = true,
                     _ => {}
+                }
+            }
+
+            if clicked {
+                let new_device_state = state.get_next_perf_mode();
+                log::info!("left-click: cycling perf mode to {:?}", new_device_state);
+                state.update(&mut tray_icon, new_device_state, &device)?;
+            } else if hovered && now > last_hover_refresh + std::time::Duration::from_millis(500) {
+                last_hover_refresh = now;
+                if let Ok(observed) = DeviceState::read(&device) {
+                    state.observed = observed;
+                }
+                if let Ok(fan) = get_fan_rpm(&device) {
+                    state.fan_actual = fan;
+                }
+                let _ = tray_icon.set_icon(Some(state.icon()));
+                if let Ok(tooltip) = state.tooltip() {
+                    crate::program::set_tooltip_logged(&tray_icon, &tooltip);
                 }
             }
 
