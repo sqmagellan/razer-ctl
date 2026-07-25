@@ -258,14 +258,25 @@ fn main() -> Result<()> {
             }
 
             state.ac_power = platform::get_power_state()?;
+            // Pass the active Actions rule (if any) so an app override isn't seen as
+            // drift from the saved profile and reverted a tick later. When a rule is
+            // active the switch is TRANSIENT: the target includes the overlay, and
+            // persisting it would bake the app's settings into the saved AC/battery
+            // profile we're supposed to revert to when the app exits.
+            let active_rule = active_app_rule.and_then(|i| state.app_profiles.get(i)).cloned();
             if let Some(new_device_state) = state::profile_for_power(
                 state.ac_power,
                 &state.device_state,
                 &state.ac_state,
                 &state.battery_state,
+                active_rule.as_ref(),
             ) {
                 log::info!("new_device_state 3 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
+                if active_rule.is_some() {
+                    state.update_transient(&mut tray_icon, new_device_state, &device)?;
+                } else {
+                    state.update(&mut tray_icon, new_device_state, &device)?;
+                }
             }
 
             // Resume-from-sleep reassert. The event loop is frozen while the machine

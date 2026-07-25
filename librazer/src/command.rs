@@ -161,7 +161,9 @@ pub fn set_fan_mode(device: &impl HidTransport, mode: FanMode) -> Result<()> {
 }
 
 pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Result<()> {
-    let report = Packet::new(command, args);
+    // try_new: `args` comes straight from the CLI, so an over-long list must be a clean
+    // error rather than a panic in the fixed 80-byte arg buffer.
+    let report = Packet::try_new(command, args)?;
     println!("Report   {:?}", report);
     let response = device.send(report)?;
     println!("Response {:?}", response);
@@ -171,7 +173,7 @@ pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> 
 /// Like [`custom_command`], but send at a caller-chosen transaction id (for probing
 /// commands the reference drivers issue at an id other than our default 0x1F).
 pub fn custom_command_tx(device: &impl HidTransport, command: u16, args: &[u8], tx: u8) -> Result<()> {
-    let report = Packet::new_with_tx(command, args, tx);
+    let report = Packet::try_new_with_tx(command, args, tx)?;
     println!("Report   {:?}", report);
     let response = device.send(report)?;
     println!("Response {:?}", response);

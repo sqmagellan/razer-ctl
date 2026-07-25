@@ -389,14 +389,27 @@ pub fn get_fan_rpm(device: &impl HidTransport) -> Result<FanRpm> {
 /// active state already matches it (so the caller can skip a redundant re-apply).
 /// `current` is the live `device_state`; `ac_state`/`battery_state` are the saved
 /// per-source profiles. Encodes the tray event loop's AC<->battery switch rule.
+///
+/// `active_rule` is the app-profile currently being enforced by "Actions", if any. It
+/// MUST be passed, because an Actions override lives only in `device_state` -- by design
+/// it never writes `ac_state`/`battery_state`. Without it this comparison sees the
+/// override as "drift" from the saved profile and reverts it on the very next tick
+/// (~1s), so an app rule would hold for about a second and then silently die. With it,
+/// the rule is re-overlaid onto the power-source profile: the AC<->battery switch still
+/// happens, but the running app's settings survive it.
 pub fn profile_for_power(
     ac_power: bool,
     current: &DeviceState,
     ac_state: &DeviceState,
     battery_state: &DeviceState,
+    active_rule: Option<&AppProfile>,
 ) -> Option<DeviceState> {
-    let target = if ac_power { ac_state } else { battery_state };
-    (current != target).then_some(*target)
+    let base = if ac_power { ac_state } else { battery_state };
+    let target = match active_rule {
+        Some(rule) => rule.overlay(base),
+        None => *base,
+    };
+    (*current != target).then_some(target)
 }
 
 #[cfg(test)]
@@ -691,12 +704,68 @@ mod tests {
         let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
 
         // On AC but currently running the battery profile -> switch to AC.
-        assert_eq!(profile_for_power(true, &batt, &ac, &batt), Some(ac));
+        assert_eq!(profile_for_power(true, &batt, &ac, &batt, None), Some(ac));
         // On AC and already on the AC profile -> no switch.
-        assert_eq!(profile_for_power(true, &ac, &ac, &batt), None);
+        assert_eq!(profile_for_power(true, &ac, &ac, &batt, None), None);
         // On battery but running AC profile -> switch to battery.
-        assert_eq!(profile_for_power(false, &ac, &ac, &batt), Some(batt));
+        assert_eq!(profile_for_power(false, &ac, &ac, &batt, None), Some(batt));
         // On battery and already on battery profile -> no switch.
-        assert_eq!(profile_for_power(false, &batt, &ac, &batt), None);
+        assert_eq!(profile_for_power(false, &batt, &ac, &batt, None), None);
+    }
+
+    #[test]
+    fn profile_for_power_does_not_revert_an_active_app_override() {
+        // Regression: an Actions override lives ONLY in device_state (update_transient
+        // never touches ac_state/battery_state). Without knowing the active rule, the
+        // AC/battery check saw the override as drift and reverted it on the next ~1s
+        // tick -- so an app profile held for about a second and then died.
+        let ac = DeviceState::default(); // Performance
+        let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            perf_mode: Some(PerfMode::Hyperboost),
+            fan_speed: None,
+            logo_mode: None,
+            keyboard_effect: None,
+        };
+
+        // On AC with the rule applied, the live state IS the overlay -> nothing to do.
+        let overridden = rule.overlay(&ac);
+        assert_eq!(
+            profile_for_power(true, &overridden, &ac, &batt, Some(&rule)),
+            None,
+            "an active app override must not be treated as drift"
+        );
+
+        // Same state, but the rule is no longer active (app exited) -> revert to AC.
+        assert_eq!(
+            profile_for_power(true, &overridden, &ac, &batt, None),
+            Some(ac),
+            "once the rule is gone the override must be reverted"
+        );
+    }
+
+    #[test]
+    fn profile_for_power_reoverlays_the_rule_across_a_power_switch() {
+        // Unplugging while a rule is active must still switch to the battery profile,
+        // but the running app's settings have to survive the switch.
+        let ac = DeviceState::default(); // Performance
+        let batt = DeviceState { perf_mode: PerfMode::Battery, ..Default::default() };
+        // A fan-only rule, so we can see the base perf mode change underneath it.
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            perf_mode: None,
+            fan_speed: Some(FanSpeed::Manual(3000)),
+            logo_mode: None,
+            keyboard_effect: None,
+        };
+
+        let on_ac = rule.overlay(&ac);
+        let target = profile_for_power(false, &on_ac, &ac, &batt, Some(&rule))
+            .expect("unplugging must still switch profiles");
+        // Base switched to the battery profile...
+        assert_eq!(target.perf_mode, PerfMode::Battery);
+        // ...while the rule's fan setting was re-applied on top.
+        assert_eq!(target.fan_speed, FanSpeed::Manual(3000));
     }
 }

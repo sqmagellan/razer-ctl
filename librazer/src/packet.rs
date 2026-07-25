@@ -35,7 +35,50 @@ impl Packet {
     /// in `Device::send`. Set to `None` to restore the original random-id behavior.
     const TRANSACTION_ID: Option<u8> = Some(0x1f);
 
+    /// Capacity of the wire `args` buffer. The report is a fixed 90 bytes, of which 80
+    /// carry arguments, and `data_size` is a single byte -- so anything longer can be
+    /// neither stored nor described. Callers taking *untrusted* argument lengths (the
+    /// CLI `cmd` probe) must go through [`Packet::try_new`].
+    pub const MAX_ARGS: usize = 80;
+
+    /// Build a packet, rejecting an over-long argument list instead of panicking.
+    ///
+    /// [`Packet::new`] indexes a fixed 80-byte buffer and casts the length to `u8`, so
+    /// an oversized slice would panic (`copy_from_slice` range) or silently wrap
+    /// `data_size` to 0 at 256 args. Every in-crate caller passes a compile-time-known
+    /// short array, but `custom_command` forwards user-supplied bytes -- that path uses
+    /// this constructor so a bad invocation is a clean error, not a crash.
+    pub fn try_new(command: u16, args: &[u8]) -> Result<Packet> {
+        ensure!(
+            args.len() <= Self::MAX_ARGS,
+            "Too many arguments: {} (max {})",
+            args.len(),
+            Self::MAX_ARGS
+        );
+        Ok(Self::new(command, args))
+    }
+
+    /// [`Packet::try_new`] with an explicit transaction id -- the checked counterpart of
+    /// [`Packet::new_with_tx`], used by the CLI `cmd --tx` probe.
+    pub fn try_new_with_tx(command: u16, args: &[u8], tx: u8) -> Result<Packet> {
+        let mut p = Self::try_new(command, args)?;
+        p.id = tx;
+        Ok(p)
+    }
+
+    /// Build a packet from a **statically known** argument list.
+    ///
+    /// # Panics
+    /// If `args.len() > `[`Packet::MAX_ARGS`]. Every caller inside this crate passes a
+    /// fixed short array, so this is unreachable there; for caller-supplied lengths use
+    /// [`Packet::try_new`].
     pub fn new(command: u16, args: &[u8]) -> Packet {
+        assert!(
+            args.len() <= Self::MAX_ARGS,
+            "Packet args too long: {} (max {}); use Packet::try_new for untrusted input",
+            args.len(),
+            Self::MAX_ARGS
+        );
         let mut args_buffer = [0x00; 80];
         args_buffer[..args.len()].copy_from_slice(args);
 
@@ -63,7 +106,18 @@ impl Packet {
         p
     }
 
+    /// Overwrite the leading argument bytes.
+    ///
+    /// # Panics
+    /// If `args.len() > `[`Packet::MAX_ARGS`]. Only used with fixed short arrays (tests
+    /// and canned responses); untrusted lengths belong in [`Packet::try_new`].
     pub fn set_args(&mut self, args: &[u8]) {
+        assert!(
+            args.len() <= Self::MAX_ARGS,
+            "Packet args too long: {} (max {})",
+            args.len(),
+            Self::MAX_ARGS
+        );
         self.args[..args.len()].copy_from_slice(args)
     }
 
@@ -181,6 +235,29 @@ mod tests {
         let back: Packet = bytes.as_slice().try_into().unwrap();
         let rebytes: Vec<u8> = (&back).into();
         assert_eq!(bytes, rebytes);
+    }
+
+    #[test]
+    fn try_new_rejects_oversized_args() {
+        // The CLI `cmd` probe forwards user-supplied bytes. The args buffer is 80 wide,
+        // so 81 used to panic in copy_from_slice; it must now be a clean error.
+        assert!(Packet::try_new(0x0d82, &[0u8; 80]).is_ok(), "80 args is the limit");
+        assert!(Packet::try_new(0x0d82, &[0u8; 81]).is_err(), "81 args must error");
+        // 256 would also have wrapped data_size (u8) to 0 rather than overflowing.
+        assert!(Packet::try_new(0x0d82, &[0u8; 256]).is_err());
+        assert!(Packet::try_new_with_tx(0x0d82, &[0u8; 81], 0xff).is_err());
+    }
+
+    #[test]
+    fn try_new_preserves_args_and_tx() {
+        let p = Packet::try_new(0x0d02, &[1, 2, 3]).unwrap();
+        assert_eq!(p.command(), 0x0d02);
+        assert_eq!(p.data_len(), 3);
+        assert!(p.get_args().starts_with(&[1, 2, 3]));
+
+        let tx = Packet::try_new_with_tx(0x0f02, &[9], 0xff).unwrap();
+        let bytes: Vec<u8> = (&tx).into();
+        assert_eq!(bytes[1], 0xff, "explicit transaction id overrides the default");
     }
 }
 

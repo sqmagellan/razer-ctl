@@ -184,4 +184,4 @@ Rules for this fork:
 
 Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)); multi-model fork
 by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). This local fork is maintained by
-sqmagellan, developed with McClaude (Claude Opus 4.8).
+sqmagellan, developed with McClaude (Claude Opus 5).
