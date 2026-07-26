@@ -2,15 +2,29 @@ name: razer-ctl-ci
 
 on:
   push:
-    branches: ["main", "local"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
+# Caching note: this used to run sccache (`RUSTC_WRAPPER: sccache` set workflow-wide,
+# plus mozilla-actions/sccache-action). On the first run against a real GitHub
+# repository, that broke every job at once, in two different ways:
+#
+#   * the wrapper was declared globally but the action ran in only three of the four
+#     jobs, so build-windows inherited `RUSTC_WRAPPER=sccache` with no sccache
+#     installed: `could not execute process ... program not found`;
+#   * where sccache *was* installed, its GitHub-Actions cache backend failed
+#     outright ("cache storage failed to read: ... Our services aren't available
+#     right now"), and because a rustc wrapper sits in front of every single
+#     compiler invocation, a cache backend problem is a total build failure.
+#
+# Swatinem/rust-cache caches the cargo registry and target directory through the
+# ordinary actions/cache path instead. It is strictly an accelerator: if it fails,
+# the build is slower, not broken. That tradeoff is the right one for a project
+# whose CI is the only gate a contributor without a Blade can run.
 jobs:
   # Host-testable logic: the protocol/state layer is pure code over the HidTransport
   # seam, so the whole librazer test suite (unit + the tests/ public-API crate) runs
@@ -20,8 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -33,12 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev librust-atk-dev libgtk-3-dev
+          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev libgtk-3-dev
       # The tree is rustfmt-clean as of 2026-07-25. It previously wasn't -- 71 hunks --
       # and the no-fmt rule existed because descriptor.rs was hand-formatted around a
       # model this project had to add itself. That model is now in the upstream device
@@ -53,6 +65,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       # Build with the MSVC toolchain: that is what the released binaries use
       # (`cargo xwin ... --target x86_64-pc-windows-msvc` locally), and the tray
       # links Win32 APIs whose bindings differ subtly between msvc and gnu. CI used
@@ -70,11 +83,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: Swatinem/rust-cache@v2
+      # razer-tray is a workspace member with a cfg(target_os = "linux") dependency
+      # block, so a plain `cargo build` here compiles it too -- hence the GTK and xdo
+      # headers, which tray-icon/tao need on Linux.
+      #
+      # `librust-atk-dev` used to be in this list and no longer installs at all
+      # ("Package 'librust-atk-dev' has no installation candidate" on the current
+      # ubuntu-latest image). It was never the right package: it ships a Rust *crate
+      # source*, not C headers. libgtk-3-dev pulls the actual ATK development files
+      # in through its own dependencies.
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev librust-atk-dev libgtk-3-dev
+          sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev libgtk-3-dev
       - name: Build for Linux
         run: cargo build --verbose --release
