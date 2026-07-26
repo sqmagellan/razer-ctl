@@ -1,5 +1,11 @@
 # razer-ctl — Razer Blade control without Synapse
 
+[![razer-ctl-ci](https://github.com/sqmagellan/razer-ctl/actions/workflows/ci.yml/badge.svg)](https://github.com/sqmagellan/razer-ctl/actions/workflows/ci.yml)
+[![latest release](https://img.shields.io/github/v/release/sqmagellan/razer-ctl)](https://github.com/sqmagellan/razer-ctl/releases/latest)
+
+**[⬇ Download the latest release](https://github.com/sqmagellan/razer-ctl/releases/latest)** — two
+standalone `.exe` files, Windows x86-64. No installer.
+
 **TL;DR:** a tray app + CLI that drive a Razer Blade's performance modes, fans, lighting, and battery
 care straight over HID, so you don't need Synapse running. No installer, no service, no background
 account. The tray binary is 1.8 MB.
@@ -113,9 +119,27 @@ descriptor.
 
 ## Install
 
-Drop `razer-tray.exe` somewhere (e.g. `C:\Program Files\RazerTray\`), run it, and use the tray's
-"Start with Windows" to autostart. The CLI is standalone — `razer-cli.exe --help`. No installer, no
-service, no Synapse.
+Grab `razer-tray.exe` and `razer-cli.exe` from the
+[latest release](https://github.com/sqmagellan/razer-ctl/releases/latest). Drop the tray binary
+somewhere (e.g. `C:\Program Files\RazerTray\`), run it, and use the tray's "Start with Windows" to
+autostart. The CLI is standalone — `razer-cli.exe --help`. No installer, no service, no Synapse.
+
+Nothing needs administrator rights, and nothing is written outside your own user profile except
+where you choose to put the binaries.
+
+**The binaries are not code-signed**, so Windows SmartScreen will warn you the first time you run
+one ("Windows protected your PC" → *More info* → *Run anyway*). Signing a hobby project costs real
+money per year, which is the whole reason this is unsigned rather than an oversight. What you get
+instead is a published SHA-256 for every file, so you can check that what you downloaded is what CI
+built:
+
+```powershell
+Get-FileHash .\razer-tray.exe -Algorithm SHA256
+```
+
+Compare it against `SHA256SUMS.txt` in the same release. Every release binary is built by GitHub
+Actions from a tagged commit — never uploaded from a personal machine — so the hash traces back to
+public source.
 
 ## Changelog
 
