@@ -141,6 +141,18 @@ Compare it against `SHA256SUMS.txt` in the same release. Every release binary is
 Actions from a tagged commit — never uploaded from a personal machine — so the hash traces back to
 public source.
 
+Stronger than the hash, if you have the [GitHub CLI](https://cli.github.com/): each binary carries a
+Sigstore-backed build-provenance attestation, so you can verify *where it came from* rather than
+merely that it downloaded intact.
+
+```
+gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl
+```
+
+That confirms the exact repository, workflow, and commit that produced the file. A hash published
+next to a download can't tell you that — and proves nothing at all if whoever tampered with the
+binary could also edit the page hosting the hash.
+
 ## Changelog
 
 ### 2026-07 — charge limit, readable lighting, leaner binary

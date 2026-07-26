@@ -18,6 +18,11 @@ on:
 
 permissions:
   contents: write
+  # Required by actions/attest-build-provenance: id-token to obtain the OIDC token
+  # that proves *this* workflow run produced the files, attestations to store the
+  # signed statement. Both are additive; nothing else in this workflow uses them.
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -68,6 +73,23 @@ jobs:
             Set-Content dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
+      # Sigstore-backed build provenance. This is NOT code signing and does not stop
+      # SmartScreen warning about an unsigned binary -- it is the other half of the
+      # trust problem. A published SHA-256 only proves a download wasn't corrupted; it
+      # says nothing about where the bytes came from, and it is worthless if an
+      # attacker can edit the release page that hosts both file and hash. An
+      # attestation binds each .exe to this repository, this workflow, and this commit,
+      # verifiable by anyone with:
+      #
+      #   gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl
+      #
+      # Free, and it needs no certificate authority, so it is worth having whether or
+      # not real code signing ever materialises.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "dist/*.exe"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -88,6 +110,13 @@ jobs:
 
             Windows SmartScreen will warn on first run: these binaries are not code-signed
             yet. Check the hash if that matters to you.
+
+            Every binary also carries a GitHub build-provenance attestation, which proves
+            it was built by this repository's release workflow from this tag:
+
+            ```
+            gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl
+            ```
 
             **Tested on one model only** — see the Device support section of the README for
             what to expect on other Blades, and please file an "unsupported model" issue if
