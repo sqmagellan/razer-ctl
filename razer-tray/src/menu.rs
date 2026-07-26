@@ -16,6 +16,12 @@ use crate::state::{
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
 /// (current intent) via checkmarks; `enforce` drives the Windows-only Enforce toggle.
+//
+// `enforce` is read only inside the `cfg(target_os = "windows")` block below, so off
+// Windows it is genuinely unused. The parameter stays in the signature regardless --
+// callers pass it unconditionally, and making the signature itself platform-dependent
+// would push cfg noise into every call site for no gain.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn build(
     dstate: &DeviceState,
     enforce: bool,

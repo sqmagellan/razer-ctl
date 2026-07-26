@@ -283,6 +283,11 @@ pub static GPU_POWER_CW: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(GPU_UNAVAILABLE);
 
 /// Sentinel for "we have no valid reading".
+///
+/// Windows-gated like every use of it: the telemetry atomics, `gpu_telemetry`, and the
+/// monitor thread are all Windows-only, so an ungated constant here is dead code on
+/// Linux -- which `-D warnings` in CI correctly rejects.
+#[cfg(target_os = "windows")]
 pub const GPU_UNAVAILABLE: u32 = u32::MAX;
 
 /// How often to sample the dGPU. Slow on purpose: this is a tooltip garnish, and each
