@@ -316,9 +316,7 @@ fn main() -> Result<()> {
                 if let Ok(observed) = DeviceState::read(&device) {
                     state.observed = observed;
                 }
-                if let Ok(fan) = get_fan_rpm(&device) {
-                    state.fan_actual = fan;
-                }
+                state.refresh_fan(&device);
                 let _ = tray_icon.set_icon(Some(state.icon()));
                 if let Ok(tooltip) = state.tooltip() {
                     crate::program::set_tooltip_logged(&tray_icon, &tooltip);
@@ -529,9 +527,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                if let Ok(fan) = get_fan_rpm(&device) {
-                    state.fan_actual = fan;
-                }
+                state.refresh_fan(&device);
                 let _ = tray_icon.set_icon(Some(state.icon()));
                 if let Ok(tooltip) = state.tooltip() {
                     crate::program::set_tooltip_logged(&tray_icon, &tooltip);

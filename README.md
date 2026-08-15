@@ -31,8 +31,10 @@ and only writes to the device when you ask it to.
 
 - **Performance modes** — Balanced, Silent, Battery, Performance, Hyperboost, and Custom (per-axis CPU/GPU boost).
 - **Fan** — Auto, or Manual at a real RPM. The range is per-chassis (declared on each descriptor), so the
-  menu only offers speeds the EC actually honors — 2200–5000 on the 2023 Blade 16, the ends labelled
-  (min)/(max) — instead of dead 0/500 steps and an out-of-range 5500.
+  menu only offers speeds the EC actually honors — 2000–5000 on the 2023 Blade 16, the ends labelled
+  (min)/(max) — instead of dead 0/500 steps and an out-of-range 5500. **2000 is a hardware floor, not a
+  preference:** ask for less and the EC banks the number but keeps spinning at 2000. Only *Auto* can stop
+  the fans outright, which it does when the chassis is cool enough.
 - **Keyboard brightness** — 0–100% in 10% steps; the exact value shows in the tooltip.
 - **Logo lighting** — off / static / breathing (its own light zone).
 - **Keyboard lighting** — Off / Spectrum / Wave / Breathing: the EC's built-in animated effects, over
@@ -85,8 +87,8 @@ from the upstream project's tables. They are *not* tested here:
 
 | Model | USB PID | Manual fan range |
 |---|---|---|
-| Razer Blade 16 (2023) — **tested** | `0x029F` | 2200–5000 RPM |
-| Razer Blade 16 (2023) Black | `0x029F` | 2200–5000 RPM |
+| Razer Blade 16 (2023) — **tested** | `0x029F` | 2000–5000 RPM (measured) |
+| Razer Blade 16 (2023) Black | `0x029F` | 2000–5000 RPM (measured) |
 | Razer Blade 14 (2023) Mercury | `0x029D` | 2200–5000 RPM |
 | Razer Blade 16 (2024) | `0x02B7` | 2200–5000 RPM |
 | Razer Blade 16 (2025) RTX 5070 / 5080 / 5090 | `0x02C6` | 2200–5000 RPM |

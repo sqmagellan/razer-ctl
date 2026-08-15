@@ -12,8 +12,8 @@ use tray_icon::menu::Menu;
 
 use crate::menu;
 use crate::state::{
-    brightness_to_percent, get_fan_rpm, AppProfile, ConfigState, DeviceState, FanRpm, FanSpeed,
-    PerfMode,
+    brightness_to_percent, get_fan_rpm, AppProfile, ConfigState, DeviceState, FanRpm, FanRpmFilter,
+    FanSpeed, PerfMode,
 };
 
 /// UTF-16 code units the tray tooltip may occupy.
@@ -80,6 +80,10 @@ pub struct ProgramState {
     pub event_handlers: HashMap<String, DeviceState>,
     pub menu: Menu,
     pub fan_actual: FanRpm,
+    /// Debouncer standing between raw `0x0d88` reads and `fan_actual`. Individual reads
+    /// are not trustworthy on this hardware -- roughly 3 in 10 carried one impossible
+    /// zone -- so nothing may write `fan_actual` except [`Self::refresh_fan`].
+    fan_filter: FanRpmFilter,
     pub ac_power: bool,
     pub enforce: bool,
     /// Re-assert the intended profile on wake even when `enforce` is off (config-driven).
@@ -101,6 +105,10 @@ impl ProgramState {
         fan_rpm_range: (u16, u16),
     ) -> Result<Self> {
         let (menu, event_handlers) = menu::build(&device_state, enforce, fan_rpm_range)?;
+        // The startup sample is displayed as-is: the filter needs a second read to confirm
+        // a stop, and there is nothing better to show for the ~1 s until the next poll.
+        let mut fan_filter = FanRpmFilter::default();
+        let fan_actual = fan_filter.accept(fan_last).unwrap_or(fan_last);
         Ok(Self {
             device_state,
             observed: device_state,
@@ -108,13 +116,28 @@ impl ProgramState {
             battery_state: device_state,
             event_handlers,
             menu,
-            fan_actual: fan_last,
+            fan_actual,
+            fan_filter,
             ac_power: true,
             enforce,
             reassert_on_resume,
             app_profiles,
             fan_rpm_range,
         })
+    }
+
+    /// Poll the fans and update the displayed value, dropping reads the filter rejects.
+    ///
+    /// The ONLY path that may write `fan_actual` outside `apply`. A failed HID read and a
+    /// read the filter distrusts are handled identically -- the previous value stands --
+    /// because the tooltip has no way to render "unknown" and a stale RPM is a smaller lie
+    /// than an impossible one.
+    pub fn refresh_fan(&mut self, device: &device::Device) {
+        if let Ok(sample) = get_fan_rpm(device) {
+            if let Some(accepted) = self.fan_filter.accept(sample) {
+                self.fan_actual = accepted;
+            }
+        }
     }
 
     /// Persist the current AC/battery profiles + enforce flag + Actions config. Single
@@ -276,7 +299,10 @@ impl ProgramState {
         self.observed = self.device_state;
         (self.menu, self.event_handlers) =
             menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
-        self.fan_actual = get_fan_rpm(device)?;
+        self.fan_actual = self
+            .fan_filter
+            .accept(get_fan_rpm(device)?)
+            .unwrap_or(self.fan_actual);
         tray_icon.set_icon(Some(self.icon()))?;
         set_tooltip_logged(tray_icon, &self.tooltip()?);
         tray_icon.set_menu(Some(Box::new(self.menu.clone())));

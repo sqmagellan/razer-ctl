@@ -131,13 +131,25 @@ pub fn get_gpu_boost(device: &impl HidTransport) -> Result<GpuBoost> {
 pub fn set_fan_rpm(device: &impl HidTransport, rpm: u16, check_mode: bool) -> Result<()> {
     // Bound against the widest range any known chassis supports, rather than a magic
     // 5500 that matched no real machine. The per-device envelope is narrower still
-    // (`Descriptor::fan_rpm_range`, which is what the UI offers) and the EC clamps
-    // anything outside its own limits regardless -- this check only rejects values that
-    // could not be meaningful on any Blade.
+    // (`Descriptor::fan_rpm_range`, which is what the UI offers) -- this check only
+    // rejects values that could not be meaningful on any Blade.
+    //
+    // BOTH ends are checked, and the lower one is the load-bearing half. Above the range
+    // the EC clamps and the fan visibly runs flat out, so an unchecked high value is
+    // merely imprecise. Below it, the EC accepts the write, keeps the value in the
+    // read-back register, and silently spins at its floor anyway -- measured 2026-08-15
+    // on 0x029F, where set points of 1800 down to 0 all produced exactly 2000 RPM. So an
+    // unchecked low value returns Ok(()) while doing nothing, and every caller above
+    // here goes on to report a speed the hardware is ignoring. Reject it instead, and
+    // note that the floor being global means a *chassis*-legal-but-lower value still
+    // needs the per-device range to catch it; this is the backstop, not the policy.
     ensure!(
-        (0..=crate::state::FAN_RPM_MAX_ANY).contains(&rpm),
-        "Fan RPM {} is out of range (max {} across all known chassis)",
+        (crate::state::FAN_RPM_MIN_ANY..=crate::state::FAN_RPM_MAX_ANY).contains(&rpm),
+        "Fan RPM {} is out of range ({}..={} across all known chassis); below the minimum \
+         the EC silently holds its floor instead of reporting an error, so this would \
+         appear to succeed while changing nothing",
         rpm,
+        crate::state::FAN_RPM_MIN_ANY,
         crate::state::FAN_RPM_MAX_ANY
     );
     if check_mode {
@@ -419,6 +431,52 @@ mod tests {
         let mock = MockTransport::echo();
         set_keyboard_brightness(&mock, 128).unwrap();
         assert_eq!(mock.sent(), vec![(0x0303, vec![1, 5, 128])]);
+    }
+
+    #[test]
+    fn set_fan_rpm_writes_both_zones_as_rpm_over_100() {
+        let mock = MockTransport::echo();
+        set_fan_rpm(&mock, 2400, false).unwrap();
+        assert_eq!(
+            mock.sent(),
+            vec![(0x0d01, vec![0, 1, 24]), (0x0d01, vec![0, 2, 24])]
+        );
+    }
+
+    #[test]
+    fn set_fan_rpm_rejects_below_the_floor_without_reaching_the_wire() {
+        // The lower bound is not cosmetic. Measured on 0x029F (2026-08-15): the EC accepts
+        // a sub-floor write, keeps it in the read-back register, and holds 2000 RPM anyway.
+        // So sending it would return Ok(()) while changing nothing, and every layer above
+        // would then display a speed the fan is ignoring. Nothing may go out.
+        for rpm in [0, 100, 800, crate::state::FAN_RPM_MIN_ANY - 100] {
+            let mock = MockTransport::echo();
+            let err = set_fan_rpm(&mock, rpm, false).unwrap_err();
+            assert!(
+                err.to_string().contains("out of range"),
+                "rpm {rpm}: unexpected error {err}"
+            );
+            assert!(
+                mock.sent().is_empty(),
+                "rpm {rpm} was rejected but still hit the wire: {:?}",
+                mock.sent()
+            );
+        }
+    }
+
+    #[test]
+    fn set_fan_rpm_accepts_both_ends_of_the_global_range() {
+        // Boundary values are legal, not off-by-one victims: FAN_RPM_MIN_ANY is a real
+        // measured set point on 0x029F (2000 -> exactly 2000 RPM), not a safety margin.
+        for rpm in [crate::state::FAN_RPM_MIN_ANY, crate::state::FAN_RPM_MAX_ANY] {
+            let mock = MockTransport::echo();
+            set_fan_rpm(&mock, rpm, false).unwrap();
+            assert_eq!(
+                mock.sent().len(),
+                2,
+                "rpm {rpm}: both zones must be written"
+            );
+        }
     }
 
     #[test]

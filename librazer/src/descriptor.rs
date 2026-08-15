@@ -8,13 +8,43 @@ pub struct Descriptor {
     pub pid: u16,
     pub features: &'static [&'static str],
     pub init_cmds: &'static [u16],
-    /// Usable manual-fan RPM bounds (min, max) for this chassis. Below min the EC floors the
-    /// fan, above max it clamps; the UI/CLI build their presets from this. Sourced from
-    /// Vader89/razer-laptop-control-16-2023's per-model `laptops.json` (HW-probed on 0x029F).
-    /// 2023+ Blades are (2200, 5000); older chassis floor higher, e.g. 2022 Blade 15 (3500, 5000).
+    /// Usable **manual**-fan RPM bounds (min, max) for this chassis; the UI/CLI build their
+    /// presets from this. Manual-only by construction: the firmware's Auto curve is not
+    /// expressible here, because Auto's bottom is *off* and manual has no off (see below).
+    ///
+    /// Below min the EC accepts the write, keeps it in the read-back register, and silently
+    /// spins at min anyway; above max it clamps. So a set point outside these bounds is not
+    /// an error the hardware reports -- it is a number the UI would show while the fan
+    /// ignores it.
+    ///
+    /// PROVENANCE, which differs per row and matters: `0x029F` is **measured on hardware**
+    /// (2026-08-15, raw `0x0d01` sweep, floor confirmed at 2000 -- the details are on
+    /// [`SUPPORTED`]). Every other row is transcribed from
+    /// Vader89/razer-laptop-control-16-2023's per-model `laptops.json`, which lists 2200 for
+    /// the 2023+ Blades -- including the one chassis we have now measured at 2000. Treat the
+    /// un-measured floors as upper bounds on the truth, not as facts.
     pub fan_rpm_range: (u16, u16),
 }
 
+/// Why `0x029F`'s floor is 2000 and what a future prober should expect, recorded here
+/// because the number looks arbitrary and was wrong for a year.
+///
+/// Measured 2026-08-15 on a Razer Blade 16 (2023), BIOS 2.05, by writing raw `0x0d01`
+/// directly (razer-cli's own parser rejects sub-2000 before the EC ever sees it):
+///
+/// - Set points 1800 / 1500 / 1200 / 1000 / 800 / 400 / 100 / 0 **all** settle at exactly
+///   2000 RPM on both zones, held 40 s each, across CPU load 0-17%. 2000 and 3000 are
+///   honoured exactly. So: honoured at >= 2000, silently clamped below.
+/// - It is a floor, not the EC substituting its own thermal demand: Auto idle is
+///   *asymmetric* (2000/1900), the manual floor is always *symmetric* (2000/2000).
+/// - A set point of 0 does **not** hand control back to the firmware curve on this
+///   chassis -- the mode register still reads Manual and the fan holds 2000. Other
+///   projects treat 0 as "clear the manual flag"; do not port that here.
+/// - The EC slews manual targets at a measured ~23 RPM/s and the tach is quantised to
+///   100 RPM, so a set must not be verified by reading back sooner than dRPM/23 seconds.
+/// - Razer documents no minimum for any model, and every other open-source project picks
+///   a different unjustified one (3500 "for ALL laptops", 3100, per-model 2200). There is
+///   no authority to defer to here; only measurement.
 pub const SUPPORTED: &[Descriptor] = &[
     Descriptor {
         model_number_prefix: "RZ09-0483T",
@@ -30,7 +60,7 @@ pub const SUPPORTED: &[Descriptor] = &[
             "perf",
         ],
         init_cmds: &[],
-        fan_rpm_range: (2200, 5000),
+        fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed
     },
     Descriptor {
         model_number_prefix: "RZ09-0482X",
@@ -61,7 +91,7 @@ pub const SUPPORTED: &[Descriptor] = &[
             "perf",
         ],
         init_cmds: &[],
-        fan_rpm_range: (2200, 5000),
+        fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed
     },
     Descriptor {
         model_number_prefix: "RZ09-0510S",
@@ -169,6 +199,13 @@ const _VALIDATE_FEATURES: () = {
 /// Note the outliers, which are why a flat default is wrong: the Blade Pro 17 tops out
 /// at 4300, the Blade 14 2025 reaches 5600, and pre-2023 chassis floor at 3500 rather
 /// than 2200 -- a 2200 preset on those is simply a dead menu entry.
+///
+/// SUSPECT ON THE LOW SIDE, 2026-08-15: these tables list 2200 for every 2023+ Blade,
+/// and the one such chassis we have measured (`0x029F`, in `SUPPORTED`) turned out to
+/// floor at **2000**, not 2200. So the 2023+ floors below are very likely 200 RPM too
+/// high as well. They are left as transcribed on purpose -- guessing a second chassis
+/// from a measurement of the first is how the wrong 2200 got here in the first place.
+/// Lower a row only when someone probes that model with a raw `0x0d01` sweep.
 pub const FAN_RANGE_BY_PID: &[(u16, (u16, u16))] = &[
     // Pre-2023: higher floor, most cap at 5000.
     (0x0205, (3500, 5000)), // Blade Stealth 2015
@@ -208,7 +245,7 @@ pub const FAN_RANGE_BY_PID: &[(u16, (u16, u16))] = &[
     (0x027a, (3500, 5000)), // Blade 15 Late 2021 Base
     (0x028b, (3500, 5000)), // Blade 17 2022
     (0x028c, (3500, 5000)), // Blade 14 2022
-    // 2023+: quiet floor at 2200.
+    // 2023+: transcribed floor of 2200. Unverified, and known too high for 0x029F.
     (0x029e, (2200, 5000)), // Blade 15 2023
     (0x02a0, (2200, 5000)), // Blade 18 2023
     (0x02b6, (2200, 5000)), // Blade 14 2024

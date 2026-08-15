@@ -71,6 +71,79 @@ pub struct FanRpm {
     pub fan2: u16,
 }
 
+impl FanRpm {
+    /// Both fans stopped. A real state on 0x029F: the firmware's Auto curve shuts the fans
+    /// off entirely when the chassis is cool enough (measured 2026-08-15 -- 14 of 15 reads
+    /// at 1.5 s spacing returned 0/0 across 22 s). Manual mode cannot produce it.
+    pub fn is_stopped(self) -> bool {
+        self.fan1 == 0 && self.fan2 == 0
+    }
+
+    /// Exactly one zone reads zero while the other is running -- physically impossible, so
+    /// the read failed.
+    ///
+    /// The EC slews at a measured ~23 RPM/s (manual) to ~53 RPM/s (Auto descent), which puts
+    /// a 2000 -> 0 spin-down at 40 s minimum. Yet consecutive 30 s-spaced samples on
+    /// 2026-08-15 produced `0/1800` then `2000/0` then `0/1800`: round trips that cannot
+    /// happen at that slew, in *both* directions (one sample carried a lone 2000 while the
+    /// true state was stopped). Roughly 3 in 10 sparse samples carried one bad zone.
+    ///
+    /// Deliberately narrow. A large-but-nonzero gap is NOT treated as suspect: legitimate
+    /// Auto asymmetry of 100-200 RPM is normal on this chassis (2000/1900, 2000/1800), and
+    /// no threshold above that has been measured, so inventing one would trade a real bug
+    /// for a guessed one.
+    pub fn is_lone_zero(self) -> bool {
+        (self.fan1 == 0) != (self.fan2 == 0)
+    }
+}
+
+/// Debounces `0x0d88` fan reads before anything displays them.
+///
+/// Two rules, each from a measurement rather than a hunch:
+///
+/// 1. A [`FanRpm::is_lone_zero`] sample is dropped outright and the previous value stands.
+///    It cannot be true, so showing it is strictly worse than showing a stale number.
+/// 2. A *stopped* reading is published only after two consecutive stopped samples. "The
+///    app says zero" is the report this whole filter exists to answer, so that state has
+///    to earn its way onto the screen. Running values publish immediately -- during a ramp
+///    the number legitimately moves every poll, and holding those back would only make the
+///    display stale.
+///
+/// Nothing here is a moving average: a smoothed RPM would hide exactly the ramps that
+/// distinguish a held speed from one the fan is passing through.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FanRpmFilter {
+    published: Option<FanRpm>,
+    /// A stopped sample seen once, waiting for a second one to confirm it.
+    stop_pending: bool,
+}
+
+impl FanRpmFilter {
+    /// Feed one raw read. Returns the value that should now be displayed, or `None` while
+    /// no reading has ever been trustworthy (only possible before the first good sample).
+    pub fn accept(&mut self, sample: FanRpm) -> Option<FanRpm> {
+        if sample.is_lone_zero() {
+            // A failed read tells us nothing, including nothing about a pending stop.
+            return self.published;
+        }
+        if sample.is_stopped() {
+            if !self.stop_pending {
+                self.stop_pending = true;
+                return self.published;
+            }
+        } else {
+            self.stop_pending = false;
+        }
+        self.published = Some(sample);
+        self.published
+    }
+
+    /// The last value cleared for display, if any.
+    pub fn published(self) -> Option<FanRpm> {
+        self.published
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DeviceState {
     pub perf_mode: PerfMode,
@@ -687,6 +760,102 @@ pub fn profile_for_power(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rpm(fan1: u16, fan2: u16) -> FanRpm {
+        FanRpm { fan1, fan2 }
+    }
+
+    #[test]
+    fn lone_zero_is_flagged_in_either_direction_and_a_real_stop_is_not() {
+        assert!(rpm(0, 1800).is_lone_zero());
+        assert!(rpm(2000, 0).is_lone_zero());
+        assert!(!rpm(0, 0).is_lone_zero());
+        assert!(!rpm(2000, 1900).is_lone_zero());
+        assert!(rpm(0, 0).is_stopped());
+        assert!(!rpm(0, 1800).is_stopped());
+    }
+
+    #[test]
+    fn legitimate_auto_asymmetry_is_never_treated_as_a_bad_read() {
+        // Measured idle pairs on 0x029F. If the filter ever rejected these it would freeze
+        // the display during normal operation, which is worse than the bug it fixes.
+        let mut f = FanRpmFilter::default();
+        for pair in [rpm(2000, 1900), rpm(2000, 1800), rpm(2100, 1900)] {
+            assert_eq!(f.accept(pair), Some(pair));
+        }
+    }
+
+    #[test]
+    fn a_lone_zero_read_leaves_the_previous_value_standing() {
+        let mut f = FanRpmFilter::default();
+        assert_eq!(f.accept(rpm(2000, 1900)), Some(rpm(2000, 1900)));
+        // The exact sequence measured at 30 s spacing on 2026-08-15, which is what put a
+        // spurious "0" on screen: none of it may reach the display.
+        assert_eq!(f.accept(rpm(0, 1800)), Some(rpm(2000, 1900)));
+        assert_eq!(f.accept(rpm(2000, 0)), Some(rpm(2000, 1900)));
+        assert_eq!(f.accept(rpm(0, 1800)), Some(rpm(2000, 1900)));
+    }
+
+    #[test]
+    fn a_stop_needs_two_consecutive_reads_to_publish() {
+        let mut f = FanRpmFilter::default();
+        f.accept(rpm(2000, 1900));
+        assert_eq!(
+            f.accept(rpm(0, 0)),
+            Some(rpm(2000, 1900)),
+            "first stopped read is not enough"
+        );
+        assert_eq!(f.accept(rpm(0, 0)), Some(rpm(0, 0)), "second confirms it");
+        assert_eq!(f.accept(rpm(0, 0)), Some(rpm(0, 0)), "and it stays");
+    }
+
+    #[test]
+    fn a_lone_zero_does_not_confirm_a_pending_stop() {
+        // The trap: treating any zero-containing read as corroboration would let one real
+        // stopped sample plus one impossible one publish a stop that never happened.
+        let mut f = FanRpmFilter::default();
+        f.accept(rpm(2000, 1900));
+        f.accept(rpm(0, 0));
+        assert_eq!(f.accept(rpm(0, 1800)), Some(rpm(2000, 1900)));
+        assert_eq!(
+            f.accept(rpm(1800, 1800)),
+            Some(rpm(1800, 1800)),
+            "a running read clears the pending stop and publishes normally"
+        );
+    }
+
+    #[test]
+    fn a_running_read_between_two_stops_resets_the_confirmation() {
+        let mut f = FanRpmFilter::default();
+        f.accept(rpm(2000, 1900));
+        f.accept(rpm(0, 0));
+        assert_eq!(f.accept(rpm(1100, 1100)), Some(rpm(1100, 1100)));
+        assert_eq!(
+            f.accept(rpm(0, 0)),
+            Some(rpm(1100, 1100)),
+            "the earlier stop must not count toward this one"
+        );
+        assert_eq!(f.accept(rpm(0, 0)), Some(rpm(0, 0)));
+    }
+
+    #[test]
+    fn ramp_values_publish_immediately_and_are_not_smoothed() {
+        // The Auto spin-down measured on 2026-08-15. Every step must appear as-is: these
+        // are speeds the fan passes through, and averaging them away would make a ramp
+        // indistinguishable from a held speed -- the exact confusion this hardware causes.
+        let mut f = FanRpmFilter::default();
+        for v in [2000, 1800, 1600, 1500, 1300, 1100] {
+            assert_eq!(f.accept(rpm(v, v)), Some(rpm(v, v)));
+        }
+    }
+
+    #[test]
+    fn nothing_is_published_until_a_trustworthy_read_arrives() {
+        let mut f = FanRpmFilter::default();
+        assert_eq!(f.accept(rpm(0, 1800)), None);
+        assert_eq!(f.published(), None);
+        assert_eq!(f.accept(rpm(2000, 1900)), Some(rpm(2000, 1900)));
+    }
 
     /// Helper: one line of parts at ascending priority.
     fn line(parts: &[(u8, &str)]) -> Vec<(u8, String)> {
