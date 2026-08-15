@@ -1,0 +1,61 @@
+name: razer-ctl-audit
+
+# Why this is a SEPARATE workflow from ci.yml, and not just another job in it.
+#
+# Every other gate answers "did this change break something". `cargo audit` answers
+# "did the world change under code that did not" -- a new advisory lands against a
+# dependency we have not touched in months. That only shows up on a SCHEDULE, and a
+# schedule belongs to the workflow, not the job: bolting `schedule:` onto ci.yml would
+# also re-run the four build/test jobs every week for no reason.
+#
+# It is also the reason this project wanted an audit gate at all. Both dependency bumps
+# that ever paid for themselves here were advisory- or capability-driven, never
+# calendar-driven: single-instance 0.1.2 -> 0.3 dropped the unmaintained `failure` dep
+# (RUSTSEC-2019-0036 / RUSTSEC-2020-0036, CVSS 9.8), and tray-icon 0.11.3 -> 0.19 deleted
+# a keyboard-hook hack outright. Version lag by itself is not a defect; this is the
+# signal that separates the bumps worth doing from churn.
+on:
+  push:
+    branches: ["main"]
+    # A source-only change cannot introduce an advisory, so gate on the files that can.
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # Mondays, 06:17 UTC. Off the hour on purpose: GitHub queues scheduled jobs from a
+    # shared pool and the top of the hour is the worst-served slot.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Prebuilt binary rather than `cargo install cargo-audit`, which compiles ~200
+      # crates and would make the cheapest gate in this repo the slowest one.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Deliberately NOT `--deny warnings`.
+      #
+      # cargo-audit splits its findings: *vulnerabilities* exit non-zero on their own,
+      # while *warnings* (unmaintained, unsound, yanked) are reported and do not fail.
+      # That default is the one we want. This tree knowingly carries old-but-working
+      # deps -- bincode 1.3 sits under the HID packet layer and sysinfo 0.29 backs the
+      # Actions poll -- and an unmaintained advisory against either is information, not
+      # a reason to block a fan-floor fix from merging. Promoting warnings to errors
+      # would make the gate fire on things nobody intends to act on today, and a gate
+      # that cries wolf gets disabled. Vulnerabilities still stop the build.
+      #
+      # If a warning ever does need to be enforced, add it as an explicit
+      # `--deny unmaintained` rather than turning the whole class on.
+      - name: cargo audit
+        run: cargo audit
