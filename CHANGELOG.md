@@ -4,7 +4,7 @@ Release history for this fork. The README carries the current behaviour; this fi
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
-## Unreleased — measured fan floor, filtered fan reads, an audit gate
+## 0.9.2 — measured fan floor, filtered fan reads, an audit gate
 HW-verified on `0x029F` (2026-08-15).
 
 - **The manual fan floor is 2000 RPM, not the 2200 the descriptor claimed.** Writing raw `0x0d01`
