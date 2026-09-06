@@ -4,6 +4,37 @@ Release history for this fork. The README carries the current behaviour; this fi
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
+## 0.9.3 — resume detection that fires, and Actions kept out of saved profiles
+HW-verified on `0x029F` (2026-09-05).
+
+- **The tray never noticed a resume, and its own log said so for six weeks.** `PBT_APMRESUMESUSPEND`
+  replaced the old tick-gap heuristic on 2026-07-25, and every `resume detected` line written since
+  is still the heuristic's — nine Kernel-Power 107 resumes between 07-30 and 09-04 produced none.
+  The cause is the window. `spawn_display_state_monitor` creates a message-only window and registers
+  only `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE`; `PBT_APMRESUME*` arrives
+  as a broadcast, a message-only window receives no broadcasts, and a power-setting registration
+  delivers that setting and nothing else. It now also calls `RegisterSuspendResumeNotification`,
+  which is targeted and so reaches the window. The two registrations are independent — losing one
+  does not cost the other — and startup logs which of them took. Verified on a hibernate/resume at
+  19:18:17: both broadcasts arrived, the latch collapsed them into one re-assert, and that is the
+  first `resume detected (OS power broadcast)` line in the log's history.
+- **An Action's settings could end up in the saved AC or battery profile.** `menu::build` bakes a
+  whole `DeviceState` into every handler, built from whatever is currently effective — during an
+  Action that is the overlay. Picking one unrelated item handed `update()` a state carrying the
+  Action's perf mode and fan, and `update()` assigned the lot to `ac_state` or `battery_state`.
+  Close the game and the profile you returned to had quietly acquired the Action's settings. The
+  README's claim that an Action "never overwrites a saved profile" was the intent, not the
+  behaviour. `DeviceState::carry_changes` now writes only the fields that differ between the state
+  the menu was built from and the state the user picked. With no Action active `base == before`, so
+  the common path is bit-identical to the old wholesale assignment, and that equivalence is one of
+  the three new tests. Only the saved profile is narrowed: whether a manual edit should override a
+  running Action *on the device*, or stay masked until it ends, is a separate question and is
+  untouched.
+- **`librazer` 0.8.7 → 0.8.8** for the new `DeviceState::carry_changes`. The addition is additive and
+  changes no existing call, so `razer-cli` stays at 0.8.7 — nothing in it moved. Verified on the
+  Blade: `fmt --check`, clippy `--target x86_64-pc-windows-msvc -Dwarnings`, `cargo build --release`,
+  and 122 tests.
+
 ## 0.9.2 — measured fan floor, filtered fan reads, an audit gate
 HW-verified on `0x029F` (2026-08-15).
 
