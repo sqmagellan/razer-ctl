@@ -318,11 +318,17 @@ impl ProgramState {
         new_device_state: DeviceState,
         device: &device::Device,
     ) -> Result<()> {
+        // Capture what the menu was built from BEFORE applying: the difference between it
+        // and `new_device_state` is exactly the property the user picked. See
+        // `DeviceState::carry_changes` -- assigning the whole effective state here is what
+        // let an app Action's perf mode and fan leak into the saved profile.
+        let before = self.device_state;
         self.apply_and_refresh(tray_icon, new_device_state, device)?;
         if self.ac_power {
-            self.ac_state = self.device_state
+            self.ac_state = DeviceState::carry_changes(self.ac_state, before, self.device_state)
         } else {
-            self.battery_state = self.device_state
+            self.battery_state =
+                DeviceState::carry_changes(self.battery_state, before, self.device_state)
         }
         self.persist()?;
         log::info!("state updated to {:?}", new_device_state);

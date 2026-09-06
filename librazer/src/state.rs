@@ -416,6 +416,55 @@ impl DeviceState {
         perf_result.and(logo_result)
     }
 
+    /// Carry ONLY the fields the user actually changed from `base`, leaving the rest of
+    /// `base` alone.
+    ///
+    /// This exists because the tray menu bakes a whole `DeviceState` into every handler,
+    /// built from whatever is *currently effective*. While an app Action is overlaying the
+    /// saved profile, "currently effective" is the overlay -- so picking one unrelated item
+    /// (say keyboard brightness) used to hand `update()` a state carrying the Action's perf
+    /// mode and fan too, and `update()` saved the lot. Close the game and you reverted to a
+    /// profile that had silently acquired the Action's settings. The README's claim that an
+    /// override "never overwrites a saved profile" was false.
+    ///
+    /// `before` is the effective state the menu was built from; `after` is what the user
+    /// picked. Their difference is exactly the user's intent, and only that lands on `base`.
+    ///
+    /// When no overlay is in effect `base == before`, so this returns `after` unchanged --
+    /// the no-Action path keeps its old behaviour exactly.
+    ///
+    /// Only the *saved profile* is narrowed. What the user picked still takes effect on the
+    /// device immediately, overriding the Action until it next re-applies; that half is
+    /// unchanged and is a separate design question.
+    pub fn carry_changes(base: Self, before: Self, after: Self) -> Self {
+        let mut out = base;
+        if after.perf_mode != before.perf_mode {
+            out.perf_mode = after.perf_mode;
+        }
+        if after.fan_speed != before.fan_speed {
+            out.fan_speed = after.fan_speed;
+        }
+        if after.max_fan != before.max_fan {
+            out.max_fan = after.max_fan;
+        }
+        if after.battery_care != before.battery_care {
+            out.battery_care = after.battery_care;
+        }
+        if after.lights_mode.logo_mode != before.lights_mode.logo_mode {
+            out.lights_mode.logo_mode = after.lights_mode.logo_mode;
+        }
+        if after.lights_mode.keyboard_brightness != before.lights_mode.keyboard_brightness {
+            out.lights_mode.keyboard_brightness = after.lights_mode.keyboard_brightness;
+        }
+        if after.lights_mode.always_on != before.lights_mode.always_on {
+            out.lights_mode.always_on = after.lights_mode.always_on;
+        }
+        if after.lights_mode.keyboard_effect != before.lights_mode.keyboard_effect {
+            out.lights_mode.keyboard_effect = after.lights_mode.keyboard_effect;
+        }
+        out
+    }
+
     pub fn apply(&self, device: &impl HidTransport) -> Result<()> {
         self.apply_perf_fan_logo(device)?;
         // NB: always-on is deliberately NOT applied here. It is the Razer "device mode"
@@ -763,6 +812,63 @@ mod tests {
 
     fn rpm(fan1: u16, fan2: u16) -> FanRpm {
         FanRpm { fan1, fan2 }
+    }
+
+    fn dstate(perf: PerfMode, fan: FanSpeed, brightness: u8) -> DeviceState {
+        DeviceState {
+            perf_mode: perf,
+            lights_mode: LightsMode {
+                logo_mode: LogoMode::Off,
+                keyboard_brightness: brightness,
+                always_on: LightsAlwaysOn::Disable,
+                keyboard_effect: None,
+            },
+            battery_care: BatteryCare::DISABLE,
+            fan_speed: fan,
+            max_fan: false,
+        }
+    }
+
+    #[test]
+    fn a_pick_made_during_an_action_saves_only_what_the_user_picked() {
+        // The reported failure, exactly: saved AC profile is Balanced/Auto, a game Action
+        // overlays Hyperboost/Manual 4000, then the user changes keyboard brightness. The
+        // saved profile must gain the brightness and NOTHING else -- before this fix it
+        // also acquired Hyperboost and Manual 4000, so closing the game reverted to a
+        // contaminated profile.
+        let saved = dstate(PerfMode::Balanced, FanSpeed::Auto, 100);
+        let overlaid = dstate(PerfMode::Hyperboost, FanSpeed::Manual(4000), 100);
+        let picked = dstate(PerfMode::Hyperboost, FanSpeed::Manual(4000), 200);
+
+        let out = DeviceState::carry_changes(saved, overlaid, picked);
+
+        assert_eq!(out.lights_mode.keyboard_brightness, 200);
+        assert_eq!(out.perf_mode, PerfMode::Balanced);
+        assert_eq!(out.fan_speed, FanSpeed::Auto);
+    }
+
+    #[test]
+    fn with_no_action_overlay_the_merge_is_the_old_wholesale_assignment() {
+        // base == before is the no-Action path. Narrowing must not change it at all,
+        // otherwise this fix would be a regression on the common case.
+        let saved = dstate(PerfMode::Balanced, FanSpeed::Auto, 100);
+        let picked = dstate(PerfMode::Silent, FanSpeed::Manual(2000), 50);
+
+        assert_eq!(DeviceState::carry_changes(saved, saved, picked), picked);
+    }
+
+    #[test]
+    fn a_pick_that_changes_the_field_the_action_set_still_reaches_the_saved_profile() {
+        // The user explicitly picking the same axis the Action drives is a real intent to
+        // change the saved profile, not contamination -- it must not be swallowed.
+        let saved = dstate(PerfMode::Balanced, FanSpeed::Auto, 100);
+        let overlaid = dstate(PerfMode::Hyperboost, FanSpeed::Manual(4000), 100);
+        let picked = dstate(PerfMode::Silent, FanSpeed::Manual(4000), 100);
+
+        let out = DeviceState::carry_changes(saved, overlaid, picked);
+
+        assert_eq!(out.perf_mode, PerfMode::Silent);
+        assert_eq!(out.fan_speed, FanSpeed::Auto);
     }
 
     #[test]

@@ -513,7 +513,9 @@ pub fn spawn_display_state_monitor() {
         use windows::core::w;
         use windows::Win32::Foundation::{HINSTANCE, HWND};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::System::Power::RegisterPowerSettingNotification;
+        use windows::Win32::System::Power::{
+            RegisterPowerSettingNotification, RegisterSuspendResumeNotification,
+        };
         use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
@@ -556,15 +558,55 @@ pub fn spawn_display_state_monitor() {
             return;
         }
 
+        // Two SEPARATE registrations, because they are two different mechanisms and only one
+        // of them was ever here.
+        //
+        // PBT_APMRESUMEAUTOMATIC / PBT_APMRESUMESUSPEND arrive as a WM_POWERBROADCAST
+        // *broadcast*, and a message-only window (HWND_MESSAGE, above) does not receive
+        // broadcasts -- that is the documented point of one. Registering for a power SETTING
+        // establishes delivery of that setting and nothing else, so the resume arm of
+        // power_wnd_proc was unreachable from the day it was written.
+        //
+        // This was not theory: the tray log's last `resume detected` line is 2026-07-25,
+        // the day the tick-gap heuristic was replaced by the broadcast, and Windows recorded
+        // nine Kernel-Power 107 resumes after that with no handler firing.
+        //
+        // RegisterSuspendResumeNotification is the fix: it is a TARGETED registration, so the
+        // messages are delivered to this window specifically rather than broadcast to
+        // top-level windows, which is what makes it work on a message-only window.
+        let mut have_display = false;
+        let mut have_resume = false;
+
         if let Err(e) = RegisterPowerSettingNotification(
             windows::Win32::Foundation::HANDLE(hwnd.0),
             &GUID_CONSOLE_DISPLAY_STATE,
             DEVICE_NOTIFY_WINDOW_HANDLE,
         ) {
             log::warn!("display monitor: RegisterPowerSettingNotification failed: {e:?}");
+        } else {
+            have_display = true;
+        }
+
+        if let Err(e) = RegisterSuspendResumeNotification(
+            windows::Win32::Foundation::HANDLE(hwnd.0),
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        ) {
+            log::warn!("display monitor: RegisterSuspendResumeNotification failed: {e:?}");
+        } else {
+            have_resume = true;
+        }
+
+        // Independent capabilities: losing display-state should not cost us resume, and vice
+        // versa. Only an empty window is worth abandoning.
+        if !have_display && !have_resume {
+            log::warn!("display monitor: no power notifications registered, thread exiting");
             return;
         }
-        log::info!("display-state monitor running");
+        log::info!(
+            "display-state monitor running (display-state: {}, suspend/resume: {})",
+            if have_display { "yes" } else { "NO" },
+            if have_resume { "yes" } else { "NO" }
+        );
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, hwnd, 0, 0).as_bool() {
