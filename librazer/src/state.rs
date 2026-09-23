@@ -157,6 +157,12 @@ pub struct DeviceState {
     /// this field existed loadable (they deserialize to false).
     #[serde(default)]
     pub max_fan: bool,
+    /// Display refresh rate for this profile, in Hz. `None` = leave the display alone (the
+    /// default, so existing configs change nothing). Not an EC setting: the tray applies it
+    /// through the Windows display APIs, and `read` never reports it, so it is kept out of
+    /// `enforced_fields_differ`.
+    #[serde(default)]
+    pub display_refresh_hz: Option<u32>,
 }
 
 /// Map a 0..=100 percentage to the device's 0..255 keyboard-brightness scale,
@@ -375,6 +381,7 @@ impl DeviceState {
             battery_care,
             fan_speed,
             max_fan,
+            display_refresh_hz: None,
         })
     }
 
@@ -499,6 +506,9 @@ impl DeviceState {
         if after.lights_mode.keyboard_effect != before.lights_mode.keyboard_effect {
             out.lights_mode.keyboard_effect = after.lights_mode.keyboard_effect;
         }
+        if after.display_refresh_hz != before.display_refresh_hz {
+            out.display_refresh_hz = after.display_refresh_hz;
+        }
         out
     }
 
@@ -585,6 +595,7 @@ impl Default for DeviceState {
             battery_care: BatteryCare::from_percent(80).unwrap(),
             fan_speed: FanSpeed::Auto,
             max_fan: false,
+            display_refresh_hz: None,
         }
     }
 }
@@ -765,6 +776,17 @@ pub struct ConfigState {
     // "Actions": app-triggered profile switches. Empty by default (no behavior).
     #[serde(default)]
     pub app_profiles: Vec<AppProfile>,
+    /// Also switch the Windows power mode (the Settings > Power "Power mode" slider) to
+    /// match the perf mode: Battery/Silent -> Best power efficiency, Balanced -> Balanced,
+    /// Performance/Hyperboost/Custom -> Best performance. Off by default: it changes an OS
+    /// setting the user may manage themselves.
+    #[serde(default)]
+    pub match_windows_power_mode: bool,
+    /// Global hotkey that cycles the perf mode like a left-click, e.g. `"Ctrl+Alt+P"`.
+    /// Modifiers: Ctrl, Alt, Shift, Win; key: A-Z, 0-9 or F1-F24. `None` = no hotkey.
+    /// Read at startup.
+    #[serde(default)]
+    pub cycle_perf_hotkey: Option<String>,
 }
 
 impl Default for ConfigState {
@@ -780,6 +802,8 @@ impl Default for ConfigState {
             enforce: false,
             reassert_on_resume: true,
             app_profiles: Vec::new(),
+            match_windows_power_mode: false,
+            cycle_perf_hotkey: None,
         }
     }
 }
@@ -935,6 +959,7 @@ mod tests {
             battery_care: BatteryCare::DISABLE,
             fan_speed: fan,
             max_fan: false,
+            display_refresh_hz: None,
         }
     }
 
@@ -1495,6 +1520,7 @@ mod tests {
             battery_care: BatteryCare::from_percent(80).unwrap(),
             fan_speed: FanSpeed::Auto,
             max_fan: false,
+            display_refresh_hz: None,
         };
         assert_eq!(DeviceState::read(&mock).unwrap(), expected);
     }
