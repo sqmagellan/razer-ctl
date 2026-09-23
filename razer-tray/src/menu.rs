@@ -217,9 +217,8 @@ pub fn build(
             .collect::<Vec<_>>(),
     )?)?;
 
-    // Keyboard lighting (RGB / Chroma). Write-only intent -- Chroma has no getter on this
-    // device -- so a pick is stored + applied, never read back or reconciled (unlike perf/
-    // fan/logo). Effects-only, no color: an arbitrary color needs Razer driver mode
+    // Keyboard lighting (RGB / Chroma). A pick is stored and applied as intent. The effect
+    // is readable (0x0f82) and shown, but never reconciled, unlike perf/fan/logo. Effects-only, no color: an arbitrary color needs Razer driver mode
     // (host-streamed frames = Synapse), which disables the Fn media keys, so we ship only the
     // EC-animated effects (Off/Spectrum/Wave/Breathing). HW-verified Fn-safe on 0x029F (2026-07-10).
     menu.append(&PredefinedMenuItem::separator())?;

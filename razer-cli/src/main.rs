@@ -152,7 +152,7 @@ impl Cli for feature::KbdLighting {
     fn cmd(&self) -> Option<Command> {
         Some(
             clap::Command::new(self.name())
-                .about("Control keyboard RGB backlight effect (write-only; not read back)")
+                .about("Control keyboard RGB backlight effect (the current effect is shown by `auto json`)")
                 .subcommand(
                     clap::Command::new("effect")
                         .about("Set the backlight effect (off/spectrum/wave/breathing)")
@@ -249,7 +249,7 @@ impl Cli for feature::Fan {
                 .about("Control fan")
                 .subcommand(clap::Command::new("auto").about("Set fan mode to auto"))
                 .subcommand(clap::Command::new("manual").about("Set fan mode to manual"))
-                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm", "Fan RPM (chassis-dependent; the EC clamps values outside this model's real range)"})
+                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm", "Fan RPM, a multiple of 100 (below this chassis's floor the EC silently runs at the floor; this parser rejects anything below every known floor)"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(MaxFanSpeedMode)}, "max", "MAX", "Control Max Fan Speed Mode", "Max Fan Speed Mode"})
                 .arg_required_else_help(true),
         )
@@ -273,17 +273,24 @@ impl Cli for feature::Fan {
                         println!("Fan: {:?}", fan_mode)
                     }
                     Ok((_, fan_mode @ FanMode::Manual)) => {
-                        println!(
-                            "Fan set to: {:?}@{:?} RPM",
-                            fan_mode,
-                            command::get_fan_rpm(device, FanZone::Zone1)
-                        )
+                        // The set-point register reads back whatever was written, even a
+                        // value the EC is ignoring, so it is labelled as a set point, never
+                        // as the speed.
+                        match command::get_fan_rpm(device, FanZone::Zone1) {
+                            Ok(0) => println!("Fan: {:?} (no set point yet)", fan_mode),
+                            Ok(rpm) => println!("Fan: {:?}, set point {} RPM", fan_mode, rpm),
+                            Err(e) => println!("Fan: {:?}, set point unreadable: {}", fan_mode, e),
+                        }
                     }
                     Err(e) => println!("{}", e),
                 };
+                // Both zones, through the same trust rule the tray uses.
+                let (fan, trusted) = librazer::state::sample_fan_rpm(device, 3)?;
                 println!(
-                    "Fan actual: {:?} RPM",
-                    command::get_fan_actual_rpm(device, FanZone::Zone1)
+                    "Fan actual: {}/{} RPM{}",
+                    fan.fan1,
+                    fan.fan2,
+                    if trusted { "" } else { " (unconfirmed read)" }
                 );
                 Ok(())
             }
@@ -386,6 +393,9 @@ struct JsonStatus {
     fan_mode: &'static str,
     fan_setpoint_rpm: Option<u16>,
     fan_actual_rpm: [u16; 2],
+    /// False when no read could be confirmed: a lone-zero zone never cleared, or a stop
+    /// was seen only once. One raw read is wrong about 3 times in 10 on this hardware.
+    fan_actual_trusted: bool,
     keyboard_brightness_percent: u8,
     logo_mode: String,
     /// Keyboard backlight effect, read back from the EC (0x0f82). `null` when the device
@@ -399,7 +409,7 @@ fn print_json(device: &device::Device) -> Result<()> {
     use librazer::state::{brightness_to_percent, DeviceState, FanSpeed, PerfMode};
 
     let s = DeviceState::read(device)?;
-    let fan = librazer::state::get_fan_rpm(device)?;
+    let (fan, fan_actual_trusted) = librazer::state::sample_fan_rpm(device, 3)?;
 
     let (perf_mode, cpu_boost, gpu_boost) = match s.perf_mode {
         PerfMode::Battery => ("Battery", None, None),
@@ -428,6 +438,7 @@ fn print_json(device: &device::Device) -> Result<()> {
         fan_mode,
         fan_setpoint_rpm,
         fan_actual_rpm: [fan.fan1, fan.fan2],
+        fan_actual_trusted,
         keyboard_brightness_percent: brightness_to_percent(s.lights_mode.keyboard_brightness),
         logo_mode: format!("{:?}", s.lights_mode.logo_mode),
         keyboard_effect: s.lights_mode.keyboard_effect.map(|e| format!("{e:?}")),
@@ -635,7 +646,7 @@ fn real_main() -> Result<()> {
                 pid: *submatches.get_one::<u16>("pid").unwrap(),
                 features: feature::ALL_FEATURES,
                 init_cmds: &[],
-                fan_rpm_range: (2200, 5000), // unknown chassis: safe modern-Blade default; EC clamps
+                fan_rpm_range: (2200, 5000), // unknown chassis: same default as matching.rs
             })?;
             handle(&device, submatches, &cli_features)?;
         }

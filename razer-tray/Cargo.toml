@@ -10,6 +10,8 @@ description = "A tray icon for controlling Razer Blade features without Synapse.
 [dependencies]
 anyhow = "1.0.80"
 confy = "0.6.0"
+# Parsing and writing the config ourselves (see config.rs): confy's store is not atomic.
+toml = "0.8.2"
 librazer = { path = "../librazer" }
 log = "0.4.21"
 log4rs = "1.3.0"

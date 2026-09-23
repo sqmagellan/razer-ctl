@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod config;
 mod menu;
 mod platform;
 mod program;
@@ -23,29 +24,39 @@ use sysinfo::{ProcessExt, SystemExt};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering;
 
-use program::ProgramState;
-use state::{get_fan_rpm, ConfigState, DeviceState};
+use program::{Pick, ProgramState};
+use state::{ActionSession, DeviceState};
 
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
+/// `%LOCALAPPDATA%\razer-tray\razer-tray.log`. It used to live in `%TEMP%`, where Storage
+/// Sense and disk-cleanup tools delete it, which is the worst place for the one file that
+/// explains what the tray did.
 pub fn get_logging_file_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{}.log", PKG_NAME))
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(PKG_NAME).join(format!("{}.log", PKG_NAME))
 }
 
 fn init_logging_to_file() -> Result<()> {
     use log4rs::append::rolling_file::policy::compound::{
-        roll::delete::DeleteRoller, trigger::size::SizeTrigger, CompoundPolicy,
+        roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
     };
+    let path = get_logging_file_path();
+    // 1 MiB x 4 files. The old policy deleted the whole 10 MiB log on rollover, so the
+    // history that explains a problem vanished exactly when it got long.
+    let pattern = path.with_extension("{}.log");
     let policy = CompoundPolicy::new(
-        Box::new(SizeTrigger::new(10 << 20)),
-        Box::new(DeleteRoller::new()),
+        Box::new(SizeTrigger::new(1 << 20)),
+        Box::new(FixedWindowRoller::builder().build(&pattern.to_string_lossy(), 3)?),
     );
 
     let logfile = log4rs::append::rolling_file::RollingFileAppender::builder()
         .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
             "{h({d(%Y-%m-%d %H:%M:%S)(local)} - {l}: {m}{n})}",
         )))
-        .build(get_logging_file_path(), Box::new(policy))?;
+        .build(path, Box::new(policy))?;
 
     let config = log4rs::config::Config::builder()
         .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
@@ -54,7 +65,7 @@ fn init_logging_to_file() -> Result<()> {
                 .appender("logfile")
                 // Info covers every meaningful event (startup, device detect, menu actions,
                 // enforce, profile switches, display state); Trace adds HID-level noise and
-                // is only useful while debugging. Bounded to 10 MiB, wiped on rollover.
+                // is only useful while debugging. Bounded to 4 MiB across the rotation.
                 .build(log::LevelFilter::Info),
         )?;
 
@@ -62,71 +73,30 @@ fn init_logging_to_file() -> Result<()> {
     Ok(())
 }
 
-/// Load the config, preserving it if it can't be parsed.
-///
-/// `confy::load(..).unwrap_or_default()` is a data-loss bug, not a convenience. A config
-/// the current schema can't read becomes silent defaults, and the tray then persists those
-/// defaults over the user's file on the next change -- every saved profile gone, nothing
-/// said. That is not hypothetical: it happened during testing when a hand-edited file had a
-/// duplicate `app_profiles` key, and the AC profile was reset to defaults and written back
-/// within seconds.
-///
-/// So: complain loudly, and keep a copy the user can fix or salvage. The FIRST bad file is
-/// the one preserved -- a later restart shouldn't overwrite the evidence with a file that
-/// is merely bad in the same way.
-fn load_config(path: &std::path::Path) -> ConfigState {
-    match confy::load::<ConfigState>(PKG_NAME, None) {
-        Ok(config) => config,
-        Err(e) => {
-            log::error!("config at {} could not be parsed: {e}", path.display());
-            let salvage = path.with_extension("toml.invalid");
-            if salvage.exists() {
-                log::error!(
-                    "an earlier unparseable config is already preserved at {};                      continuing with defaults",
-                    salvage.display()
-                );
-            } else {
-                match std::fs::copy(path, &salvage) {
-                    Ok(_) => log::error!(
-                        "kept a copy at {} -- fix that file and restart, or delete it to                          accept defaults. Continuing with defaults for now.",
-                        salvage.display()
-                    ),
-                    Err(copy_err) => log::error!(
-                        "could not preserve the unparseable config ({copy_err});                          continuing with defaults"
-                    ),
-                }
+/// Open the device, retrying for a while: the tray autostarts at login, which is exactly
+/// when the HID stack is least likely to be ready.
+fn detect_with_retry() -> Result<device::Device> {
+    let mut delay = std::time::Duration::from_secs(1);
+    let mut last = None;
+    for attempt in 1..=6 {
+        match device::Device::detect() {
+            Ok(d) => return Ok(d),
+            Err(e) => {
+                log::warn!("device detect attempt {attempt} failed: {e:?}");
+                last = Some(e);
             }
-            ConfigState::default()
         }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(8));
     }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("device detection failed")))
 }
 
-fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<ProgramState> {
-    let config_path = confy::get_configuration_file_path(PKG_NAME, None)?;
-    log::info!("loading config file {}", config_path.display());
-    let config: ConfigState = load_config(&config_path);
-    let fan_actual = get_fan_rpm(device)?;
-    let mut state = ProgramState::new(
-        config.ac_state,
-        fan_actual,
-        config.enforce,
-        config.reassert_on_resume,
-        config.app_profiles, // moves the Vec; keep as the last read of `config`
-        device.info().fan_rpm_range, // per-chassis fan bounds, from the descriptor
-    )?;
-    state.ac_power = platform::get_power_state()?;
-    state.ac_state = config.ac_state;
-    state.battery_state = config.battery_state;
-    if !state.ac_power {
-        state.device_state = state.battery_state
-    }
-    state.update(tray_icon, state.device_state, device)?;
-    // The apply() inside update() pushed the stored profile, but a just-booted EC can
-    // ACK a perf-mode write without transitioning (and retains its last mode across a
-    // reboot). Read back and re-assert once if they disagree, so the tray isn't left
-    // showing a profile the device never actually entered. See reconcile_startup docs.
-    state.reconcile_startup(tray_icon, device);
-    Ok(state)
+/// Backoff for resync attempts after a failed exchange: 2 s doubling to 60 s. The old
+/// recovery slept 1 s at a time INSIDE the event-loop callback until it succeeded, so a
+/// lasting failure froze the menu, hover and Quit.
+fn resync_backoff(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((2u64 << failures.min(5)).min(60))
 }
 
 fn main() -> Result<()> {
@@ -136,10 +106,37 @@ fn main() -> Result<()> {
         gtk::init().map_err(|_| anyhow::anyhow!("Failed to initialize GTK"))?;
     }
 
+    // Logging first: every line before this point used to be lost, including the
+    // "another instance is running" exit and any startup failure.
+    if let Err(e) = init_logging_to_file() {
+        eprintln!("razer-tray: could not open the log: {e:?}");
+    }
+
+    // Single instance before any thread or subprocess is started.
+    let instance = match SingleInstance::new("razer-tray") {
+        Ok(i) => Some(i),
+        Err(e) => {
+            log::warn!("single-instance check unavailable ({e}); continuing");
+            None
+        }
+    };
+    if instance.as_ref().is_some_and(|i| !i.is_single()) {
+        log::info!("Another instance is already running. Exiting.");
+        return Ok(());
+    }
+
+    log::info!(
+        "{0} starting {1} {2} {0}",
+        "==".repeat(20),
+        PKG_NAME,
+        env!("CARGO_PKG_VERSION")
+    );
+
     #[cfg(target_os = "windows")]
     platform::efficiency_mode();
 
-    // Start the display-state monitor (event-driven; gates always-on backlight).
+    // Start the display-state monitor (event-driven; gates always-on backlight and
+    // signals wakes).
     #[cfg(target_os = "windows")]
     platform::spawn_display_state_monitor();
 
@@ -148,17 +145,7 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     platform::spawn_gpu_telemetry_monitor();
 
-    // Create a named mutex (unique string for your app)
-    let instance = SingleInstance::new("razer-tray").unwrap();
-    if !instance.is_single() {
-        log::info!("Another instance is already running. Exiting.");
-        return Ok(());
-    }
-
-    init_logging_to_file()?;
-    log::info!("{0} starting {1} {0}", "==".repeat(20), PKG_NAME);
-
-    let device = match device::Device::detect() {
+    let mut device = match detect_with_retry() {
         Ok(d) => {
             log::info!(
                 "detected device: {} (0x{:04X})",
@@ -177,6 +164,23 @@ fn main() -> Result<()> {
         }
     };
 
+    // Device preparation BEFORE the profile is applied, and never fatal. It used to run
+    // after init(), so an init failure skipped it, and on models with init sequences the
+    // first apply and reconcile ran against an uninitialised device.
+    for element in device.info().init_cmds {
+        if let Err(e) = command::send_command(&device, *element, &[0, 0, 0, 0]) {
+            log::warn!("init command {element:#06x} failed: {e:?}");
+        }
+    }
+    // Ensure the keyboard is in Normal (hardware) device mode, never Razer "driver mode".
+    // The 0x0004 command's Enable value (0x03) is driver mode, which hands key handling to
+    // a host driver and disables the EC's native Fn media keys (brightness/volume/kbd
+    // backlight). A previous build used it for "always-on"; we never enter it -- always-on
+    // is a Normal-mode keep-alive (see the keep-alive block in the event loop below).
+    if let Err(e) = command::set_lights_always_on(&device, LightsAlwaysOn::Disable) {
+        log::warn!("could not force Normal device mode: {:?}", e);
+    }
+
     // Left-click is OURS: it cycles the perf mode (see the tray-event handler below).
     // The menu belongs to right-click.
     //
@@ -190,7 +194,31 @@ fn main() -> Result<()> {
         .with_menu_on_left_click(false)
         .build()?;
 
-    let mut state: ProgramState = init(&mut tray_icon, &device)?;
+    let mut config_file = config::ConfigFile::open()?;
+    log::info!("loading config file {}", config_file.path().display());
+    let config = config_file.load();
+    let mut state = ProgramState::new(
+        config,
+        config_file,
+        platform::get_power_state(true),
+        device.info().fan_rpm_range, // per-chassis fan bounds, from the descriptor
+    )?;
+    tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+
+    // First contact. A failure here no longer ends the process: the tray comes up showing
+    // the saved profile and the event loop keeps retrying with backoff. A single HID error
+    // at login used to exit the tray with nothing in the log.
+    let mut sync_failures: u32 = 0;
+    let mut next_sync_at = std::time::Instant::now();
+    match state.sync(&mut tray_icon, &device) {
+        Ok(()) => {}
+        Err(e) => {
+            log::error!("startup sync failed, will retry: {e:?}");
+            sync_failures = 1;
+            next_sync_at = std::time::Instant::now() + resync_backoff(0);
+            state.refresh_ui(&tray_icon);
+        }
+    }
 
     let menu_channel = MenuEvent::receiver();
     let tray_channel = TrayIconEvent::receiver();
@@ -210,31 +238,46 @@ fn main() -> Result<()> {
     let mut last_hover_refresh = std::time::Instant::now();
 
     // "Actions" (app-triggered profiles). We scan the process list on a slow cadence
-    // (only when rules exist) and remember which rule is currently active so we act on
-    // *transitions* -- apply on launch, revert on exit -- and otherwise leave the user's
-    // manual selection alone. A persistent System avoids re-enumerating everything each
-    // scan.
+    // (only when rules exist) and act on *transitions* -- apply on launch, revert on
+    // exit. The running session lives in `state.action`. A persistent System avoids
+    // re-enumerating everything each scan.
     let mut last_app_scan_timestamp = std::time::Instant::now();
-    let mut active_app_rule: Option<usize> = None;
     let mut app_scan_sys = sysinfo::System::new();
+    let mut last_config_check = std::time::Instant::now();
 
-    // loop through the default start up sequence to initialise the device.
-    for element in device.info().init_cmds {
-        command::send_command(&device, *element, &[0, 0, 0, 0])?;
-    }
-
-    // Ensure the keyboard is in Normal (hardware) device mode, never Razer "driver mode".
-    // The 0x0004 command's Enable value (0x03) is driver mode, which hands key handling to
-    // a host driver and disables the EC's native Fn media keys (brightness/volume/kbd
-    // backlight). A previous build used it for "always-on"; we never enter it -- always-on
-    // is a Normal-mode keep-alive (see the keep-alive block in the event loop below).
-    if let Err(e) = command::set_lights_always_on(&device, LightsAlwaysOn::Disable) {
-        log::warn!("could not force Normal device mode: {:?}", e);
-    }
+    // Wake reconciles pending: (when, why). A wake schedules a read at +3 s and a second at
+    // +15 s -- the second catches an EC that settles late (the G-Helper #5682 lesson: one
+    // re-apply at the instant of resume can lose to the firmware's own post-wake writes).
+    let mut wake_checks: Vec<(std::time::Instant, String)> = Vec::new();
 
     event_loop.run(move |_, _, control_flow| {
         let now = std::time::Instant::now();
         *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
+
+        // Retry a failed exchange without blocking the loop. After a few failures the
+        // handle itself may be stale (the device re-enumerated across a resume), so reopen.
+        if state.needs_sync && now >= next_sync_at {
+            if sync_failures >= 3 {
+                match device::Device::detect() {
+                    Ok(d) => {
+                        log::info!("reopened the device");
+                        device = d;
+                    }
+                    Err(e) => log::warn!("device reopen failed: {e:?}"),
+                }
+            }
+            match state.sync(&mut tray_icon, &device) {
+                Ok(()) => {
+                    log::info!("resync succeeded after {sync_failures} failure(s)");
+                    sync_failures = 0;
+                }
+                Err(e) => {
+                    log::warn!("resync failed: {e:?}");
+                    next_sync_at = now + resync_backoff(sync_failures);
+                    sync_failures += 1;
+                }
+            }
+        }
 
         if let Err(e) = (|| -> Result<()> {
             // Drain, for the same reason as the tray channel below: one event per ~1s tick
@@ -270,10 +313,13 @@ fn main() -> Result<()> {
                         state.event_handlers = h;
                         tray_icon.set_menu(Some(Box::new(state.menu.clone())));
                     }
-                } else {
-                    let new_device_state = state.handle_event(event.id.as_ref())?;
+                } else if let Some(new_device_state) = state.handle_event(event.id.as_ref()) {
                     log::info!("new_device_state 1 {:?}", new_device_state);
-                    state.update(&mut tray_icon, new_device_state, &device)?;
+                    state.update(&mut tray_icon, new_device_state, Pick::Menu, &device)?;
+                } else {
+                    // Predefined items (About, Quit) and stale ids from a menu that was
+                    // rebuilt while open. Not an error: it used to trigger a full re-init.
+                    log::debug!("no handler for menu event {:?}", event.id);
                 }
             }
 
@@ -310,73 +356,48 @@ fn main() -> Result<()> {
             if clicked {
                 let new_device_state = state.get_next_perf_mode();
                 log::info!("left-click: cycling perf mode to {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
+                state.update(&mut tray_icon, new_device_state, Pick::Cycle, &device)?;
             } else if hovered && now > last_hover_refresh + std::time::Duration::from_millis(500) {
                 last_hover_refresh = now;
                 if let Ok(observed) = DeviceState::read(&device) {
                     state.observed = observed;
                 }
                 state.refresh_fan(&device);
-                let _ = tray_icon.set_icon(Some(state.icon()));
-                if let Ok(tooltip) = state.tooltip() {
-                    crate::program::set_tooltip_logged(&tray_icon, &tooltip);
-                }
+                state.refresh_ui(&tray_icon);
             }
 
-            state.ac_power = platform::get_power_state()?;
-            // Pass the active Actions rule (if any) so an app override isn't seen as
-            // drift from the saved profile and reverted a tick later. When a rule is
-            // active the switch is TRANSIENT: the target includes the overlay, and
-            // persisting it would bake the app's settings into the saved AC/battery
-            // profile we're supposed to revert to when the app exits.
-            let active_rule = active_app_rule
-                .and_then(|i| state.app_profiles.get(i))
-                .cloned();
-            if let Some(new_device_state) = state::profile_for_power(
-                state.ac_power,
-                &state.device_state,
-                &state.ac_state,
-                &state.battery_state,
-                active_rule.as_ref(),
-            ) {
-                log::info!("new_device_state 3 {:?}", new_device_state);
-                if active_rule.is_some() {
-                    state.update_transient(&mut tray_icon, new_device_state, &device)?;
+            // Power source. An Action session moves its picks to the new source's profile;
+            // an app scan is forced so a rule restricted to the other source retires now
+            // rather than up to 5 s later.
+            let ac_now = platform::get_power_state(state.ac_power);
+            if ac_now != state.ac_power {
+                log::info!("power source: {}", if ac_now { "AC" } else { "battery" });
+                let (old_base, new_base) = if ac_now {
+                    (state.battery_state, state.ac_state)
                 } else {
-                    state.update(&mut tray_icon, new_device_state, &device)?;
-                }
-            }
-
-            // Resume-from-sleep reassert, driven by the OS power broadcast
-            // (PBT_APMRESUMESUSPEND) rather than by noticing a gap in our own ticks.
-            // The old heuristic -- "a tick gap over 30s means we were suspended" --
-            // misfired on this very machine: the tray runs at IDLE priority with
-            // EcoQoS throttling, so a busy system starved the loop for 54.9s while
-            // awake and it logged a resume that never happened. See platform::RESUMED.
-            if platform::take_resumed() {
-                log::info!("resume detected (OS power broadcast)");
-                // A just-woken EC can drop the perf mode the same way a just-booted one
-                // does (the startup-reconcile case). Re-assert the intended enforced
-                // fields on wake. This fires whenever `reassert_on_resume` is set
-                // (the default) OR `enforce` is on -- previously it was enforce-only, so
-                // the common case (enforce off) silently kept whatever the EC reset to.
-                // The AC/battery switch above already corrected `device_state` for the
-                // current power source, so re-asserting current intent is right.
-                if state.reassert_on_resume || state.enforce {
-                    log::info!("re-asserting intended state after resume");
-                    if let Err(e) = state.device_state.enforce_to(&device) {
-                        log::warn!("resume re-assert failed: {:?}", e);
+                    (state.ac_state, state.battery_state)
+                };
+                if let Some(session) = &mut state.action {
+                    if let Some(rule) = state.app_profiles.get(session.rule) {
+                        session.power_changed(rule, &old_base, &new_base, state.fan_rpm_range);
                     }
                 }
+                state.ac_power = ac_now;
+                last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
+            }
+
+            // Hand edits to the config take effect without a restart (Action rules can
+            // only be written by hand).
+            if now > last_config_check + std::time::Duration::from_secs(5) {
+                last_config_check = now;
+                state.reload_config_if_changed();
             }
 
             // "Actions": app-triggered profile switches. Only runs when rules are
             // configured (empty by default). Scans the process list on a slow cadence and
-            // acts only on *transitions* -- so it applies a rule's mode when its process
-            // appears and reverts to the power-source profile when the last match exits,
-            // but never re-applies in between (a manual pick mid-session stays put). Uses
-            // update_transient so the override never overwrites the saved AC/battery
-            // profile we revert to.
+            // acts only on *transitions*: a rule's session starts when its process appears
+            // and ends when the last match exits. Picks made in between hold for the
+            // session (see ActionSession).
             if !state.app_profiles.is_empty()
                 && now > last_app_scan_timestamp + std::time::Duration::from_secs(5)
             {
@@ -387,47 +408,73 @@ fn main() -> Result<()> {
                     .values()
                     .map(|p| p.name().to_string())
                     .collect();
-                // Power source is part of selection now: a rule may be restricted to AC
-                // or battery, so an AC/battery transition can change which rule applies
-                // even when the running process set hasn't changed at all.
+                // Power source is part of selection: a rule may be restricted to AC or
+                // battery, so an AC/battery transition can change which rule applies even
+                // when the running process set hasn't changed at all.
                 let matched =
                     state::matching_app_profile(&state.app_profiles, &running, state.ac_power);
-                if matched != active_app_rule {
+                if matched != state.action.map(|a| a.rule) {
                     match matched {
                         Some(i) => {
-                            let rule = state.app_profiles[i].clone();
+                            let rule = &state.app_profiles[i];
                             // Overlay the rule onto the user's saved power-source profile
                             // (not any prior transient), so unset fields fall back to what
                             // they configured for AC/battery.
-                            let base = if state.ac_power {
-                                state.ac_state
-                            } else {
-                                state.battery_state
-                            };
-                            let target = rule.overlay(&base);
+                            let session = ActionSession::start(
+                                i,
+                                rule,
+                                &state.saved_profile(),
+                                state.fan_rpm_range,
+                            );
                             log::info!(
                                 "action: '{}' running (priority {}) -> {:?}",
                                 rule.label(),
                                 rule.priority,
-                                target
+                                session.effective
                             );
-                            state.update_transient(&mut tray_icon, target, &device)?;
+                            state.action = Some(session);
                         }
                         None => {
-                            let target = if state.ac_power {
-                                state.ac_state
-                            } else {
-                                state.battery_state
-                            };
                             log::info!(
                                 "action: no rule app running -> reverting to {:?}",
-                                target.perf_mode
+                                state.saved_profile().perf_mode
                             );
-                            state.update_transient(&mut tray_icon, target, &device)?;
+                            state.action = None;
                         }
                     }
-                    active_app_rule = matched;
                 }
+            } else if state.app_profiles.is_empty() {
+                state.action = None;
+            }
+
+            // Converge the device on what it should be now: the Action session, else the
+            // saved profile for the power source. Transient, because neither needs saving.
+            let target = state.target();
+            if target != state.device_state {
+                log::info!("new_device_state 3 {:?}", target);
+                state.update_transient(&mut tray_icon, target, &device)?;
+            }
+
+            // Wake handling, rebuilt around what Modern Standby actually delivers. The Blade
+            // sleeps in S0 Low Power Idle: 69 standby cycles in 17 days against 5 real
+            // resumes, and the resume message arrived for only some of those. A wake is
+            // therefore a resume message OR the display coming back after a long off, and
+            // it schedules READS; a write happens only when a read shows drift.
+            if let Some(source) = platform::take_wake() {
+                log::info!("wake detected ({source}); reconciling at +3 s and +15 s");
+                wake_checks.push((
+                    now + std::time::Duration::from_secs(3),
+                    format!("wake ({source})"),
+                ));
+                wake_checks.push((
+                    now + std::time::Duration::from_secs(15),
+                    format!("wake +15s ({source})"),
+                ));
+            }
+            if let Some(pos) = wake_checks.iter().position(|(at, _)| now >= *at) {
+                let (_, reason) = wake_checks.remove(pos);
+                let write = state.reassert_on_resume || state.enforce;
+                state.reconcile(&mut tray_icon, &device, &reason, write);
             }
 
             // Keyboard always-on (opt-in) keep-alive. The keyboard's EC fades the
@@ -471,47 +518,55 @@ fn main() -> Result<()> {
             {
                 last_device_state_check_timestamp = now;
                 last_polled_input_tick = input_tick;
-                if let Ok(observed) = DeviceState::read(&device) {
-                    state.observed = observed;
+                match DeviceState::read(&device) {
+                    Ok(observed) => {
+                        state.observed = observed;
 
-                    // Adopt an externally-made keyboard-brightness change (e.g. the
-                    // hardware Fn brightness keys) into the app's own state. We also
-                    // write it into the active AC/battery profile and persist it, so
-                    // (a) the menu checkmark reflects it, (b) it survives an AC/battery
-                    // switch, and (c) the reconciliation step above sees device_state
-                    // == the active profile and does NOT re-apply -- no tug-of-war.
-                    let observed_brightness = state.observed.lights_mode.keyboard_brightness;
-                    if observed_brightness != state.device_state.lights_mode.keyboard_brightness {
-                        state.device_state.lights_mode.keyboard_brightness = observed_brightness;
-                        if state.ac_power {
-                            state.ac_state.lights_mode.keyboard_brightness = observed_brightness;
-                        } else {
-                            state.battery_state.lights_mode.keyboard_brightness =
-                                observed_brightness;
-                        }
-                        if let Err(e) = state.persist() {
-                            log::warn!("failed to persist adopted brightness: {:?}", e);
-                        }
-                        if let Ok((menu, handlers)) =
-                            menu::build(&state.device_state, state.enforce, state.fan_rpm_range)
+                        // Adopt an externally-made keyboard-brightness change (e.g. the
+                        // hardware Fn brightness keys) into the app's own state. We also
+                        // write it into the active AC/battery profile and persist it, so
+                        // (a) the menu checkmark reflects it, (b) it survives an AC/battery
+                        // switch, and (c) the convergence step above sees device_state
+                        // == the target and does NOT re-apply -- no tug-of-war.
+                        let observed_brightness = state.observed.lights_mode.keyboard_brightness;
+                        if observed_brightness != state.device_state.lights_mode.keyboard_brightness
                         {
-                            state.menu = menu;
-                            state.event_handlers = handlers;
-                            tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+                            state.device_state.lights_mode.keyboard_brightness =
+                                observed_brightness;
+                            if state.ac_power {
+                                state.ac_state.lights_mode.keyboard_brightness =
+                                    observed_brightness;
+                            } else {
+                                state.battery_state.lights_mode.keyboard_brightness =
+                                    observed_brightness;
+                            }
+                            if let Some(session) = &mut state.action {
+                                session.effective.lights_mode.keyboard_brightness =
+                                    observed_brightness;
+                            }
+                            if let Err(e) = state.persist() {
+                                log::warn!("failed to persist adopted brightness: {:?}", e);
+                            }
+                            if let Ok((menu, handlers)) =
+                                menu::build(&state.device_state, state.enforce, state.fan_rpm_range)
+                            {
+                                state.menu = menu;
+                                state.event_handlers = handlers;
+                                tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+                            }
                         }
-                    }
 
-                    // Enforce (opt-in): if the real device drifted from our intended
-                    // state on a field we own -- perf mode, fan, logo, battery care --
-                    // re-assert it. This is how razer-tray wins a tug-of-war with
-                    // Synapse. Brightness is deliberately excluded (it stays on the
-                    // adopt path above so the Fn keys keep working). It rides the same
-                    // input-gated read above, so it adds no idle cost and reasserts
-                    // whenever you're active (incl. right after you return to the
-                    // machine); the resume-from-sleep reassert covers the wake case.
-                    if state.enforce {
-                        let drifted = state.observed.enforced_fields_differ(&state.device_state);
-                        if drifted {
+                        // Enforce (opt-in): if the real device drifted from our intended
+                        // state on a field we own -- perf mode, fan, logo, battery care --
+                        // re-assert it. This is how razer-tray wins a tug-of-war with
+                        // Synapse. Brightness is deliberately excluded (it stays on the
+                        // adopt path above so the Fn keys keep working). It rides the same
+                        // input-gated read above, so it adds no idle cost and reasserts
+                        // whenever you're active (incl. right after you return to the
+                        // machine); the wake reconcile covers the wake case.
+                        if state.enforce
+                            && state.observed.enforced_fields_differ(&state.device_state)
+                        {
                             log::info!("enforce: device drifted; re-asserting intended state");
                             if let Err(e) = state.device_state.enforce_to(&device) {
                                 log::warn!("enforce: re-assert failed: {:?}", e);
@@ -526,12 +581,19 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                    // An interrupted two-zone write leaves the zones disagreeing, and every
+                    // read fails until something rewrites both. Repair it from intent,
+                    // regardless of Enforce: this is a broken state, not a user choice.
+                    Err(e)
+                        if e.downcast_ref::<librazer::error::PerfZonesDiverged>()
+                            .is_some() =>
+                    {
+                        state.reconcile(&mut tray_icon, &device, "mirror (zones diverged)", true);
+                    }
+                    Err(_) => {}
                 }
                 state.refresh_fan(&device);
-                let _ = tray_icon.set_icon(Some(state.icon()));
-                if let Ok(tooltip) = state.tooltip() {
-                    crate::program::set_tooltip_logged(&tray_icon, &tooltip);
-                }
+                state.refresh_ui(&tray_icon);
             }
 
             // Always-on backlight is the Normal-mode keep-alive above (a periodic read
@@ -542,23 +604,16 @@ fn main() -> Result<()> {
 
             Ok(())
         })() {
-            loop {
-                log::error!("trying to recover from: {:?}", e);
-                match init(&mut tray_icon, &device) {
-                    Ok(new_state) => {
-                        state = new_state;
-                        break;
-                    }
-                    Err(e) => {
-                        log::error!("failed to recover: {:?}", e);
-                        // Sleep between attempts. We're inside this inner `loop`, so we
-                        // never return to the event loop until init() succeeds -- which
-                        // means `control_flow` has no effect here. Without a sleep a
-                        // persistent failure (e.g. the device unplugged) would busy-spin
-                        // this thread, pegging a core and spamming HID reads + the log.
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                    }
-                }
+            // One failed exchange. The intent in `state` is kept as-is (including a running
+            // Action) and the retry at the top of the loop re-applies it. The old handler
+            // re-read the config and re-applied the SAVED profile, which reverted a change
+            // whose only failure was the read that followed it, and it blocked inside this
+            // callback until the device answered.
+            log::error!("tick failed, will resync: {:?}", e);
+            if !state.needs_sync {
+                state.needs_sync = true;
+                next_sync_at = now + resync_backoff(0);
+                sync_failures = sync_failures.max(1);
             }
         }
     })

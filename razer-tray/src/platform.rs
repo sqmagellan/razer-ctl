@@ -27,28 +27,42 @@ use windows::Win32::System::Threading::{
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
 };
 
+/// Whether the machine is on AC. `previous` is returned when Windows cannot say.
+///
+/// `ACLineStatus` is 0 (battery), 1 (AC) or 255 (unknown). Unknown, and a failed call, used
+/// to count as AC, which could put an AC performance profile on a machine running on
+/// battery. Keeping the last known answer is the only choice that can't flip the profile
+/// on a non-answer.
 #[cfg(target_os = "windows")]
-pub fn get_power_state() -> Result<bool> {
-    let mut ac_power: bool = true;
+pub fn get_power_state(previous: bool) -> bool {
     // SAFETY: `status` is a fully-default-initialized SYSTEM_POWER_STATUS; we pass a
     // valid &mut to it and GetSystemPowerStatus only writes through that pointer.
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         match GetSystemPowerStatus(&mut status) {
             Ok(()) => match status.ACLineStatus {
-                0 => ac_power = false,
-                _ => ac_power = true,
+                0 => false,
+                1 => true,
+                other => {
+                    log::debug!("ACLineStatus {other} (unknown); keeping {previous}");
+                    previous
+                }
             },
             Err(e) => {
                 log::warn!("Failed to get power status: {:?}", e);
+                previous
             }
         }
     }
-    Ok(ac_power)
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_power_state() -> Result<bool> {
+pub fn get_power_state(previous: bool) -> bool {
+    linux_power_state().unwrap_or(previous)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_power_state() -> Result<bool> {
     // Try AC adapter first
     if let Ok(online) = std::fs::read_to_string("/sys/class/power_supply/AC/online")
         .or_else(|_| std::fs::read_to_string("/sys/class/power_supply/AC0/online"))
@@ -65,9 +79,7 @@ pub fn get_power_state() -> Result<bool> {
         return Ok(status == "Charging" || status == "Full" || status == "Not charging");
     }
 
-    // Default to AC power if we can't detect
-    log::warn!("Could not detect power state, assuming AC power");
-    Ok(true)
+    anyhow::bail!("could not detect the power state")
 }
 
 #[cfg(target_os = "windows")]
@@ -427,8 +439,60 @@ pub fn spawn_gpu_telemetry_monitor() {
     });
 }
 
-/// Set when Windows tells us the system has resumed from sleep. The event loop
-/// consumes (and clears) it to trigger the profile re-assert.
+/// What woke the machine, as far as the tray can tell. See [`take_wake`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WakeSource {
+    /// A `PBT_APMRESUME*` message. On this Blade it arrives for some resumes and not
+    /// others (four hibernate-path resumes in September logged none).
+    Resume,
+    /// The console display came back on after being off for at least
+    /// [`WAKE_DISPLAY_OFF_MIN`]. This is the signal Modern Standby reliably produces: the
+    /// Blade sleeps in S0 Low Power Idle, and its standby exits never sent a resume message.
+    /// It also fires for a plain screen timeout, which is why a wake only triggers a read,
+    /// and writes only on measured drift.
+    DisplayOn,
+}
+
+impl std::fmt::Display for WakeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            WakeSource::Resume => "resume broadcast",
+            WakeSource::DisplayOn => "display on after standby/off",
+        })
+    }
+}
+
+/// How long the display must have been off before "display on" counts as a wake. Short
+/// enough to catch a lid-close standby, long enough to ignore a dim/undim.
+#[cfg(target_os = "windows")]
+pub const WAKE_DISPLAY_OFF_MIN_MS: u64 = 60_000;
+
+/// 0 = none, 1 = [`WakeSource::Resume`], 2 = [`WakeSource::DisplayOn`]. A resume wins
+/// over a display-on if both land before the loop looks.
+#[cfg(target_os = "windows")]
+static WAKE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `GetTickCount64` at the last display-off, or 0 while the display is on.
+#[cfg(target_os = "windows")]
+static DISPLAY_OFF_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The pending wake signal, if any, clearing it.
+#[cfg(target_os = "windows")]
+pub fn take_wake() -> Option<WakeSource> {
+    match WAKE.swap(0, Ordering::Relaxed) {
+        1 => Some(WakeSource::Resume),
+        2 => Some(WakeSource::DisplayOn),
+        _ => None,
+    }
+}
+
+/// No OS wake notification wired up off Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn take_wake() -> Option<WakeSource> {
+    None
+}
+
+/// Set when Windows tells us the system has resumed from sleep.
 ///
 /// This replaces a tick-gap heuristic: the loop ran once a second, and a gap over 30 s
 /// was read as "we must have been suspended". That was wrong in both directions. The
@@ -438,20 +502,10 @@ pub fn spawn_gpu_telemetry_monitor() {
 /// no sleep involved, firing a spurious re-assert. In the other direction a short sleep
 /// could go unnoticed. `PBT_APMRESUMESUSPEND` is the OS telling us directly, so it is
 /// both precise and free.
+/// Now it feeds [`WAKE`] together with the display-state signal.
 #[cfg(target_os = "windows")]
-pub static RESUMED: AtomicBool = AtomicBool::new(false);
-
-/// True exactly once per resume event, clearing the flag.
-#[cfg(target_os = "windows")]
-pub fn take_resumed() -> bool {
-    RESUMED.swap(false, Ordering::Relaxed)
-}
-
-/// No OS resume notification wired up off Windows; the caller keeps its previous
-/// behavior (never fires) rather than guessing from wall-clock.
-#[cfg(not(target_os = "windows"))]
-pub fn take_resumed() -> bool {
-    false
+fn signal_resume() {
+    WAKE.store(1, Ordering::Relaxed);
 }
 
 /// Window procedure for the hidden message-only window that receives power
@@ -465,10 +519,11 @@ unsafe extern "system" fn power_wnd_proc(
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::System::Power::POWERBROADCAST_SETTING;
+    use windows::Win32::System::SystemInformation::GetTickCount64;
     use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_POWERSETTINGCHANGE,
-        WM_POWERBROADCAST,
+        DefWindowProcW, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND,
+        PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST,
     };
 
     if msg == WM_POWERBROADCAST {
@@ -480,8 +535,27 @@ unsafe extern "system" fn power_wnd_proc(
                 if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
                     // Data[0]: 0 = off, 1 = on, 2 = dimmed. Treat dimmed as on.
                     let on = setting.Data[0] != 0;
-                    DISPLAY_ON.store(on, Ordering::Relaxed);
-                    log::info!("console display state: {}", if on { "on" } else { "off" });
+                    let was_on = DISPLAY_ON.swap(on, Ordering::Relaxed);
+                    let now = GetTickCount64();
+                    if on {
+                        let off_at = DISPLAY_OFF_AT_MS.swap(0, Ordering::Relaxed);
+                        let off_ms = if off_at == 0 {
+                            0
+                        } else {
+                            now.saturating_sub(off_at)
+                        };
+                        log::info!("console display state: on (off {} s)", off_ms / 1000);
+                        if !was_on && off_ms >= WAKE_DISPLAY_OFF_MIN_MS {
+                            // Don't downgrade a pending Resume.
+                            let _ =
+                                WAKE.compare_exchange(0, 2, Ordering::Relaxed, Ordering::Relaxed);
+                        }
+                    } else {
+                        if was_on {
+                            DISPLAY_OFF_AT_MS.store(now.max(1), Ordering::Relaxed);
+                        }
+                        log::info!("console display state: off");
+                    }
                 }
                 return windows::Win32::Foundation::LRESULT(1);
             }
@@ -490,11 +564,25 @@ unsafe extern "system" fn power_wnd_proc(
             // latching a bool rather than counting) means the pair collapses into one
             // re-assert.
             PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
-                RESUMED.store(true, Ordering::Relaxed);
-                log::info!("system resume broadcast received");
+                signal_resume();
+                log::info!(
+                    "system resume broadcast received ({})",
+                    if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC {
+                        "automatic"
+                    } else {
+                        "suspend"
+                    }
+                );
                 return windows::Win32::Foundation::LRESULT(1);
             }
-            _ => {}
+            // Logged, not acted on: which messages this machine sends around Modern Standby
+            // is exactly what has not been measured, and the log is the instrument.
+            PBT_APMSUSPEND => {
+                log::info!("system suspend broadcast received");
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+            PBT_APMPOWERSTATUSCHANGE => {}
+            other => log::info!("power broadcast {other:#x}"),
         }
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -537,7 +625,10 @@ pub fn spawn_display_state_monitor() {
             lpszClassName: class_name,
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        if RegisterClassW(&wc) == 0 {
+            log::warn!("display monitor: RegisterClassW failed");
+            return;
+        }
 
         let hwnd: HWND = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -609,7 +700,8 @@ pub fn spawn_display_state_monitor() {
         );
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, hwnd, 0, 0).as_bool() {
+        // GetMessageW returns -1 on error, which `as_bool()` reads as true: a busy-spin.
+        while GetMessageW(&mut msg, hwnd, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

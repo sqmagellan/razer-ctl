@@ -10,11 +10,24 @@ use librazer::device;
 use librazer::types::{BatteryCare, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
+use crate::config::ConfigFile;
 use crate::menu;
 use crate::state::{
-    brightness_to_percent, get_fan_rpm, AppProfile, ConfigState, DeviceState, FanRpm, FanRpmFilter,
-    FanSpeed, PerfMode,
+    brightness_to_percent, get_fan_rpm, ActionSession, AppProfile, ConfigState, DeviceState,
+    FanRpm, FanRpmFilter, FanSpeed, PerfMode,
 };
+
+/// How a user-chosen state was produced, because it decides what reaches the saved profile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pick {
+    /// An explicit menu choice: an absolute value the user selected.
+    Menu,
+    /// The left-click cycle: "the mode after the one shown". During an app Action the one
+    /// shown is the Action's, so the result is derived from the Action, not chosen, and it
+    /// must not be baked into the saved profile (it used to be: a click during a Hyperboost
+    /// rule saved Custom(Boost, High) as the AC profile).
+    Cycle,
+}
 
 /// UTF-16 code units the tray tooltip may occupy.
 ///
@@ -79,7 +92,9 @@ pub struct ProgramState {
     pub battery_state: DeviceState,
     pub event_handlers: HashMap<String, DeviceState>,
     pub menu: Menu,
-    pub fan_actual: FanRpm,
+    /// Last fan reading cleared for display, or `None` before any read could be trusted
+    /// (rendered as "…" rather than as a number the filter had rejected).
+    pub fan_actual: Option<FanRpm>,
     /// Debouncer standing between raw `0x0d88` reads and `fan_actual`. Individual reads
     /// are not trustworthy on this hardware -- roughly 3 in 10 carried one impossible
     /// zone -- so nothing may write `fan_actual` except [`Self::refresh_fan`].
@@ -90,82 +105,168 @@ pub struct ProgramState {
     pub reassert_on_resume: bool,
     /// "Actions" rules: while a listed process runs, force its perf mode (config-driven).
     pub app_profiles: Vec<AppProfile>,
+    /// The running Action, if any. Lives here rather than in the event loop so a resync
+    /// keeps it: it used to be a local in `main`, and recovery rebuilt everything else, so
+    /// a recovered tray thought the rule was still applied while the device had dropped it.
+    pub action: Option<ActionSession>,
     /// Usable manual-fan RPM bounds for this chassis (from `Descriptor::fan_rpm_range`),
     /// captured once at startup so menu rebuilds don't need the `Device` on hand.
     pub fan_rpm_range: (u16, u16),
+    /// The last device exchange failed; the event loop retries [`Self::sync`] with backoff
+    /// instead of blocking inside the loop.
+    pub needs_sync: bool,
+    config_file: ConfigFile,
 }
 
 impl ProgramState {
+    /// Build the tray's state from the config. No device I/O, so it cannot fail on a
+    /// device that isn't ready yet; [`Self::sync`] is the part that talks to the EC.
     pub fn new(
-        device_state: DeviceState,
-        fan_last: FanRpm,
-        enforce: bool,
-        reassert_on_resume: bool,
-        app_profiles: Vec<AppProfile>,
+        config: ConfigState,
+        config_file: ConfigFile,
+        ac_power: bool,
         fan_rpm_range: (u16, u16),
     ) -> Result<Self> {
-        let (menu, event_handlers) = menu::build(&device_state, enforce, fan_rpm_range)?;
-        // The startup sample is displayed as-is: the filter needs a second read to confirm
-        // a stop, and there is nothing better to show for the ~1 s until the next poll.
-        let mut fan_filter = FanRpmFilter::default();
-        let fan_actual = fan_filter.accept(fan_last).unwrap_or(fan_last);
+        let ac_state = config.ac_state.normalized(fan_rpm_range);
+        let battery_state = config.battery_state.normalized(fan_rpm_range);
+        let device_state = if ac_power { ac_state } else { battery_state };
+        let (menu, event_handlers) = menu::build(&device_state, config.enforce, fan_rpm_range)?;
         Ok(Self {
             device_state,
             observed: device_state,
-            ac_state: device_state,
-            battery_state: device_state,
+            ac_state,
+            battery_state,
             event_handlers,
             menu,
-            fan_actual,
-            fan_filter,
-            ac_power: true,
-            enforce,
-            reassert_on_resume,
-            app_profiles,
+            fan_actual: None,
+            fan_filter: FanRpmFilter::default(),
+            ac_power,
+            enforce: config.enforce,
+            reassert_on_resume: config.reassert_on_resume,
+            app_profiles: config.app_profiles,
+            action: None,
             fan_rpm_range,
+            needs_sync: true,
+            config_file,
         })
+    }
+
+    /// The saved profile for the current power source.
+    pub fn saved_profile(&self) -> DeviceState {
+        if self.ac_power {
+            self.ac_state
+        } else {
+            self.battery_state
+        }
+    }
+
+    /// What the device should be in right now: the running Action's session state when
+    /// one is active and allowed on this power source, else the saved profile.
+    pub fn target(&self) -> DeviceState {
+        match &self.action {
+            Some(session)
+                if self
+                    .app_profiles
+                    .get(session.rule)
+                    .is_some_and(|r| r.allowed_on(self.ac_power)) =>
+            {
+                session.effective
+            }
+            _ => self.saved_profile(),
+        }
+    }
+
+    /// Push the current intent to the device and reconcile against a read-back. Used at
+    /// startup and to recover after a failed exchange. Unlike the old recovery path it
+    /// does NOT reload the config: the intent in memory is the user's latest choice, and
+    /// reloading used to revert a change whose only failure was the read that followed it.
+    pub fn sync(
+        &mut self,
+        tray_icon: &mut tray_icon::TrayIcon,
+        device: &device::Device,
+    ) -> Result<()> {
+        self.apply_and_refresh(tray_icon, device)?;
+        self.reconcile(tray_icon, device, "sync", true);
+        self.needs_sync = false;
+        Ok(())
     }
 
     /// Poll the fans and update the displayed value, dropping reads the filter rejects.
     ///
-    /// The ONLY path that may write `fan_actual` outside `apply`. A failed HID read and a
-    /// read the filter distrusts are handled identically -- the previous value stands --
-    /// because the tooltip has no way to render "unknown" and a stale RPM is a smaller lie
-    /// than an impossible one.
+    /// The ONLY path that may write `fan_actual`. A failed HID read and a read the filter
+    /// distrusts are handled identically -- the previous value stands -- because a stale
+    /// RPM is a smaller lie than an impossible one.
     pub fn refresh_fan(&mut self, device: &device::Device) {
         if let Ok(sample) = get_fan_rpm(device) {
             if let Some(accepted) = self.fan_filter.accept(sample) {
-                self.fan_actual = accepted;
+                self.fan_actual = Some(accepted);
             }
+        }
+    }
+
+    fn config_snapshot(&self) -> ConfigState {
+        ConfigState {
+            ac_state: self.ac_state,
+            battery_state: self.battery_state,
+            enforce: self.enforce,
+            reassert_on_resume: self.reassert_on_resume,
+            app_profiles: self.app_profiles.clone(),
         }
     }
 
     /// Persist the current AC/battery profiles + enforce flag + Actions config. Single
     /// source of truth so a future ConfigState field can't be silently dropped by one of
-    /// the call sites (there used to be three inline `confy::store` literals).
-    pub fn persist(&self) -> Result<()> {
-        confy::store(
-            crate::PKG_NAME,
-            None,
-            ConfigState {
-                ac_state: self.ac_state,
-                battery_state: self.battery_state,
-                enforce: self.enforce,
-                reassert_on_resume: self.reassert_on_resume,
-                app_profiles: self.app_profiles.clone(),
-            },
-        )?;
-        Ok(())
+    /// the call sites.
+    ///
+    /// If the file was edited by hand since we last touched it, that edit is adopted
+    /// FIRST and this save is skipped: the hand edit is newer than anything in memory, and
+    /// Action rules can only be written by hand. The old code wrote straight over it on
+    /// the next Fn-key brightness change.
+    pub fn persist(&mut self) -> Result<()> {
+        if let Some(disk) = self.config_file.reload_if_changed() {
+            log::warn!("config was edited on disk; adopting the edit instead of saving over it");
+            self.adopt_config(disk);
+            return Ok(());
+        }
+        let snapshot = self.config_snapshot();
+        self.config_file.store(&snapshot)
     }
 
-    pub fn handle_event(&self, event_id: &str) -> Result<DeviceState> {
-        let next_state = self.event_handlers.get(event_id).ok_or(anyhow::anyhow!(
-            "No event handler found for event_id: {}",
-            event_id
-        ))?;
-        Ok(*next_state)
+    /// Pick up a hand edit made while the tray runs. Returns whether anything was adopted;
+    /// the event loop then re-applies [`Self::target`].
+    pub fn reload_config_if_changed(&mut self) -> bool {
+        match self.config_file.reload_if_changed() {
+            Some(disk) => {
+                log::info!("config changed on disk; reloading it");
+                self.adopt_config(disk);
+                true
+            }
+            None => false,
+        }
     }
 
+    fn adopt_config(&mut self, disk: ConfigState) {
+        self.ac_state = disk.ac_state.normalized(self.fan_rpm_range);
+        self.battery_state = disk.battery_state.normalized(self.fan_rpm_range);
+        self.enforce = disk.enforce;
+        self.reassert_on_resume = disk.reassert_on_resume;
+        if disk.app_profiles != self.app_profiles {
+            // Rule indices may have moved; let the next process scan start afresh.
+            self.action = None;
+        }
+        self.app_profiles = disk.app_profiles;
+        if let Ok((m, h)) = menu::build(&self.device_state, self.enforce, self.fan_rpm_range) {
+            self.menu = m;
+            self.event_handlers = h;
+        }
+    }
+
+    pub fn handle_event(&self, event_id: &str) -> Option<DeviceState> {
+        self.event_handlers.get(event_id).copied()
+    }
+
+    /// The next perf mode after the one on the device's intent. `normalized` in `update`
+    /// clears max fan when the cycle leaves Custom, which the plain struct update did not.
     pub fn get_next_perf_mode(&self) -> DeviceState {
         DeviceState {
             perf_mode: crate::state::next_perf_mode(self.device_state.perf_mode),
@@ -203,17 +304,30 @@ impl ProgramState {
             }
         };
 
-        let fan = match (s.fan_speed, s.max_fan) {
-            (FanSpeed::Auto, false) => "Fan Auto".to_string(),
-            (FanSpeed::Auto, true) => "Fan Auto (max)".to_string(),
-            (FanSpeed::Manual(rpm), false) => format!("Fan {rpm} set"),
-            (FanSpeed::Manual(rpm), true) => format!("Fan {rpm} set (max)"),
+        // The set-point register reads back whatever was written, even a value the EC is
+        // ignoring, so it is never shown as if it were the speed. 0 in Manual is the
+        // fresh-boot register value, not a request for 0; below the chassis floor the fan
+        // actually runs at the floor (measured: 800 set -> 2000 actual).
+        let (floor, _) = self.fan_rpm_range;
+        let fan = match s.fan_speed {
+            FanSpeed::Auto => "Fan Auto".to_string(),
+            FanSpeed::Manual(0) => "Fan Manual".to_string(),
+            FanSpeed::Manual(rpm) if rpm < floor => format!("Fan {floor} floor"),
+            FanSpeed::Manual(rpm) => format!("Fan {rpm} set"),
+        };
+        let fan = if s.max_fan {
+            format!("{fan} (max)")
+        } else {
+            fan
         };
 
         let mut fan_line = vec![(P_FAN, fan)];
         fan_line.push((
             P_FAN_RPM,
-            format!("{}/{}", self.fan_actual.fan1, self.fan_actual.fan2),
+            match self.fan_actual {
+                Some(f) => format!("{}/{}", f.fan1, f.fan2),
+                None => "…".to_string(),
+            },
         ));
 
         // dGPU telemetry, when a reading is available. Omitted entirely otherwise -- a
@@ -283,139 +397,211 @@ impl ProgramState {
             .expect("baked icon is ICON_EDGE^2 RGBA by construction")
     }
 
-    /// Apply `new_device_state` to the device and refresh the tray UI (icon/tooltip/menu)
-    /// -- WITHOUT recording it as the active AC/battery profile or persisting. This is the
-    /// shared core of `update` (which also saves) and `update_transient` (which doesn't).
+    /// Apply the current `device_state` and refresh the tray UI (icon/tooltip/menu).
+    ///
+    /// On a failed apply the display is refreshed from a fresh READ, not from intent, so
+    /// the tray shows what the device actually did; the error is returned so the event
+    /// loop schedules a [`Self::sync`] retry. UI and fan-read failures are logged, never
+    /// returned: a telemetry read that fails after a successful write used to abort the
+    /// whole update and send the tray into a full re-init that reverted the change.
     fn apply_and_refresh(
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
-        new_device_state: DeviceState,
         device: &device::Device,
     ) -> Result<()> {
-        self.device_state = new_device_state;
-        self.device_state.apply(device)?;
-        // A change is the new ground truth until Mirror reads again, so the tooltip/icon
-        // (which render from `observed`) reflect it immediately.
-        self.observed = self.device_state;
-        (self.menu, self.event_handlers) =
-            menu::build(&self.device_state, self.enforce, self.fan_rpm_range)?;
-        self.fan_actual = self
-            .fan_filter
-            .accept(get_fan_rpm(device)?)
-            .unwrap_or(self.fan_actual);
-        tray_icon.set_icon(Some(self.icon()))?;
-        set_tooltip_logged(tray_icon, &self.tooltip()?);
+        let result = self.device_state.apply(device);
+        match &result {
+            Ok(()) => self.observed = self.device_state,
+            Err(e) => {
+                log::warn!("apply failed: {e:?}");
+                if let Ok(real) = DeviceState::read(device) {
+                    self.observed = real;
+                }
+            }
+        }
+        match menu::build(&self.device_state, self.enforce, self.fan_rpm_range) {
+            Ok((m, h)) => (self.menu, self.event_handlers) = (m, h),
+            Err(e) => log::warn!("menu rebuild failed: {e:?}"),
+        }
+        self.refresh_fan(device);
+        self.refresh_ui(tray_icon);
         tray_icon.set_menu(Some(Box::new(self.menu.clone())));
-        Ok(())
+        result
     }
 
-    /// Apply a user-chosen state: it becomes the saved profile for the current power
-    /// source and is persisted. Use for menu picks, the left-click perf cycle, and
-    /// AC/battery profile switches.
+    /// Re-render icon and tooltip from `observed`.
+    pub fn refresh_ui(&self, tray_icon: &tray_icon::TrayIcon) {
+        if let Err(e) = tray_icon.set_icon(Some(self.icon())) {
+            log::warn!("set_icon failed: {e:?}");
+        }
+        if let Ok(tooltip) = self.tooltip() {
+            set_tooltip_logged(tray_icon, &tooltip);
+        }
+    }
+
+    /// Apply a user-chosen state. Its fields reach the saved profile for the current power
+    /// source (see [`Pick`] for the one exception) and are persisted BEFORE the device is
+    /// touched, so a failed write cannot lose the choice: the retry re-applies it.
+    ///
+    /// While an Action runs, the pick also holds on the device until the Action's process
+    /// exits, instead of being reverted on the next tick.
     pub fn update(
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
-        new_device_state: DeviceState,
+        picked: DeviceState,
+        pick: Pick,
         device: &device::Device,
     ) -> Result<()> {
-        // Capture what the menu was built from BEFORE applying: the difference between it
-        // and `new_device_state` is exactly the property the user picked. See
-        // `DeviceState::carry_changes` -- assigning the whole effective state here is what
-        // let an app Action's perf mode and fan leak into the saved profile.
+        let picked = picked.normalized(self.fan_rpm_range);
+        // What the menu was built from: its difference from `picked` is exactly what the
+        // user changed. See `DeviceState::carry_changes`.
         let before = self.device_state;
-        self.apply_and_refresh(tray_icon, new_device_state, device)?;
+        let for_saved = match (pick, &self.action) {
+            (Pick::Cycle, Some(_)) => DeviceState {
+                perf_mode: before.perf_mode,
+                max_fan: before.max_fan,
+                ..picked
+            },
+            _ => picked,
+        };
+        let saved = DeviceState::carry_changes(self.saved_profile(), before, for_saved)
+            .normalized(self.fan_rpm_range);
         if self.ac_power {
-            self.ac_state = DeviceState::carry_changes(self.ac_state, before, self.device_state)
+            self.ac_state = saved;
         } else {
-            self.battery_state =
-                DeviceState::carry_changes(self.battery_state, before, self.device_state)
+            self.battery_state = saved;
         }
-        self.persist()?;
-        log::info!("state updated to {:?}", new_device_state);
-        Ok(())
+        if let Some(session) = &mut self.action {
+            session.pick(picked);
+        }
+        self.device_state = picked;
+        if let Err(e) = self.persist() {
+            log::warn!("could not save the config: {e:?}");
+        }
+        log::info!("state updated to {:?} ({pick:?})", picked);
+        self.apply_and_refresh(tray_icon, device)
     }
 
-    /// Apply a *transient* override that must NOT overwrite the saved AC/battery profile
-    /// -- used by app-triggered Actions, so that when the app closes we can revert to the
-    /// profile the user actually configured. Applies + refreshes the UI but never touches
-    /// `ac_state`/`battery_state` and never persists.
+    /// Apply a state that must NOT touch the saved AC/battery profiles: an Action
+    /// starting or ending, an AC/battery switch, a config reload.
     pub fn update_transient(
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
         new_device_state: DeviceState,
         device: &device::Device,
     ) -> Result<()> {
-        self.apply_and_refresh(tray_icon, new_device_state, device)?;
-        log::info!("transient state applied {:?}", new_device_state);
-        Ok(())
+        self.device_state = new_device_state.normalized(self.fan_rpm_range);
+        log::info!("transient state applied {:?}", self.device_state);
+        self.apply_and_refresh(tray_icon, device)
     }
 
-    /// One-shot reconcile run once at startup, right after `init()`'s `apply()`.
+    /// Read the device and compare it with intent; log any drift, and re-assert when
+    /// `write` is set.
     ///
-    /// Why it's needed: `apply()` pushes the stored profile, but a freshly booted --
-    /// especially crash-rebooted -- EC can *acknowledge* a perf-mode write without
-    /// actually transitioning, and it retains its last-set mode across a reboot. That
-    /// leaves the tray showing the intended profile while the EC sits in whatever it
-    /// kept (observed 2026-07-09: tray said "Balanced" while the EC was still in the
-    /// battery profile). Because the tray never reads the device at startup -- the
-    /// first Mirror read is input-gated -- and the shipped default is `enforce = false`,
-    /// nothing corrected it until the user manually re-picked a mode.
+    /// This is the one reconcile used at startup, after a resync, and after a wake. The
+    /// wake path used to write blind on the first tick with no read-back, although the
+    /// comment beside it said a just-woken EC can ACK a write without switching. A read
+    /// first also makes the wake path measurable: every "drift after wake" line in the log
+    /// is evidence for whether the EC loses state across Modern Standby at all.
     ///
-    /// So: read the device back and, if the *enforced* fields still differ from intent,
-    /// re-assert once. This runs regardless of the `enforce` flag -- correctness at
-    /// startup is unconditional; `enforce` only governs the *continuous* tug-of-war with
-    /// Synapse. Best-effort: read/apply errors are logged and swallowed so a transient
-    /// HID hiccup can't abort startup. Refreshes the tray icon/tooltip from the real read
-    /// so the display is honest immediately, not on the next input-gated poll.
-    pub fn reconcile_startup(
+    /// Zones that disagree (an interrupted two-zone write) count as drift, and are
+    /// repaired whenever `write` is set.
+    pub fn reconcile(
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
         device: &device::Device,
+        reason: &str,
+        write: bool,
     ) {
-        let observed = match DeviceState::read(device) {
-            Ok(o) => o,
+        let drift = match DeviceState::read(device) {
+            Ok(observed) => {
+                self.observed = observed;
+                observed.enforced_fields_differ(&self.device_state)
+            }
+            Err(e)
+                if e.downcast_ref::<librazer::error::PerfZonesDiverged>()
+                    .is_some() =>
+            {
+                log::warn!("{reason}: {e}");
+                true
+            }
             Err(e) => {
-                log::warn!("startup reconcile: device read failed, skipping: {:?}", e);
+                log::warn!("{reason}: device read failed, skipping: {e:?}");
                 return;
             }
         };
-        self.observed = observed;
 
-        if observed.enforced_fields_differ(&self.device_state) {
-            log::warn!(
-                "startup reconcile: device {:?} != intended {:?}; re-asserting",
-                observed.perf_mode,
-                self.device_state.perf_mode
-            );
-            if let Err(e) = self.device_state.enforce_to(device) {
-                log::warn!("startup reconcile: re-assert failed: {:?}", e);
-            } else {
-                // Reflect the corrected device in `observed`. Prefer a fresh read;
-                // fall back to intent (keeping the real brightness, which enforce_to
-                // doesn't touch) if the read fails.
-                self.observed = DeviceState::read(device).unwrap_or_else(|_| {
-                    let brightness = self.observed.lights_mode.keyboard_brightness;
-                    let mut corrected = self.device_state;
-                    corrected.lights_mode.keyboard_brightness = brightness;
-                    corrected
-                });
-            }
+        if !drift {
+            log::info!("{reason}: device matches intended state");
         } else {
-            log::info!("startup reconcile: device matches intended state");
+            log::warn!(
+                "{reason}: device {:?}/{:?} != intended {:?}/{:?}{}",
+                self.observed.perf_mode,
+                self.observed.fan_speed,
+                self.device_state.perf_mode,
+                self.device_state.fan_speed,
+                if write {
+                    "; re-asserting"
+                } else {
+                    " (not re-asserting)"
+                }
+            );
+            if write {
+                match self.device_state.enforce_to(device) {
+                    Err(e) => log::warn!("{reason}: re-assert failed: {e:?}"),
+                    Ok(()) => match DeviceState::read(device) {
+                        Ok(real) => {
+                            if real.enforced_fields_differ(&self.device_state) {
+                                log::warn!("{reason}: still differs after re-assert: {real:?}");
+                            }
+                            self.observed = real;
+                        }
+                        Err(_) => {
+                            let brightness = self.observed.lights_mode.keyboard_brightness;
+                            self.observed = self.device_state;
+                            self.observed.lights_mode.keyboard_brightness = brightness;
+                        }
+                    },
+                }
+            }
         }
-
-        // The icon/tooltip render from `observed`; refresh them so a mismatch (or a
-        // correction) shows now rather than waiting for the next input-gated Mirror poll.
-        let _ = tray_icon.set_icon(Some(self.icon()));
-        if let Ok(tooltip) = self.tooltip() {
-            crate::program::set_tooltip_logged(tray_icon, &tooltip);
-        }
+        self.refresh_ui(tray_icon);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state(ac_state: DeviceState) -> ProgramState {
+        let mut state = ProgramState::new(
+            ConfigState {
+                ac_state,
+                ..ConfigState::default()
+            },
+            ConfigFile::open().expect("config path resolves"),
+            true,
+            (2200, 5000),
+        )
+        .expect("state builds");
+        state.fan_actual = Some(FanRpm {
+            fan1: 2600,
+            fan2: 2500,
+        });
+        state
+    }
+
+    /// A Manual set point the fan cannot run at is never displayed as the speed.
+    #[test]
+    fn the_tooltip_never_shows_an_ignored_set_point_as_the_speed() {
+        let mut state = test_state(DeviceState::default());
+        state.observed.fan_speed = FanSpeed::Manual(0);
+        assert!(state.tooltip().unwrap().contains("Fan Manual"));
+        state.observed.fan_speed = FanSpeed::Manual(800);
+        assert!(state.tooltip().unwrap().contains("Fan 2200 floor"));
+        state.fan_actual = None;
+        assert!(state.tooltip().unwrap().contains('…'));
+    }
 
     /// The layout must fit the real szTip budget for every perf mode, including the
     /// longest possible Custom label -- that mode name is what pushed the old tooltip
@@ -439,21 +625,10 @@ mod tests {
         }
 
         for mode in modes {
-            let mut state = ProgramState::new(
-                DeviceState {
-                    perf_mode: mode,
-                    ..DeviceState::default()
-                },
-                FanRpm {
-                    fan1: 2600,
-                    fan2: 2500,
-                },
-                false,
-                true,
-                Vec::new(),
-                (2200, 5000),
-            )
-            .expect("state builds");
+            let mut state = test_state(DeviceState {
+                perf_mode: mode,
+                ..DeviceState::default()
+            });
             state.observed = state.device_state;
 
             let tip = state.tooltip().expect("tooltip renders");
@@ -468,24 +643,13 @@ mod tests {
     /// The perf mode is priority 0, so it survives no matter how much has to be shed.
     #[test]
     fn the_perf_mode_is_never_dropped() {
-        let mut state = ProgramState::new(
-            DeviceState {
-                perf_mode: PerfMode::Custom(
-                    librazer::types::CpuBoost::Undervolt,
-                    librazer::types::GpuBoost::High,
-                ),
-                ..DeviceState::default()
-            },
-            FanRpm {
-                fan1: 2600,
-                fan2: 2500,
-            },
-            false,
-            true,
-            Vec::new(),
-            (2200, 5000),
-        )
-        .expect("state builds");
+        let mut state = test_state(DeviceState {
+            perf_mode: PerfMode::Custom(
+                librazer::types::CpuBoost::Undervolt,
+                librazer::types::GpuBoost::High,
+            ),
+            ..DeviceState::default()
+        });
         state.observed = state.device_state;
 
         let tip = state.tooltip().expect("tooltip renders");
