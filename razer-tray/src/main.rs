@@ -135,11 +135,6 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     platform::efficiency_mode();
 
-    // Start the display-state monitor (event-driven; gates always-on backlight and
-    // signals wakes).
-    #[cfg(target_os = "windows")]
-    platform::spawn_display_state_monitor();
-
     // Sample dGPU temp/power in the background for the tooltip. Fails open: no NVIDIA
     // tools or no dGPU means the tooltip simply omits those fields.
     #[cfg(target_os = "windows")]
@@ -196,14 +191,41 @@ fn main() -> Result<()> {
 
     let mut config_file = config::ConfigFile::open()?;
     log::info!("loading config file {}", config_file.path().display());
-    let config = config_file.load();
+    let first_run = !config_file.exists();
+    let mut config = config_file.load();
+    // A file that exists but can't be read yet (an editor or antivirus holding it at
+    // login) must not be replaced by defaults on the device either: wait a little for it.
+    for _ in 0..10 {
+        if !config_file.is_blocked() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        config = config_file.load();
+    }
+
+    // Start the display-state monitor (event-driven; gates always-on backlight, signals
+    // wakes, and owns the perf-cycle hotkey, which is why it waits for the config).
+    #[cfg(target_os = "windows")]
+    {
+        platform::set_hotkey_spec(config.cycle_perf_hotkey.clone());
+        platform::spawn_display_state_monitor();
+    }
+
     let mut state = ProgramState::new(
         config,
         config_file,
         platform::get_power_state(true),
         device.info().fan_rpm_range, // per-chassis fan bounds, from the descriptor
     )?;
-    tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+    state.warning = platform::detect_synapse();
+    state.refresh_rates = platform::refresh_rates();
+    state.rebuild_menu(Some(&tray_icon));
+    if first_run {
+        // confy used to create the file on first run; people look for it to add Actions.
+        if let Err(e) = state.persist() {
+            log::warn!("could not create the config file: {e:?}");
+        }
+    }
 
     // First contact. A failure here no longer ends the process: the tray comes up showing
     // the saved profile and the event loop keeps retrying with backoff. A single HID error
@@ -248,7 +270,7 @@ fn main() -> Result<()> {
     // Wake reconciles pending: (when, why). A wake schedules a read at +3 s and a second at
     // +15 s -- the second catches an EC that settles late (the G-Helper #5682 lesson: one
     // re-apply at the instant of resume can lose to the firmware's own post-wake writes).
-    let mut wake_checks: Vec<(std::time::Instant, String)> = Vec::new();
+    let mut wake_checks: Vec<(std::time::Instant, String, platform::WakeSource)> = Vec::new();
 
     event_loop.run(move |_, _, control_flow| {
         let now = std::time::Instant::now();
@@ -285,6 +307,8 @@ fn main() -> Result<()> {
             // distinct user choices, so each is handled rather than coalesced.
             while let Ok(event) = menu_channel.try_recv() {
                 log::info!("Menu Event {:?}", event.id);
+                // A hand edit first, so a toggle below lands on top of it.
+                state.reload_config_if_changed(&tray_icon);
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
                     log::info!("match event id");
                     platform::gpu_taskkill()?;
@@ -294,12 +318,25 @@ fn main() -> Result<()> {
                         log::warn!("Failed to persist enforce flag: {:?}", e);
                     }
                     // Rebuild the menu so the checkmark reflects the new state.
-                    let (m, h) =
-                        menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
-                    state.menu = m;
-                    state.event_handlers = h;
-                    tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+                    state.rebuild_menu(Some(&tray_icon));
                     log::info!("enforce toggled to {}", state.enforce);
+                } else if event.id == MenuId("toggle_power_mode".to_string()) {
+                    state.match_power_mode = !state.match_power_mode;
+                    if let Err(e) = state.persist() {
+                        log::warn!("Failed to persist power-mode flag: {:?}", e);
+                    }
+                    if state.match_power_mode {
+                        if let Err(e) =
+                            platform::set_windows_power_mode(state.device_state.perf_mode)
+                        {
+                            log::warn!("Windows power mode: {e:?}");
+                        }
+                    }
+                    state.rebuild_menu(Some(&tray_icon));
+                    log::info!(
+                        "match Windows power mode toggled to {}",
+                        state.match_power_mode
+                    );
                 } else if event.id == MenuId("toggle_autostart".to_string()) {
                     #[cfg(target_os = "windows")]
                     {
@@ -307,11 +344,7 @@ fn main() -> Result<()> {
                             log::warn!("Failed to toggle autostart: {:?}", e);
                         }
                         // Rebuild the menu so the checkmark reflects the new state.
-                        let (m, h) =
-                            menu::build(&state.device_state, state.enforce, state.fan_rpm_range)?;
-                        state.menu = m;
-                        state.event_handlers = h;
-                        tray_icon.set_menu(Some(Box::new(state.menu.clone())));
+                        state.rebuild_menu(Some(&tray_icon));
                     }
                 } else if let Some(new_device_state) = state.handle_event(event.id.as_ref()) {
                     log::info!("new_device_state 1 {:?}", new_device_state);
@@ -339,7 +372,8 @@ fn main() -> Result<()> {
             // Draining also coalesces: however many hover events arrived, they collapse into
             // at most one refresh, and a click supersedes them (its update() re-renders the
             // icon and tooltip anyway).
-            let mut clicked = false;
+            // The perf-cycle hotkey acts exactly like a left-click.
+            let mut clicked = platform::take_hotkey();
             let mut hovered = false;
             while let Ok(event) = tray_channel.try_recv() {
                 match event {
@@ -353,11 +387,19 @@ fn main() -> Result<()> {
                 }
             }
 
+            // While a resync is pending, the resync at the top of the loop is the only thing
+            // that talks to the device. With a stale handle every exchange costs ~2 s of
+            // retries, and polling through that froze the menu and Quit for a minute a tick.
+            let io_ok = !state.needs_sync;
+
             if clicked {
                 let new_device_state = state.get_next_perf_mode();
                 log::info!("left-click: cycling perf mode to {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, Pick::Cycle, &device)?;
-            } else if hovered && now > last_hover_refresh + std::time::Duration::from_millis(500) {
+            } else if io_ok
+                && hovered
+                && now > last_hover_refresh + std::time::Duration::from_millis(500)
+            {
                 last_hover_refresh = now;
                 if let Ok(observed) = DeviceState::read(&device) {
                     state.observed = observed;
@@ -390,7 +432,10 @@ fn main() -> Result<()> {
             // only be written by hand).
             if now > last_config_check + std::time::Duration::from_secs(5) {
                 last_config_check = now;
-                state.reload_config_if_changed();
+                if state.reload_config_if_changed(&tray_icon) {
+                    state.refresh_rates = platform::refresh_rates();
+                    state.rebuild_menu(Some(&tray_icon));
+                }
             }
 
             // "Actions": app-triggered profile switches. Only runs when rules are
@@ -450,7 +495,7 @@ fn main() -> Result<()> {
             // Converge the device on what it should be now: the Action session, else the
             // saved profile for the power source. Transient, because neither needs saving.
             let target = state.target();
-            if target != state.device_state {
+            if io_ok && target != state.device_state {
                 log::info!("new_device_state 3 {:?}", target);
                 state.update_transient(&mut tray_icon, target, &device)?;
             }
@@ -462,19 +507,34 @@ fn main() -> Result<()> {
             // it schedules READS; a write happens only when a read shows drift.
             if let Some(source) = platform::take_wake() {
                 log::info!("wake detected ({source}); reconciling at +3 s and +15 s");
+                wake_checks.retain(|(_, _, s)| *s != source);
                 wake_checks.push((
                     now + std::time::Duration::from_secs(3),
                     format!("wake ({source})"),
+                    source,
                 ));
                 wake_checks.push((
                     now + std::time::Duration::from_secs(15),
                     format!("wake +15s ({source})"),
+                    source,
                 ));
+                // An external display may have come or gone with the wake.
+                state.refresh_rates = platform::refresh_rates();
+                state.rebuild_menu(Some(&tray_icon));
             }
-            if let Some(pos) = wake_checks.iter().position(|(at, _)| now >= *at) {
-                let (_, reason) = wake_checks.remove(pos);
-                let write = state.reassert_on_resume || state.enforce;
-                state.reconcile(&mut tray_icon, &device, &reason, write);
+            if io_ok {
+                if let Some(pos) = wake_checks.iter().position(|(at, _, _)| now >= *at) {
+                    let (_, reason, source) = wake_checks.remove(pos);
+                    // A resume message re-asserts under `reassert_on_resume` as before. A
+                    // display-on wake also fires for a plain screen timeout, so it only
+                    // measures (logs drift) unless Enforce is on: re-asserting there would
+                    // revert every CLI or Synapse change at each screen timeout.
+                    let write = match source {
+                        platform::WakeSource::Resume => state.reassert_on_resume || state.enforce,
+                        platform::WakeSource::DisplayOn => state.enforce,
+                    };
+                    state.reconcile(&mut tray_icon, &device, &reason, write);
+                }
             }
 
             // Keyboard always-on (opt-in) keep-alive. The keyboard's EC fades the
@@ -486,7 +546,8 @@ fn main() -> Result<()> {
             // display is on. It naturally stops while the display sleeps and while the
             // system is suspended (the loop is frozen), so the backlight goes dark then.
             #[cfg(target_os = "windows")]
-            if state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable
+            if io_ok
+                && state.device_state.lights_mode.always_on == LightsAlwaysOn::Enable
                 && platform::DISPLAY_ON.load(Ordering::Relaxed)
                 && now > last_keepalive_timestamp + std::time::Duration::from_secs(3)
             {
@@ -513,7 +574,8 @@ fn main() -> Result<()> {
                 (Some(cur), Some(prev)) => cur != prev,
                 _ => true,
             };
-            if new_input
+            if io_ok
+                && new_input
                 && now > last_device_state_check_timestamp + std::time::Duration::from_secs(2)
             {
                 last_device_state_check_timestamp = now;
@@ -547,13 +609,7 @@ fn main() -> Result<()> {
                             if let Err(e) = state.persist() {
                                 log::warn!("failed to persist adopted brightness: {:?}", e);
                             }
-                            if let Ok((menu, handlers)) =
-                                menu::build(&state.device_state, state.enforce, state.fan_rpm_range)
-                            {
-                                state.menu = menu;
-                                state.event_handlers = handlers;
-                                tray_icon.set_menu(Some(Box::new(state.menu.clone())));
-                            }
+                            state.rebuild_menu(Some(&tray_icon));
                         }
 
                         // Enforce (opt-in): if the real device drifted from our intended
@@ -589,6 +645,14 @@ fn main() -> Result<()> {
                             .is_some() =>
                     {
                         state.reconcile(&mut tray_icon, &device, "mirror (zones diverged)", true);
+                    }
+                    // The bus itself is failing: stop polling and let the resync (with its
+                    // device reopen) take over.
+                    Err(e) if librazer::error::is_retryable(&e) => {
+                        log::warn!("mirror read failed, will resync: {e:?}");
+                        state.needs_sync = true;
+                        next_sync_at = now + resync_backoff(0);
+                        sync_failures = sync_failures.max(1);
                     }
                     Err(_) => {}
                 }

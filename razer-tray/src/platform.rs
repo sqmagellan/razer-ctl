@@ -526,6 +526,10 @@ unsafe extern "system" fn power_wnd_proc(
         PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST,
     };
 
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY {
+        HOTKEY_PRESSED.store(true, Ordering::Relaxed);
+        return windows::Win32::Foundation::LRESULT(0);
+    }
     if msg == WM_POWERBROADCAST {
         match wparam.0 as u32 {
             PBT_POWERSETTINGCHANGE => {
@@ -687,6 +691,32 @@ pub fn spawn_display_state_monitor() {
             have_resume = true;
         }
 
+        // The perf-cycle hotkey lives on this window too: RegisterHotKey delivers WM_HOTKEY
+        // to the registering window, and this is the tray's only window with a message loop
+        // of its own. Registered here, before the early return below, and independent of it.
+        let spec = HOTKEY_SPEC
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(spec) = spec {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                RegisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+            };
+            match parse_hotkey(&spec) {
+                Some((mods, vk)) => {
+                    match RegisterHotKey(hwnd, 1, HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT, vk) {
+                        Ok(()) => log::info!("perf-cycle hotkey registered: {spec}"),
+                        // Most often: another program already owns that combination.
+                        Err(e) => log::warn!("could not register hotkey {spec}: {e:?}"),
+                    }
+                }
+                None => log::warn!(
+                    "cycle_perf_hotkey {spec:?} not understood (e.g. \"Ctrl+Alt+P\"; a \
+                     modifier is required)"
+                ),
+            }
+        }
+
         // Independent capabilities: losing display-state should not cost us resume, and vice
         // versa. Only an empty window is worth abandoning.
         if !have_display && !have_resume {
@@ -728,5 +758,246 @@ pub fn efficiency_mode() {
             &power_throttling as *const _ as *mut _,
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
         );
+    }
+}
+
+/// Razer processes whose presence means Synapse (or its service layer) is running and may
+/// write the same EC settings. Matched case-insensitively against process names.
+const SYNAPSE_PROCESSES: &[&str] = &[
+    "Razer Synapse Service.exe",
+    "Razer Synapse Service Process.exe",
+    "Razer Synapse 3.exe",
+    "RazerAppEngine.exe",
+    "RazerCentralService.exe",
+    "Razer Central.exe",
+    "RzSynapse.exe",
+];
+
+/// A one-line warning if Synapse appears to be running, else `None`.
+///
+/// Warn only. The tray never stops another program: the peers that ship the same kind
+/// of tool (G-Helper, Legion Toolkit) settled on the same line, because killing a vendor
+/// service a user deliberately installed is worse than a tug-of-war they were told about.
+pub fn detect_synapse() -> Option<String> {
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let found: Vec<String> = sys
+        .processes()
+        .values()
+        .map(|p| p.name().to_string())
+        .filter(|n| SYNAPSE_PROCESSES.iter().any(|s| s.eq_ignore_ascii_case(n)))
+        .collect();
+    (!found.is_empty()).then(|| {
+        log::warn!(
+            "Razer Synapse is running ({}); it may overwrite these settings. Enable \
+             'Keep settings enforced' or close Synapse.",
+            found.join(", ")
+        );
+        "Razer Synapse is running (it may fight these settings)".to_string()
+    })
+}
+
+/// Set the Windows power mode (Settings > Power, "Power mode") to match a perf mode.
+///
+/// Uses `PowerSetActiveOverlayScheme` from powrprof.dll: the call the Settings slider
+/// makes, and the one G-Helper and Legion Toolkit use. It is undocumented, so it is
+/// resolved at runtime; a Windows without it reports an error instead of failing to load.
+/// The overlay GUIDs are the three slider positions.
+#[cfg(target_os = "windows")]
+pub fn set_windows_power_mode(perf: crate::state::PerfMode) -> Result<()> {
+    use crate::state::PerfMode;
+    use windows::core::{s, w, GUID};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    const BEST_EFFICIENCY: GUID = GUID::from_u128(0x961cc777_2547_4f9d_8174_7d86181b8a7a);
+    const BALANCED: GUID = GUID::zeroed();
+    const BEST_PERFORMANCE: GUID = GUID::from_u128(0xded574b5_45a0_4f42_8737_46345c09c238);
+
+    let (guid, label) = match perf {
+        PerfMode::Battery | PerfMode::Silent => (BEST_EFFICIENCY, "best power efficiency"),
+        PerfMode::Balanced => (BALANCED, "balanced"),
+        PerfMode::Performance | PerfMode::Hyperboost | PerfMode::Custom(..) => {
+            (BEST_PERFORMANCE, "best performance")
+        }
+    };
+
+    static LAST: std::sync::Mutex<Option<u128>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    if *last == Some(guid.to_u128()) {
+        return Ok(());
+    }
+
+    type SetOverlay = unsafe extern "system" fn(*const GUID) -> u32;
+    // SAFETY: powrprof.dll is a system DLL; the symbol, if present, has the signature
+    // `DWORD PowerSetActiveOverlayScheme(GUID*)` used by the Settings app. We pass a
+    // pointer to a GUID that lives across the call.
+    let status = unsafe {
+        let module = LoadLibraryW(w!("powrprof.dll"))?;
+        let proc = GetProcAddress(module, s!("PowerSetActiveOverlayScheme"))
+            .ok_or_else(|| anyhow::anyhow!("PowerSetActiveOverlayScheme not available"))?;
+        let set: SetOverlay = std::mem::transmute(proc);
+        set(&guid)
+    };
+    anyhow::ensure!(status == 0, "PowerSetActiveOverlayScheme returned {status}");
+    *last = Some(guid.to_u128());
+    log::info!("Windows power mode -> {label}");
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_windows_power_mode(_perf: crate::state::PerfMode) -> Result<()> {
+    Ok(())
+}
+
+/// The primary display's current mode.
+#[cfg(target_os = "windows")]
+fn current_display_mode() -> Option<windows::Win32::Graphics::Gdi::DEVMODEW> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    // SAFETY: `mode` is a sized DEVMODEW that outlives the call; None = primary display.
+    unsafe { EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS, &mut mode).as_bool() }
+        .then_some(mode)
+}
+
+/// Refresh rates the primary display offers at its current resolution, ascending.
+#[cfg(target_os = "windows")]
+pub fn refresh_rates() -> Vec<u32> {
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsW, DEVMODEW, ENUM_DISPLAY_SETTINGS_MODE,
+    };
+    let Some(current) = current_display_mode() else {
+        return Vec::new();
+    };
+    let mut rates = std::collections::BTreeSet::new();
+    for i in 0.. {
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // SAFETY: as above; mode index `i` enumerates until the call returns FALSE.
+        if !unsafe { EnumDisplaySettingsW(None, ENUM_DISPLAY_SETTINGS_MODE(i), &mut mode) }
+            .as_bool()
+        {
+            break;
+        }
+        if mode.dmPelsWidth == current.dmPelsWidth
+            && mode.dmPelsHeight == current.dmPelsHeight
+            && mode.dmBitsPerPel == current.dmBitsPerPel
+            && mode.dmDisplayFrequency > 1
+        {
+            rates.insert(mode.dmDisplayFrequency);
+        }
+    }
+    rates.into_iter().collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn refresh_rates() -> Vec<u32> {
+    Vec::new()
+}
+
+/// Switch the primary display to `hz` at its current resolution. A no-op when it is
+/// already there, so re-applying a profile doesn't flicker the screen.
+#[cfg(target_os = "windows")]
+pub fn set_refresh_rate(hz: u32) -> Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        ChangeDisplaySettingsExW, CDS_UPDATEREGISTRY, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY,
+    };
+    let mut mode = current_display_mode().ok_or_else(|| anyhow::anyhow!("no display mode"))?;
+    if mode.dmDisplayFrequency == hz {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        refresh_rates().contains(&hz),
+        "{hz} Hz is not offered at the current resolution"
+    );
+    mode.dmDisplayFrequency = hz;
+    mode.dmFields = DM_DISPLAYFREQUENCY;
+    // SAFETY: `mode` is a DEVMODEW from EnumDisplaySettingsW with only the frequency
+    // changed; None = primary display.
+    let result =
+        unsafe { ChangeDisplaySettingsExW(None, Some(&mode), HWND(0), CDS_UPDATEREGISTRY, None) };
+    anyhow::ensure!(
+        result == DISP_CHANGE_SUCCESSFUL,
+        "ChangeDisplaySettingsExW: {result:?}"
+    );
+    log::info!("display refresh rate -> {hz} Hz");
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_refresh_rate(_hz: u32) -> Result<()> {
+    Ok(())
+}
+
+/// Parse a hotkey like `"Ctrl+Alt+P"` into (modifier flags, virtual-key code).
+/// Modifiers: Ctrl/Control, Alt, Shift, Win; key: A-Z, 0-9, F1-F24. Case-insensitive.
+pub fn parse_hotkey(spec: &str) -> Option<(u32, u32)> {
+    const MOD_ALT: u32 = 0x1;
+    const MOD_CONTROL: u32 = 0x2;
+    const MOD_SHIFT: u32 = 0x4;
+    const MOD_WIN: u32 = 0x8;
+    let mut mods = 0;
+    let mut key = None;
+    for part in spec.split('+').map(str::trim) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods |= MOD_CONTROL,
+            "alt" => mods |= MOD_ALT,
+            "shift" => mods |= MOD_SHIFT,
+            "win" => mods |= MOD_WIN,
+            k if key.is_none() => {
+                let upper = k.to_ascii_uppercase();
+                key = match upper.as_bytes() {
+                    [c] if c.is_ascii_alphanumeric() => Some(*c as u32),
+                    [b'F', rest @ ..] => std::str::from_utf8(rest)
+                        .ok()
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .filter(|n| (1..=24).contains(n))
+                        .map(|n| 0x70 + n - 1),
+                    _ => None,
+                };
+                key?;
+            }
+            _ => return None,
+        }
+    }
+    // A bare key would steal it from every application.
+    (mods != 0).then_some(())?;
+    key.map(|k| (mods, k))
+}
+
+/// Set when the perf-cycle hotkey is pressed; consumed by the event loop.
+static HOTKEY_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the perf-cycle hotkey was pressed since the last call.
+pub fn take_hotkey() -> bool {
+    HOTKEY_PRESSED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The hotkey spec handed to the power-notification thread, which owns the window that
+/// receives WM_HOTKEY. Set before `spawn_display_state_monitor`.
+static HOTKEY_SPEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_hotkey_spec(spec: Option<String>) {
+    *HOTKEY_SPEC.lock().unwrap_or_else(|p| p.into_inner()) = spec;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hotkey;
+
+    #[test]
+    fn hotkeys_parse_and_bare_keys_are_refused() {
+        assert_eq!(parse_hotkey("Ctrl+Alt+P"), Some((0x3, b'P' as u32)));
+        assert_eq!(parse_hotkey("win + shift + f12"), Some((0xC, 0x7B)));
+        assert_eq!(parse_hotkey("Ctrl+1"), Some((0x2, b'1' as u32)));
+        assert_eq!(parse_hotkey("P"), None, "no modifier");
+        assert_eq!(parse_hotkey("Ctrl+F25"), None);
+        assert_eq!(parse_hotkey("Ctrl+Alt+P+Q"), None, "two keys");
+        assert_eq!(parse_hotkey("Hyper+P"), None);
     }
 }

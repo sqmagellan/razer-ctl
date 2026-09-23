@@ -24,6 +24,18 @@ fn stamp_of(path: &Path) -> Option<Stamp> {
         .map(|m| (m.len(), m.modified().ok()))
 }
 
+/// What a check of the file on disk found.
+#[derive(Debug)]
+pub enum DiskState {
+    /// Nobody else wrote it since our last read or write.
+    Unchanged,
+    /// Someone else wrote it, and it parses.
+    Edited(ConfigState),
+    /// Someone else wrote it and it does NOT parse (a hand edit in progress, a typo).
+    /// Nothing may be saved over it until it is fixed.
+    EditedButInvalid,
+}
+
 pub struct ConfigFile {
     path: PathBuf,
     /// The on-disk stamp as of our last read or write. A different stamp means someone
@@ -36,12 +48,28 @@ pub struct ConfigFile {
 
 impl ConfigFile {
     pub fn open() -> Result<Self> {
-        let path = confy::get_configuration_file_path(crate::PKG_NAME, None)?;
-        Ok(Self {
+        Ok(Self::at(confy::get_configuration_file_path(
+            crate::PKG_NAME,
+            None,
+        )?))
+    }
+
+    /// A config file at an explicit path (tests).
+    pub fn at(path: PathBuf) -> Self {
+        Self {
             path,
             stamp: None,
             persist_blocked: false,
-        })
+        }
+    }
+
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
+    /// Whether writes are refused because the file could not be read.
+    pub fn is_blocked(&self) -> bool {
+        self.persist_blocked
     }
 
     pub fn path(&self) -> &Path {
@@ -57,7 +85,21 @@ impl ConfigFile {
     /// - Unreadable file (locked, permissions): defaults in memory, writes blocked. The
     ///   next load attempt, or the next persist, tries again.
     pub fn load(&mut self) -> ConfigState {
-        let text = match std::fs::read_to_string(&self.path) {
+        // Stamp BEFORE reading: an edit landing between the two then shows up as a change
+        // on the next check instead of being silently absorbed.
+        let stamp = stamp_of(&self.path);
+        // A lock held by an editor or antivirus is usually gone in well under a second.
+        let mut read = std::fs::read_to_string(&self.path);
+        for _ in 0..3 {
+            match &read {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    read = std::fs::read_to_string(&self.path);
+                }
+                _ => break,
+            }
+        }
+        let text = match read {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::info!("no config at {} yet; using defaults", self.path.display());
@@ -75,7 +117,7 @@ impl ConfigFile {
                 return ConfigState::default();
             }
         };
-        self.stamp = stamp_of(&self.path);
+        self.stamp = stamp;
         match toml::from_str::<ConfigState>(&text) {
             Ok(config) => {
                 self.persist_blocked = false;
@@ -122,27 +164,36 @@ impl ConfigFile {
         stamp_of(&self.path) != self.stamp
     }
 
-    /// Re-read the file if someone else changed it. `Some` only for a successful parse;
-    /// a half-saved edit that fails to parse is left alone until it is fixed (the stamp is
-    /// not advanced, so it is retried on the next check).
-    pub fn reload_if_changed(&mut self) -> Option<ConfigState> {
+    /// Check whether someone else changed the file, and parse it if so. A half-saved or
+    /// mistyped edit is reported (once per distinct version of the file) and left alone:
+    /// the stamp is not advanced, so it is checked again, and adopted once it parses.
+    pub fn check_disk(&mut self) -> DiskState {
         if !self.changed_on_disk() {
-            return None;
+            return DiskState::Unchanged;
         }
-        let text = std::fs::read_to_string(&self.path).ok()?;
+        let stamp = stamp_of(&self.path);
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return DiskState::EditedButInvalid;
+        };
         match toml::from_str::<ConfigState>(&text) {
             Ok(config) => {
-                self.stamp = stamp_of(&self.path);
+                self.stamp = stamp;
                 self.persist_blocked = false;
-                Some(config)
+                DiskState::Edited(config)
             }
             Err(e) => {
-                log::warn!(
-                    "config at {} changed on disk but does not parse yet ({e}); keeping the \
-                     running settings",
-                    self.path.display()
-                );
-                None
+                use std::sync::Mutex;
+                static REPORTED: Mutex<Option<Stamp>> = Mutex::new(None);
+                let mut last = REPORTED.lock().unwrap_or_else(|p| p.into_inner());
+                if *last != stamp {
+                    *last = stamp;
+                    log::warn!(
+                        "config at {} was edited but does not parse ({e}); keeping the running \
+                         settings and NOT saving over it until it is fixed",
+                        self.path.display()
+                    );
+                }
+                DiskState::EditedButInvalid
             }
         }
     }
@@ -153,7 +204,7 @@ impl ConfigFile {
     pub fn store(&mut self, config: &ConfigState) -> Result<()> {
         // No retry-load here: if the file became readable, what it holds is newer than our
         // in-memory defaults, so the right move is to ADOPT it (the tray's periodic
-        // `reload_if_changed` does, and that clears the block), not to write over it.
+        // `check_disk` does, and that clears the block), not to write over it.
         if self.persist_blocked {
             anyhow::bail!(
                 "not saving: the config on disk could not be read, and overwriting it could \
@@ -176,5 +227,93 @@ impl ConfigFile {
             .with_context(|| format!("replacing {}", self.path.display()))?;
         self.stamp = stamp_of(&self.path);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "razer-tray-config-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("default-config.toml")
+    }
+
+    #[test]
+    fn a_missing_file_gives_defaults_and_may_be_written() {
+        let mut f = ConfigFile::at(scratch("missing"));
+        assert!(!f.exists());
+        assert_eq!(f.load(), ConfigState::default());
+        f.store(&ConfigState::default()).unwrap();
+        assert!(f.exists());
+        assert!(
+            matches!(f.check_disk(), DiskState::Unchanged),
+            "our own write"
+        );
+    }
+
+    #[test]
+    fn a_hand_edit_is_seen_and_a_broken_one_is_never_written_over() {
+        let path = scratch("edit");
+        let mut f = ConfigFile::at(path.clone());
+        f.store(&ConfigState::default()).unwrap();
+
+        let edited = ConfigState {
+            enforce: true,
+            ..ConfigState::default()
+        };
+        // Different length as well as mtime, so the test doesn't depend on timestamp
+        // resolution.
+        std::fs::write(
+            &path,
+            toml::to_string_pretty(&edited).unwrap() + "\n# edited\n",
+        )
+        .unwrap();
+        match f.check_disk() {
+            DiskState::Edited(cfg) => assert!(cfg.enforce),
+            other => panic!("expected the edit, got {other:?}"),
+        }
+
+        std::fs::write(&path, "this is [not toml").unwrap();
+        assert!(matches!(f.check_disk(), DiskState::EditedButInvalid));
+        // Still invalid on a second look, and still on disk as the user left it.
+        assert!(matches!(f.check_disk(), DiskState::EditedButInvalid));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
+    }
+
+    #[test]
+    fn an_unparseable_file_is_salvaged_before_anything_replaces_it() {
+        let path = scratch("salvage");
+        std::fs::write(&path, "garbage = [").unwrap();
+        let mut f = ConfigFile::at(path.clone());
+        assert_eq!(f.load(), ConfigState::default());
+        assert!(!f.is_blocked(), "salvage succeeded, so writing is allowed");
+        let salvaged = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("toml.invalid-"));
+        assert!(salvaged, "a timestamped copy must exist");
+    }
+
+    #[test]
+    fn a_store_replaces_the_file_whole() {
+        let path = scratch("atomic");
+        let mut f = ConfigFile::at(path.clone());
+        let cfg = ConfigState {
+            enforce: true,
+            ..ConfigState::default()
+        };
+        f.store(&cfg).unwrap();
+        let back: ConfigState = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "no temp file left behind"
+        );
     }
 }

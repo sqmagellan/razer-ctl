@@ -38,7 +38,20 @@ and [`CHANGELOG.md`](CHANGELOG.md) carries the release history and the measureme
 - **App profiles ("Actions")** — apply settings while a named app runs, then fall back. A rule can
   match several executables, carry a `priority`, be disabled without being deleted, and be gated to
   AC with `require_ac`. It overlays only the fields it sets, and it's transient, so it never
-  overwrites a saved profile.
+  overwrites a saved profile. A setting you pick while it runs holds until the app exits. Edits to
+  the rules in the config file take effect within a few seconds, without a restart.
+- **Refresh rate per power source** — a menu of the rates the display offers at its current
+  resolution. The pick is stored in the AC or battery profile, so it switches when you plug or
+  unplug. "Don't change" (the default) leaves the display alone.
+- **Match Windows power mode** (off by default) — moves the Settings "Power mode" slider with the
+  perf mode: Battery/Silent → best power efficiency, Balanced → balanced, the rest → best
+  performance.
+- **Perf-cycle hotkey** (off by default) — set `cycle_perf_hotkey = "Ctrl+Alt+P"` in the config; it
+  acts like a left-click on the tray icon. A modifier is required. Read at startup.
+- **Fn Lock** — `razer-cli auto fn-lock on|off` (the function-row primary mode). Which state makes
+  F1–F12 primary is not yet confirmed on this model.
+- **Synapse warning** — if Razer Synapse is running, the menu says so at the top. The tray never
+  stops another program's services.
 - **Keyboard always-on** — a Normal-mode keep-alive, not Razer's driver-mode flag, so the Fn media
   keys keep working.
 - **Enforce mode** (off by default) — re-asserts perf, fan, logo, and charge limit if Synapse
@@ -65,7 +78,7 @@ All verified on hardware, 4 by issuing a command this EC genuinely refuses. 2 is
 deliberately, because the argument parser exits 2 from inside its own code, before ours runs.
 
 Config lives at `%APPDATA%\razer-tray\config\default-config.toml`, the log at
-`%TEMP%\razer-tray.log` (Info level, capped at 10 MiB).
+`%LOCALAPPDATA%\razer-tray\razer-tray.log` (Info level, 1 MiB, rotated through three older files).
 
 ## Device support
 
@@ -152,8 +165,10 @@ The hard-won ones. [`CHANGELOG.md`](CHANGELOG.md) carries the measurements behin
   nvidia-smi can't name, so a few stubborn dGPU users may survive rather than risk the desktop.
 - **Device-loss recovery isn't runtime-tested.** The control interface rides the internal keyboard's
   USB composite, which Windows won't let you disable, so the backoff is code-reviewed only.
-- **A config the app can't parse is preserved, not eaten.** It logs the error and keeps the first
-  bad file at `default-config.toml.invalid`, so a restart can't overwrite the evidence.
+- **A config the app can't parse is preserved, not eaten.** At startup it logs the error and keeps a
+  timestamped copy (`default-config.toml.invalid-<unix time>`). A hand edit that doesn't parse
+  while the tray runs is left alone, and nothing is saved over it until it's fixed. Writes are
+  atomic (temp file, then rename). Comments in the file are not preserved when the tray saves.
 - **`battery-care get` can read stale right after a `set`** (~1–2 s firmware lag). Re-read to
   confirm.
 - **The tray tooltip really holds 63 characters, not 128.** `tray-icon` 0.19 leaves `cbSize` at 0,

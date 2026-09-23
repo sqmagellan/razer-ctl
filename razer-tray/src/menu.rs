@@ -1,5 +1,5 @@
 //! Builds the tray context menu and the event-id → target-state map that drives it.
-//! Pure construction: given a `DeviceState` + the enforce flag it returns a fresh
+//! Pure construction: given a `DeviceState` + `MenuOptions` it returns a fresh
 //! `Menu` and the `HashMap` the event loop looks events up in. No device I/O here.
 
 use anyhow::Result;
@@ -14,21 +14,47 @@ use crate::state::{
     FAN_RPM_STEP,
 };
 
+/// Everything besides the device state that the menu shows.
+#[derive(Clone, Copy)]
+pub struct MenuOptions<'a> {
+    /// Drives the Windows-only Enforce toggle.
+    pub enforce: bool,
+    /// Usable manual-fan RPM bounds for this chassis.
+    pub fan_rpm_range: (u16, u16),
+    /// Shown as a disabled item at the top (e.g. Synapse is running).
+    pub warning: Option<&'a str>,
+    /// Drives the "Match Windows power mode" toggle.
+    pub match_power_mode: bool,
+    /// Refresh rates the display offers at its current resolution; empty hides the submenu.
+    pub refresh_rates: &'a [u32],
+}
+
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
-/// (current intent) via checkmarks; `enforce` drives the Windows-only Enforce toggle.
+/// (current intent) via checkmarks.
 //
-// `enforce` is read only inside the `cfg(target_os = "windows")` block below, so off
-// Windows it is genuinely unused. The parameter stays in the signature regardless --
-// callers pass it unconditionally, and making the signature itself platform-dependent
-// would push cfg noise into every call site for no gain.
+// Some options are read only inside `cfg(target_os = "windows")` blocks, so off Windows
+// they are genuinely unused.
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn build(
     dstate: &DeviceState,
-    enforce: bool,
-    fan_rpm_range: (u16, u16),
+    opts: &MenuOptions,
 ) -> Result<(Menu, HashMap<String, DeviceState>)> {
+    let MenuOptions {
+        enforce,
+        fan_rpm_range,
+        warning,
+        match_power_mode,
+        refresh_rates,
+    } = *opts;
     let mut event_handlers = std::collections::HashMap::new();
     let menu = Menu::new();
+
+    // A conflict the user should know about goes first, where it can't be missed. It is a
+    // label, not an action: the tray never stops another program's services.
+    if let Some(text) = warning {
+        menu.append(&MenuItem::new(format!("⚠ {text}"), false, None))?;
+        menu.append(&PredefinedMenuItem::separator())?;
+    }
 
     // perf
     let perf_modes = Submenu::new("Performance mode", true);
@@ -378,6 +404,68 @@ pub fn build(
             .map(|i| i as &dyn IsMenuItem)
             .collect::<Vec<_>>(),
     )?)?;
+
+    // Display refresh rate for the current power source. Shown only when the display
+    // offers more than one rate at its current resolution. A pick is stored in the
+    // AC/battery profile like every other setting, so it switches with the power source.
+    #[cfg(target_os = "windows")]
+    if refresh_rates.len() > 1 {
+        let leave_checked = dstate.display_refresh_hz.is_none();
+        let mut items = vec![CheckMenuItem::with_id(
+            "refresh:none",
+            "Don't change",
+            !leave_checked,
+            leave_checked,
+            None,
+        )];
+        event_handlers.insert(
+            "refresh:none".to_string(),
+            DeviceState {
+                display_refresh_hz: None,
+                ..*dstate
+            },
+        );
+        for hz in refresh_rates {
+            let id = format!("refresh:{hz}");
+            let checked = dstate.display_refresh_hz == Some(*hz);
+            items.push(CheckMenuItem::with_id(
+                id.clone(),
+                format!("{hz} Hz"),
+                !checked,
+                checked,
+                None,
+            ));
+            event_handlers.insert(
+                id,
+                DeviceState {
+                    display_refresh_hz: Some(*hz),
+                    ..*dstate
+                },
+            );
+        }
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&Submenu::with_items(
+            "Refresh rate (this power source)",
+            true,
+            &items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem)
+                .collect::<Vec<_>>(),
+        )?)?;
+    }
+
+    // Couple the Windows power mode to the perf mode (opt-in). Windows-only.
+    #[cfg(target_os = "windows")]
+    {
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&CheckMenuItem::with_id(
+            "toggle_power_mode",
+            "Match Windows power mode",
+            true,
+            match_power_mode,
+            None,
+        ))?;
+    }
 
     // Enforce settings (opt-in "win against Synapse"). Windows-only, since
     // Synapse is a Windows product. Off by default.

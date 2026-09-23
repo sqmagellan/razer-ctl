@@ -18,7 +18,9 @@ Worth knowing before you run it, since it's the kind of tool that reasonably inv
 - **No elevation.** It runs as a normal user. The only system-level thing it writes is an
   `HKCU\...\Run` value, when you tick "Start with Windows".
 - **What it does write:** HID commands to the Razer device, a TOML config under `%APPDATA%`, and a
-  log under `%TEMP%` (capped at 10 MiB).
+  log under `%LOCALAPPDATA%` (at most 4 MiB). Only if you turn them on: the display refresh rate
+  (`ChangeDisplaySettingsExW`) and the Windows power mode (`PowerSetActiveOverlayScheme`).
+- **No network access.** Nothing in the tray or the CLI opens a connection.
 - **`nvidia-smi`** is invoked as a subprocess for dGPU temperature, with no window. If it isn't
   present the fields are simply omitted.
 - **"Close GPU apps"** terminates processes and is the most dangerous thing here. It is guarded by a

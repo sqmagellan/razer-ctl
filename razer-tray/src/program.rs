@@ -10,7 +10,7 @@ use librazer::device;
 use librazer::types::{BatteryCare, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
-use crate::config::ConfigFile;
+use crate::config::{ConfigFile, DiskState};
 use crate::menu;
 use crate::state::{
     brightness_to_percent, get_fan_rpm, ActionSession, AppProfile, ConfigState, DeviceState,
@@ -115,6 +115,14 @@ pub struct ProgramState {
     /// The last device exchange failed; the event loop retries [`Self::sync`] with backoff
     /// instead of blocking inside the loop.
     pub needs_sync: bool,
+    /// Switch the Windows power mode along with the perf mode (config, opt-in).
+    pub match_power_mode: bool,
+    /// Kept only so a save doesn't drop it; read once at startup by `main`.
+    pub cycle_perf_hotkey: Option<String>,
+    /// Shown as a disabled item at the top of the menu (e.g. Synapse is running).
+    pub warning: Option<String>,
+    /// Refresh rates the display offers at its current resolution; empty hides the menu.
+    pub refresh_rates: Vec<u32>,
     config_file: ConfigFile,
 }
 
@@ -130,7 +138,16 @@ impl ProgramState {
         let ac_state = config.ac_state.normalized(fan_rpm_range);
         let battery_state = config.battery_state.normalized(fan_rpm_range);
         let device_state = if ac_power { ac_state } else { battery_state };
-        let (menu, event_handlers) = menu::build(&device_state, config.enforce, fan_rpm_range)?;
+        let (menu, event_handlers) = menu::build(
+            &device_state,
+            &menu::MenuOptions {
+                enforce: config.enforce,
+                fan_rpm_range,
+                warning: None,
+                match_power_mode: config.match_windows_power_mode,
+                refresh_rates: &[],
+            },
+        )?;
         Ok(Self {
             device_state,
             observed: device_state,
@@ -147,8 +164,38 @@ impl ProgramState {
             action: None,
             fan_rpm_range,
             needs_sync: true,
+            match_power_mode: config.match_windows_power_mode,
+            cycle_perf_hotkey: config.cycle_perf_hotkey,
+            warning: None,
+            refresh_rates: Vec::new(),
             config_file,
         })
+    }
+
+    pub fn menu_options(&self) -> menu::MenuOptions<'_> {
+        menu::MenuOptions {
+            enforce: self.enforce,
+            fan_rpm_range: self.fan_rpm_range,
+            warning: self.warning.as_deref(),
+            match_power_mode: self.match_power_mode,
+            refresh_rates: &self.refresh_rates,
+        }
+    }
+
+    /// Rebuild the menu from the current intent, and show it if a tray icon is given.
+    /// The one place the menu is rebuilt, so a new option can't be forgotten at one of
+    /// several call sites.
+    pub fn rebuild_menu(&mut self, tray_icon: Option<&tray_icon::TrayIcon>) {
+        match menu::build(&self.device_state, &self.menu_options()) {
+            Ok((m, h)) => {
+                self.menu = m;
+                self.event_handlers = h;
+                if let Some(tray) = tray_icon {
+                    tray.set_menu(Some(Box::new(self.menu.clone())));
+                }
+            }
+            Err(e) => log::warn!("menu rebuild failed: {e:?}"),
+        }
     }
 
     /// The saved profile for the current power source.
@@ -174,6 +221,9 @@ impl ProgramState {
             }
             _ => self.saved_profile(),
         }
+        // Whatever produced it, never aim at a state the EC cannot hold: that never
+        // converges, and the loop would re-apply it every tick.
+        .normalized(self.fan_rpm_range)
     }
 
     /// Push the current intent to the device and reconcile against a read-back. Used at
@@ -185,8 +235,11 @@ impl ProgramState {
         tray_icon: &mut tray_icon::TrayIcon,
         device: &device::Device,
     ) -> Result<()> {
-        self.apply_and_refresh(tray_icon, device)?;
+        let applied = self.apply_and_refresh(tray_icon, device);
+        // Reconcile whatever the apply did: a write the EC rejected is exactly when the
+        // read-back matters.
         self.reconcile(tray_icon, device, "sync", true);
+        applied?;
         self.needs_sync = false;
         Ok(())
     }
@@ -211,6 +264,8 @@ impl ProgramState {
             enforce: self.enforce,
             reassert_on_resume: self.reassert_on_resume,
             app_profiles: self.app_profiles.clone(),
+            match_windows_power_mode: self.match_power_mode,
+            cycle_perf_hotkey: self.cycle_perf_hotkey.clone(),
         }
     }
 
@@ -218,30 +273,43 @@ impl ProgramState {
     /// source of truth so a future ConfigState field can't be silently dropped by one of
     /// the call sites.
     ///
-    /// If the file was edited by hand since we last touched it, that edit is adopted
-    /// FIRST and this save is skipped: the hand edit is newer than anything in memory, and
-    /// Action rules can only be written by hand. The old code wrote straight over it on
-    /// the next Fn-key brightness change.
+    /// Hand edits are never written over. Every user action calls
+    /// [`Self::reload_config_if_changed`] first, so an edit is adopted before the action is
+    /// applied on top of it. If one still lands in between, it is adopted here and this
+    /// save is skipped. An edit that doesn't parse blocks saving until it is fixed: the old
+    /// code wrote straight over a mistyped hand edit on the next Fn-key brightness change.
     pub fn persist(&mut self) -> Result<()> {
-        if let Some(disk) = self.config_file.reload_if_changed() {
-            log::warn!("config was edited on disk; adopting the edit instead of saving over it");
-            self.adopt_config(disk);
-            return Ok(());
+        match self.config_file.check_disk() {
+            DiskState::Unchanged => {
+                let snapshot = self.config_snapshot();
+                self.config_file.store(&snapshot)
+            }
+            DiskState::Edited(disk) => {
+                log::warn!(
+                    "config was edited on disk; adopting the edit instead of saving over it"
+                );
+                self.adopt_config(disk);
+                Ok(())
+            }
+            DiskState::EditedButInvalid => {
+                anyhow::bail!(
+                    "the config on disk has an edit that does not parse; not saving over it"
+                )
+            }
         }
-        let snapshot = self.config_snapshot();
-        self.config_file.store(&snapshot)
     }
 
-    /// Pick up a hand edit made while the tray runs. Returns whether anything was adopted;
-    /// the event loop then re-applies [`Self::target`].
-    pub fn reload_config_if_changed(&mut self) -> bool {
-        match self.config_file.reload_if_changed() {
-            Some(disk) => {
+    /// Pick up a hand edit made while the tray runs, showing the rebuilt menu. Returns
+    /// whether anything was adopted; the event loop then converges on [`Self::target`].
+    pub fn reload_config_if_changed(&mut self, tray_icon: &tray_icon::TrayIcon) -> bool {
+        match self.config_file.check_disk() {
+            DiskState::Edited(disk) => {
                 log::info!("config changed on disk; reloading it");
                 self.adopt_config(disk);
+                self.rebuild_menu(Some(tray_icon));
                 true
             }
-            None => false,
+            DiskState::Unchanged | DiskState::EditedButInvalid => false,
         }
     }
 
@@ -250,15 +318,17 @@ impl ProgramState {
         self.battery_state = disk.battery_state.normalized(self.fan_rpm_range);
         self.enforce = disk.enforce;
         self.reassert_on_resume = disk.reassert_on_resume;
-        if disk.app_profiles != self.app_profiles {
-            // Rule indices may have moved; let the next process scan start afresh.
-            self.action = None;
+        self.match_power_mode = disk.match_windows_power_mode;
+        self.cycle_perf_hotkey = disk.cycle_perf_hotkey;
+        // Keep a running Action whose rule is unchanged at the same index; any other
+        // change ends it, and the next process scan starts afresh.
+        if let Some(session) = &self.action {
+            if disk.app_profiles.get(session.rule) != self.app_profiles.get(session.rule) {
+                self.action = None;
+            }
         }
         self.app_profiles = disk.app_profiles;
-        if let Ok((m, h)) = menu::build(&self.device_state, self.enforce, self.fan_rpm_range) {
-            self.menu = m;
-            self.event_handlers = h;
-        }
+        self.rebuild_menu(None);
     }
 
     pub fn handle_event(&self, event_id: &str) -> Option<DeviceState> {
@@ -419,14 +489,33 @@ impl ProgramState {
                 }
             }
         }
-        match menu::build(&self.device_state, self.enforce, self.fan_rpm_range) {
-            Ok((m, h)) => (self.menu, self.event_handlers) = (m, h),
-            Err(e) => log::warn!("menu rebuild failed: {e:?}"),
-        }
+        self.apply_os_settings();
+        self.rebuild_menu(Some(tray_icon));
         self.refresh_fan(device);
         self.refresh_ui(tray_icon);
-        tray_icon.set_menu(Some(Box::new(self.menu.clone())));
-        result
+        // Only bus trouble is worth a resync. A write the EC rejected will be rejected
+        // again, and resyncing on it re-sent the same write every minute forever; the
+        // display already shows what the device really did (read back above).
+        match result {
+            Err(e) if librazer::error::is_retryable(&e) => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// The settings that live in Windows rather than in the EC: the profile's display
+    /// refresh rate, and (opt-in) the Windows power mode that matches the perf mode.
+    /// Failures are logged; neither is worth a resync.
+    fn apply_os_settings(&self) {
+        if let Some(hz) = self.device_state.display_refresh_hz {
+            if let Err(e) = crate::platform::set_refresh_rate(hz) {
+                log::warn!("refresh rate {hz} Hz: {e:?}");
+            }
+        }
+        if self.match_power_mode {
+            if let Err(e) = crate::platform::set_windows_power_mode(self.device_state.perf_mode) {
+                log::warn!("Windows power mode: {e:?}");
+            }
+        }
     }
 
     /// Re-render icon and tooltip from `observed`.
@@ -452,6 +541,9 @@ impl ProgramState {
         pick: Pick,
         device: &device::Device,
     ) -> Result<()> {
+        // Adopt a hand edit first, so the pick lands on top of it instead of the save
+        // that follows either overwriting the edit or discarding the pick.
+        self.reload_config_if_changed(tray_icon);
         let picked = picked.normalized(self.fan_rpm_range);
         // What the menu was built from: its difference from `picked` is exactly what the
         // user changed. See `DeviceState::carry_changes`.

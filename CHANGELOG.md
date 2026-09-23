@@ -4,6 +4,55 @@ Release history for this fork. The README carries the current behaviour; this fi
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
+## 0.9.4 — a tray that can't die at login, lose its config, or undo a pick
+Built and tested on `0x029F` (2026-09-23). Hardware probes that decided the scope, same machine:
+`0x070f` is Max Fan (fans 2100 → 4700 RPM, no charging above the limit); tray/CLI contention
+does not cause bogus fan reads (0/60 either way); the ACPI "High Precision Temperature" counter
+is frozen at 45.05 °C under load like the others; the machine sleeps in Modern Standby (69
+standby cycles in 17 days against 5 resumes).
+
+- **Startup and recovery.** One HID error during startup used to exit the tray with nothing in
+  the log. Now the tray comes up from the config and resyncs with backoff (2 s doubling to 60 s),
+  reopening the device after three failures. Recovery no longer blocks the event loop, no longer
+  reloads the config, and no longer re-applies the saved profile over the pick whose follow-up
+  read failed. Only bus trouble triggers a resync; a write the EC rejects is logged and shown as
+  what the device actually did.
+- **The config file.** Written atomically (temp file, then rename). Missing, unreadable and
+  unparseable files are handled separately; an unparseable one gets a timestamped copy. Hand edits
+  are adopted within 5 s and before any save, and a hand edit that doesn't parse is never written
+  over. A file with only Action rules loads. The file is created on first run again.
+- **Wake handling for Modern Standby.** A wake is the resume message OR the display coming back on
+  after at least 60 s off. It schedules a read at +3 s and +15 s, and writes only when the read
+  shows drift. The +15 s check follows G-Helper #5682, where one re-apply at the instant of resume
+  lost to the firmware. A display-on wake writes only with Enforce on, so a screen timeout never
+  reverts a CLI change. Every wake logs what it found, which is the measurement of whether the EC
+  loses state across standby at all.
+- **Actions.** A pick made while an Action runs holds until its process exits (it was reverted a
+  second later). An AC/battery switch carries those picks across, re-checks the rules at once,
+  and no longer overlays an AC-only rule on battery. The left-click cycle during an Action is not
+  saved into the profile.
+- **Fans and state honesty.** Intent is normalized in one place: max fan exists only in Custom, and
+  a manual RPM snaps to the chassis range and the 100-RPM wire step. Both used to look like
+  permanent drift to Enforce. A rejected manual RPM no longer switches the fan to Manual. Fan and
+  max-fan write failures are returned instead of dropped. The tooltip never shows an ignored set
+  point as the speed ("Fan Manual", "Fan 2000 floor") and shows "…" until a read is trusted.
+  `razer-cli fan info` reads both zones through the same trust rule, and `auto json` adds
+  `fan_actual_trusted`.
+- **Power source.** `ACLineStatus` "unknown" keeps the previous answer instead of meaning AC.
+- **Transport.** HID I/O errors are retried with backoff and exit 5, as documented; they used to
+  abort on the first attempt and exit 1. Raw `cmd` probes are sent once and never re-sent. Perf
+  zones left disagreeing by an interrupted write are a typed error, and the tray repairs them.
+- **New:** refresh rate per power source; opt-in Windows power-mode matching; an opt-in perf-cycle
+  hotkey; `razer-cli auto fn-lock`; a Synapse-running warning in the menu.
+- **Log** moved to `%LOCALAPPDATA%\razer-tray\`, 1 MiB rotated ×4. Logging starts before anything
+  else.
+- **Supply chain.** bincode is gone: the 90-byte packet is encoded by hand, checked byte-identical
+  first. Every Action is pinned to a commit SHA, tokens are read-only except the release build job,
+  cargo runs `--locked`, and the documented `gh attestation verify` command now pins the tag and
+  workflow. The CLI has tests for the first time.
+- Versions: `razer-tray` 0.9.4, `librazer` 0.9.0 (breaking: `Packet` is no longer serde), `razer-cli`
+  0.8.9.
+
 ## 0.9.3 — resume detection that fires, and Actions kept out of saved profiles
 HW-verified on `0x029F` (2026-09-05).
 

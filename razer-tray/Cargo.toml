@@ -1,6 +1,6 @@
 [package]
 name = "razer-tray"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 
 authors = ["sqmagellan, forked from blauzim and Tarek Dakhran"]
