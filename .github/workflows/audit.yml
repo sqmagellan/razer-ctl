@@ -34,14 +34,19 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+# Read-only token. Without this the job inherits the repository default, which can be
+# write-all. Actions are pinned to commit SHAs; see the note in ci.yml.
+permissions:
+  contents: read
+
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Prebuilt binary rather than `cargo install cargo-audit`, which compiles ~200
       # crates and would make the cheapest gate in this repo the slowest one.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-audit
       # Deliberately NOT `--deny warnings`.
@@ -49,8 +54,8 @@ jobs:
       # cargo-audit splits its findings: *vulnerabilities* exit non-zero on their own,
       # while *warnings* (unmaintained, unsound, yanked) are reported and do not fail.
       # That default is the one we want. This tree knowingly carries old-but-working
-      # deps -- bincode 1.3 sits under the HID packet layer and sysinfo 0.29 backs the
-      # Actions poll -- and an unmaintained advisory against either is information, not
+      # deps -- sysinfo 0.29 backs the Actions poll, and tao pulls in `instant` -- and an
+      # unmaintained advisory against either is information, not
       # a reason to block a fan-floor fix from merging. Promoting warnings to errors
       # would make the gate fire on things nobody intends to act on today, and a gate
       # that cries wolf gets disabled. Vulnerabilities still stop the build.

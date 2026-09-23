@@ -16,13 +16,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default; only the build job, which attests and publishes, gets more.
+# These used to be workflow-wide, so the gate job (and every action it runs) could also
+# mint the OIDC token that attests a release binary. Actions are pinned to commit SHAs
+# and cargo runs `--locked`; see the note in ci.yml.
 permissions:
-  contents: write
-  # Required by actions/attest-build-provenance: id-token to obtain the OIDC token
-  # that proves *this* workflow run produced the files, attestations to store the
-  # signed statement. Both are additive; nothing else in this workflow uses them.
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,7 +30,7 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # No librust-atk-dev: it no longer installs on ubuntu-latest and was never the
       # right package (a Rust crate source, not C headers). libgtk-3-dev brings the
       # real ATK development files with it. See the note in ci.yml.
@@ -42,23 +41,39 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -Dwarnings
+        run: cargo clippy --locked --all-targets --all-features -- -Dwarnings
       - name: Tests
-        run: cargo test -p librazer --verbose
+        run: cargo test --locked -p librazer --verbose
 
   build:
     needs: gate
     runs-on: windows-latest
+    permissions:
+      contents: write # the draft release
+      # Required by actions/attest-build-provenance: id-token to obtain the OIDC token
+      # that proves *this* workflow run produced the files, attestations to store the
+      # signed statement.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The tray crate is Windows-only, so its tests cannot run on the Linux gate.
-      # This is the only place in CI they execute at all.
-      - name: Tray tests
-        run: cargo test --release --target x86_64-pc-windows-msvc -p razer-tray
+      # A tag that disagrees with the crate version would publish a razer-tray whose
+      # About box reports a different version than its release page.
+      - name: Tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path razer-tray/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != razer-tray version v$v" }
+
+      # The tray and CLI crates don't build on the Linux gate's test step, so their
+      # tests run here.
+      - name: Tray and CLI tests
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc -p razer-tray -p razer-cli
 
       - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
 
       - name: Collect artifacts
         shell: pwsh
@@ -81,24 +96,30 @@ jobs:
       # attestation binds each .exe to this repository, this workflow, and this commit,
       # verifiable by anyone with:
       #
-      #   gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl
+      #   gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl \
+      #     --source-ref refs/tags/vX.Y.Z \
+      #     --signer-workflow sqmagellan/razer-ctl/.github/workflows/release.yml
+      #
+      # Both extra flags matter. `--repo` alone accepts anything this workflow ever
+      # attested, and `workflow_dispatch` runs it from any branch, so an exe built from
+      # an unreviewed branch passed the command these notes used to print.
       #
       # Free, and it needs no certificate authority, so it is worth having whether or
       # not real code signing ever materialises.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "dist/*.exe"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: razer-ctl-windows-x86_64
           path: dist/
 
       - name: Draft release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
           files: |
@@ -115,7 +136,7 @@ jobs:
             it was built by this repository's release workflow from this tag:
 
             ```
-            gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl
+            gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl --source-ref ${{ github.ref }} --signer-workflow sqmagellan/razer-ctl/.github/workflows/release.yml
             ```
 
             **Tested on one model only** — see the Device support section of the README for

@@ -9,6 +9,20 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only token. Without this the jobs inherit the repository default, which can be
+# write-all.
+permissions:
+  contents: read
+
+# Every `uses:` in these workflows is pinned to a full commit SHA, with its tag in a
+# comment. A tag can be moved to different code by whoever controls the action's repo
+# (the tj-actions/changed-files compromise of March 2025 did exactly that), and in the
+# release job such an action runs with the OIDC token that attests our binaries.
+# Bump a pin by resolving the new tag: `git ls-remote <repo> 'refs/tags/vX.Y.Z^{}'`.
+#
+# Every cargo invocation is `--locked`: if Cargo.toml and Cargo.lock ever disagree the
+# build fails instead of silently resolving versions nobody reviewed.
+
 # Caching note: this used to run sccache (`RUSTC_WRAPPER: sccache` set workflow-wide,
 # plus mozilla-actions/sccache-action). On the first run against a real GitHub
 # repository, that broke every job at once, in two different ways:
@@ -33,20 +47,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libudev-dev
       - name: Run librazer tests
-        run: cargo test -p librazer --verbose
+        run: cargo test --locked -p librazer --verbose
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -59,31 +73,31 @@ jobs:
       - name: Run fmt
         run: cargo fmt --all --check
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -Dwarnings
+        run: cargo clippy --locked --all-targets --all-features -- -Dwarnings
 
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Build with the MSVC toolchain: that is what the released binaries use
       # (`cargo xwin ... --target x86_64-pc-windows-msvc` locally), and the tray
       # links Win32 APIs whose bindings differ subtly between msvc and gnu. CI used
       # to build windows-gnu, which meant the configuration we ship was never the
       # configuration CI proved.
       - name: Build for Windows (msvc)
-        run: cargo build --verbose --release --target x86_64-pc-windows-msvc
+        run: cargo build --locked --verbose --release --target x86_64-pc-windows-msvc
       # The tray crate can only be built for Windows, so its tests cannot run on the
       # Linux `test` job above -- this is the only place they execute in CI. Without
       # this they were hand-run on a physical Blade, which is not a gate.
       - name: Run razer-tray tests
-        run: cargo test --release --target x86_64-pc-windows-msvc -p razer-tray
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc -p razer-tray -p razer-cli
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # razer-tray is a workspace member with a cfg(target_os = "linux") dependency
       # block, so a plain `cargo build` here compiles it too -- hence the GTK and xdo
       # headers, which tray-icon/tao need on Linux.
@@ -98,4 +112,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libudev-dev libxdo-dev libgtk-3-dev
       - name: Build for Linux
-        run: cargo build --verbose --release
+        run: cargo build --locked --verbose --release
