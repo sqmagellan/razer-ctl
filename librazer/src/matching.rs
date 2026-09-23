@@ -15,10 +15,11 @@ pub fn find_descriptor<'a>(model: &str, supported: &'a [Descriptor]) -> Option<&
 ///
 /// Sourced from the union of the reference device tables (razer-laptop-control's
 /// `laptops.json`, 37 models, and the Revived fork's 50): pre-2023 chassis floor at
-/// 3500 RPM, 2023-and-later at 2200. Taking the *lower* floor is the safe direction
-/// -- the EC clamps a too-low request up to its real minimum, so the worst case is a
-/// menu entry that behaves like "minimum", whereas guessing too high would hide usable
-/// quiet settings. The ceiling is the common 5000.
+/// 3500 RPM, 2023-and-later at 2200. Taking the *lower* floor hides no usable quiet
+/// setting, but its cost is not zero: below a chassis's real floor the EC accepts the write,
+/// reads the set point back unchanged, and runs at the floor, so a too-low preset reports a
+/// speed the fan is not doing. The tray renders such a set point as "floor" rather than
+/// as the speed. The ceiling is the common 5000.
 pub const FALLBACK_FAN_RPM_RANGE: (u16, u16) = (2200, 5000);
 
 /// Build a best-effort descriptor for an unrecognized Razer laptop.

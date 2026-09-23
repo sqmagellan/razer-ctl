@@ -23,8 +23,9 @@ pub const FAN_RPM_STEP: u16 = 400;
 
 /// Widest manual-fan bounds across all known Blade models, for callers that must fix a
 /// static range *before* the device is detected (e.g. the CLI arg parser). The per-device
-/// range lives on the [`crate::descriptor::Descriptor`] (`fan_rpm_range`) and is narrower;
-/// the EC clamps anything outside its real range regardless.
+/// range lives on the [`crate::descriptor::Descriptor`] (`fan_rpm_range`) and is narrower.
+/// Below a chassis's floor the EC does NOT refuse: it stores the value and spins at the
+/// floor anyway (measured on 0x029F), so validation has to happen here, in software.
 ///
 /// These are the true extremes of every chassis we know of, and there used to be three
 /// disagreeing numbers for the same idea: `command.rs` hard-coded `0..=5500`, this ceiling
@@ -290,6 +291,30 @@ pub fn next_perf_mode(current: PerfMode) -> PerfMode {
 }
 
 impl DeviceState {
+    /// The same intent with the two invariants the EC imposes made explicit, so no path
+    /// can hand `apply` a state the device cannot hold:
+    ///
+    /// - `max_fan` exists only in Custom (the EC rejects it elsewhere, and `read` reports it
+    ///   false there). A stray `true` outside Custom never converges: Enforce saw it as drift
+    ///   on every poll, and it came back unasked the next time the cycle reached Custom.
+    /// - A manual RPM is stored as rpm/100 and floored/clamped by the chassis, so anything
+    ///   outside `fan_rpm_range` or off a 100 step is snapped to the nearest value the
+    ///   hardware will actually run and report back.
+    ///
+    /// Pure and idempotent; callers normalize at the boundary (config load, menu pick,
+    /// Action overlay) rather than trusting every producer to get it right.
+    pub fn normalized(self, fan_rpm_range: (u16, u16)) -> Self {
+        let mut out = self;
+        if !matches!(out.perf_mode, PerfMode::Custom(..)) {
+            out.max_fan = false;
+        }
+        if let FanSpeed::Manual(rpm) = out.fan_speed {
+            let (lo, hi) = fan_rpm_range;
+            out.fan_speed = FanSpeed::Manual((rpm.clamp(lo, hi) / 100) * 100);
+        }
+        out
+    }
+
     /// Read the device's *actual* current state. Used by the Mirror refresh to keep
     /// the tray display honest. This is read-only: callers must treat the result as
     /// something to *display*, never to re-apply (re-applying would fight external
@@ -355,8 +380,9 @@ impl DeviceState {
 
     /// Perf mode + fan + logo -- the settings shared by `apply()` (full write) and
     /// `enforce_to()` (the Synapse tug-of-war reassert). Kept in one place so the two
-    /// can't drift. Fan failures are logged but non-fatal (manual RPM can be rejected
-    /// depending on mode); a logo/perf failure propagates.
+    /// can't drift. Every write is attempted; the first failure (perf, then fan, then logo)
+    /// is returned. A fan failure used to be logged and dropped, so a Busy that outlasted
+    /// the retries left the tray showing and saving a speed the fan never took.
     ///
     /// The perf/fan/logo writes are *independent* EC commands, so a failure in one is
     /// not a reason to skip the rest: bailing early used to leave the device in the new
@@ -398,11 +424,23 @@ impl DeviceState {
             }
         }
 
-        if let Err(e) = match self.fan_speed {
+        let fan_result = match self.fan_speed {
             FanSpeed::Auto => command::set_fan_mode(device, crate::types::FanMode::Auto),
+            // Validate BEFORE switching the mode: a rejected RPM used to leave the fan in
+            // Manual at whatever set point the EC last held (possibly 4800) while the UI
+            // showed the rejected value.
+            FanSpeed::Manual(rpm)
+                if !rpm.is_multiple_of(100)
+                    || !(FAN_RPM_MIN_ANY..=FAN_RPM_MAX_ANY).contains(&rpm) =>
+            {
+                Err(anyhow::anyhow!(
+                    "manual fan {rpm} RPM is not representable; fan mode left unchanged"
+                ))
+            }
             FanSpeed::Manual(rpm) => command::set_fan_mode(device, crate::types::FanMode::Manual)
                 .and_then(|_| command::set_fan_rpm(device, rpm, false)),
-        } {
+        };
+        if let Err(e) = &fan_result {
             log::warn!("fan command failed: {:?}", e);
         }
 
@@ -411,9 +449,8 @@ impl DeviceState {
             log::warn!("logo command failed: {:?}", e);
         }
 
-        // Perf mode is the more consequential of the two hard-failure paths, so it wins
-        // when both fail; the logo error still surfaces when perf succeeded.
-        perf_result.and(logo_result)
+        // Most consequential first: perf, then fan, then logo.
+        perf_result.and(fan_result).and(logo_result)
     }
 
     /// Carry ONLY the fields the user actually changed from `base`, leaving the rest of
@@ -479,9 +516,10 @@ impl DeviceState {
         command::set_battery_care(device, self.battery_care)
     }
 
-    /// Write the keyboard backlight effect + color, if one is configured. Write-only (Chroma
-    /// has no getter on this device), so it's driven purely from stored intent -- never read
-    /// back, never in `enforced_fields_differ` or the Mirror poll. `None` leaves the keyboard
+    /// Write the keyboard backlight effect, if one is configured. Driven from stored intent:
+    /// `read` does report the effect (0x0f82), but it is deliberately kept out of
+    /// `enforced_fields_differ`, because it is cosmetic and a model without the getter would
+    /// look like permanent drift. `None` leaves the keyboard
     /// lighting untouched (the default), so this is a no-op for configs/users that never set an
     /// effect. Kept as its own method so callers beyond `apply()` (e.g. a future resume
     /// re-assert, if HW testing shows the EC drops the effect on wake) can re-push it cheaply.
@@ -799,11 +837,82 @@ pub fn profile_for_power(
     active_rule: Option<&AppProfile>,
 ) -> Option<DeviceState> {
     let base = if ac_power { ac_state } else { battery_state };
-    let target = match active_rule {
+    // A rule restricted to the other power source must not be re-overlaid here. The
+    // process scan that would retire it runs every few seconds, and until then an
+    // AC-only Hyperboost rule was being applied on battery right after unplugging.
+    let target = match active_rule.filter(|rule| rule.allowed_on(ac_power)) {
         Some(rule) => rule.overlay(base),
         None => *base,
     };
     (*current != target).then_some(target)
+}
+
+/// The effective state while an app Action is running, including any picks the user made
+/// during it.
+///
+/// Without this the Action's state was recomputed from the rule on every tick, so a pick
+/// of a field the rule overlays (the perf mode, the fan) was reverted about a second
+/// later, although the event loop promises "a manual pick mid-session stays put". The
+/// session remembers the effective state instead: the rule seeds it, a pick replaces it,
+/// and an AC/battery switch moves the picks across to the new power source's overlay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionSession {
+    /// Index of the running rule in `ConfigState::app_profiles`.
+    pub rule: usize,
+    /// What the device should be in while the rule's process runs.
+    pub effective: DeviceState,
+}
+
+impl ActionSession {
+    /// A rule's process just appeared: the session starts as the rule overlaid on the
+    /// saved profile for the current power source.
+    pub fn start(rule: usize, profile: &AppProfile, base: &DeviceState, range: (u16, u16)) -> Self {
+        Self {
+            rule,
+            effective: profile.overlay(base).normalized(range),
+        }
+    }
+
+    /// The user picked `picked` while the session ran; it holds until the process exits.
+    pub fn pick(&mut self, picked: DeviceState) {
+        self.effective = picked;
+    }
+
+    /// The power source changed. Re-seed from the new source's saved profile, then carry
+    /// over exactly the fields the user changed during the session.
+    pub fn power_changed(
+        &mut self,
+        profile: &AppProfile,
+        old_base: &DeviceState,
+        new_base: &DeviceState,
+        range: (u16, u16),
+    ) {
+        let old_seed = profile.overlay(old_base).normalized(range);
+        let new_seed = profile.overlay(new_base).normalized(range);
+        self.effective = DeviceState::carry_changes(new_seed, old_seed, self.effective);
+    }
+}
+
+/// Sample the fans until a reading can be trusted, for one-shot callers (the CLI) that
+/// have no running filter of their own.
+///
+/// About 3 in 10 sparse reads on 0x029F carry one impossible zone, and a stop needs two
+/// agreeing reads before it is believed (see [`FanRpmFilter`]), so up to `max_reads` samples
+/// are taken ~150 ms apart. Returns the trusted value, or the last raw read with `false`
+/// when nothing could be confirmed.
+pub fn sample_fan_rpm(device: &impl HidTransport, max_reads: usize) -> Result<(FanRpm, bool)> {
+    let mut filter = FanRpmFilter::default();
+    let mut last = get_fan_rpm(device)?;
+    for i in 0..max_reads.max(1) {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            last = get_fan_rpm(device)?;
+        }
+        if let Some(trusted) = filter.accept(last) {
+            return Ok((trusted, true));
+        }
+    }
+    Ok((last, false))
 }
 
 #[cfg(test)]
@@ -1763,5 +1872,162 @@ mod tests {
         assert_eq!(nearest_brightness_percent(130), 50);
         // 210 is the value the maintainer's config holds; it lies between 80% (204) and 90% (230).
         assert_eq!(nearest_brightness_percent(210), 80);
+    }
+
+    const RANGE: (u16, u16) = (2000, 5000);
+
+    #[test]
+    fn normalizing_clears_max_fan_outside_custom_only() {
+        let mut battery = dstate(PerfMode::Battery, FanSpeed::Auto, 0);
+        battery.max_fan = true;
+        assert!(!battery.normalized(RANGE).max_fan);
+
+        let mut custom = dstate(
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            FanSpeed::Auto,
+            0,
+        );
+        custom.max_fan = true;
+        assert!(custom.normalized(RANGE).max_fan);
+    }
+
+    #[test]
+    fn normalizing_snaps_a_manual_rpm_to_what_the_hardware_holds() {
+        let at = |rpm| dstate(PerfMode::Silent, FanSpeed::Manual(rpm), 0).normalized(RANGE);
+        assert_eq!(at(800).fan_speed, FanSpeed::Manual(2000), "floor");
+        assert_eq!(at(9000).fan_speed, FanSpeed::Manual(5000), "ceiling");
+        assert_eq!(
+            at(2050).fan_speed,
+            FanSpeed::Manual(2000),
+            "wire is rpm/100"
+        );
+        assert_eq!(
+            at(3200).fan_speed,
+            FanSpeed::Manual(3200),
+            "valid is untouched"
+        );
+        let auto = dstate(PerfMode::Silent, FanSpeed::Auto, 0);
+        assert_eq!(auto.normalized(RANGE), auto);
+    }
+
+    #[test]
+    fn normalizing_is_idempotent() {
+        let mut s = dstate(PerfMode::Balanced, FanSpeed::Manual(2150), 10);
+        s.max_fan = true;
+        let once = s.normalized(RANGE);
+        assert_eq!(once.normalized(RANGE), once);
+    }
+
+    #[test]
+    fn an_unrepresentable_manual_rpm_never_switches_the_fan_to_manual() {
+        let mock = crate::transport::MockTransport::echo();
+        let s = dstate(PerfMode::Silent, FanSpeed::Manual(2050), 0);
+        let err = s.apply(&mock).unwrap_err();
+        assert!(err.to_string().contains("not representable"), "{err}");
+        for (cmd, args) in mock.sent() {
+            assert_ne!(cmd, 0x0d01, "no set point may be written");
+            if cmd == 0x0d02 {
+                assert_eq!(args[3], FanMode::Auto as u8, "mode must not go Manual");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_fan_write_is_reported_not_swallowed() {
+        // 0x0d01 answers without echoing its args, which the command layer rejects.
+        let mock = crate::transport::MockTransport::with_responder(|req| {
+            if req.command() == 0x0d01 {
+                crate::packet::Packet::new(req.command(), &[])
+            } else {
+                crate::packet::Packet::new(req.command(), req.get_args())
+            }
+        });
+        let s = dstate(PerfMode::Silent, FanSpeed::Manual(3000), 0);
+        assert!(s.apply(&mock).is_err());
+    }
+
+    #[test]
+    fn an_ac_only_rule_is_not_overlaid_on_battery() {
+        let ac = dstate(PerfMode::Balanced, FanSpeed::Auto, 0);
+        let batt = dstate(PerfMode::Battery, FanSpeed::Auto, 0);
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            require_ac: Some(true),
+            perf_mode: Some(PerfMode::Hyperboost),
+            ..Default::default()
+        };
+        let running_on_ac = rule.overlay(&ac);
+        // Just unplugged: the device is still in the rule's state.
+        let target = profile_for_power(false, &running_on_ac, &ac, &batt, Some(&rule));
+        assert_eq!(target, Some(batt));
+    }
+
+    #[test]
+    fn a_pick_during_an_action_holds_until_the_process_exits() {
+        let ac = dstate(PerfMode::Balanced, FanSpeed::Auto, 0);
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            perf_mode: Some(PerfMode::Hyperboost),
+            ..Default::default()
+        };
+        let mut session = ActionSession::start(0, &rule, &ac, RANGE);
+        assert_eq!(session.effective.perf_mode, PerfMode::Hyperboost);
+        let picked = DeviceState {
+            perf_mode: PerfMode::Silent,
+            ..session.effective
+        };
+        session.pick(picked);
+        assert_eq!(session.effective.perf_mode, PerfMode::Silent);
+    }
+
+    #[test]
+    fn a_power_switch_during_an_action_keeps_the_users_picks() {
+        let ac = dstate(PerfMode::Balanced, FanSpeed::Auto, 50);
+        let batt = dstate(PerfMode::Battery, FanSpeed::Auto, 0);
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            fan_speed: Some(FanSpeed::Manual(4000)),
+            ..Default::default()
+        };
+        let mut session = ActionSession::start(0, &rule, &ac, RANGE);
+        // The user turns the fan down during the game.
+        session.pick(DeviceState {
+            fan_speed: FanSpeed::Manual(3000),
+            ..session.effective
+        });
+        session.power_changed(&rule, &ac, &batt, RANGE);
+        // The battery profile's perf mode and brightness, the user's fan pick.
+        assert_eq!(session.effective.perf_mode, PerfMode::Battery);
+        assert_eq!(session.effective.lights_mode.keyboard_brightness, 0);
+        assert_eq!(session.effective.fan_speed, FanSpeed::Manual(3000));
+    }
+
+    #[test]
+    fn the_one_shot_fan_sampler_skips_a_lone_zero_read() {
+        use std::cell::Cell;
+        let n = Cell::new(0u32);
+        // Zone reads alternate 1,2,1,2...; the first zone-2 read is a bogus 0.
+        let mock = crate::transport::MockTransport::with_responder(move |req| {
+            let i = n.get();
+            n.set(i + 1);
+            let zone = req.get_args()[1];
+            let val = if i == 1 { 0 } else { 30 };
+            crate::packet::Packet::new(req.command(), &[0, zone, val])
+        });
+        let (fans, trusted) = sample_fan_rpm(&mock, 3).unwrap();
+        assert!(trusted);
+        assert_eq!(fans, rpm(3000, 3000));
+    }
+
+    #[test]
+    fn the_one_shot_fan_sampler_needs_two_stopped_reads_to_believe_a_stop() {
+        let mock = crate::transport::MockTransport::with_responder(|req| {
+            crate::packet::Packet::new(req.command(), &[0, req.get_args()[1], 0])
+        });
+        let (fans, trusted) = sample_fan_rpm(&mock, 1).unwrap();
+        assert!(!trusted, "one stopped read is not enough");
+        assert!(fans.is_stopped());
+        let (_, trusted) = sample_fan_rpm(&mock, 2).unwrap();
+        assert!(trusted);
     }
 }

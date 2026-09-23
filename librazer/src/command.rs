@@ -107,7 +107,13 @@ pub fn get_perf_mode(device: &impl HidTransport) -> Result<(PerfMode, FanMode)> 
     // Disagreement: either a mode changed mid-read (transient -- a re-read agrees) or the
     // zones genuinely diverged (persists).
     let (r1, r2) = read_zones(device)?;
-    ensure!(r1 == r2, "Modes do not match: r1 = {:?}, r2 = {:?}", r1, r2);
+    if r1 != r2 {
+        // Typed, so the tray can repair it (re-assert intent to both zones) instead of
+        // failing every read until the user happens to pick a mode by hand.
+        return Err(anyhow::Error::new(crate::error::PerfZonesDiverged(
+            format!("zone 1 = {r1:?}, zone 2 = {r2:?}"),
+        )));
+    }
 
     Ok(r1)
 }
@@ -151,6 +157,14 @@ pub fn set_fan_rpm(device: &impl HidTransport, rpm: u16, check_mode: bool) -> Re
         rpm,
         crate::state::FAN_RPM_MIN_ANY,
         crate::state::FAN_RPM_MAX_ANY
+    );
+    // The wire carries rpm/100, so 2050 used to go out as 20 and read back as 2000: a
+    // set point that could never be confirmed, which Enforce then saw as permanent drift.
+    ensure!(
+        rpm.is_multiple_of(100),
+        "Fan RPM {rpm} is not a multiple of 100; the EC stores rpm/100, so it would be \
+         written as {} and never read back as {rpm}",
+        rpm / 100 * 100
     );
     if check_mode {
         ensure!(
@@ -205,7 +219,9 @@ pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> 
     // error rather than a panic in the fixed 80-byte arg buffer.
     let report = Packet::try_new(command, args)?;
     println!("Report   {:?}", report);
-    let response = device.send(report)?;
+    // send_once: an arbitrary command is not known to be idempotent, so a Failure answer
+    // is reported rather than re-sent four more times.
+    let response = device.send_once(report)?;
     println!("Response {:?}", response);
     Ok(())
 }
@@ -220,7 +236,7 @@ pub fn custom_command_tx(
 ) -> Result<()> {
     let report = Packet::try_new_with_tx(command, args, tx)?;
     println!("Report   {:?}", report);
-    let response = device.send(report)?;
+    let response = device.send_once(report)?;
     println!("Response {:?}", response);
     Ok(())
 }
@@ -290,8 +306,9 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
 // ---- keyboard RGB effect (0x0f02 extended-matrix effect; LED region 0x05 = backlight) ----
 //
 // HW-verified on 0x029F (2026-07-10): applies in Normal device mode (Fn keys survive), no
-// driver mode needed. Chroma is WRITE-ONLY here (no getter), so this is never read back --
-// callers hold the effect as intent and re-apply it (see `DeviceState::apply_keyboard_lighting`).
+// driver mode needed. The effect can be read back through 0x0f82 (see `get_keyboard_effect`,
+// HW-verified 2026-07-25), but it is still held as intent and re-applied rather than
+// reconciled (see `DeviceState::apply_keyboard_lighting`).
 //
 // EFFECTS-ONLY, NO ARBITRARY COLOR (by design): a chosen color needs driver mode (host-streamed
 // frames = what Synapse does), which kills the Fn keys. In Normal mode the EC ignores color
@@ -721,10 +738,11 @@ mod tests {
             reply(&[0, 0, perf, FanMode::Auto as u8])
         });
 
-        let err = get_perf_mode(&mock).unwrap_err().to_string();
+        let err = get_perf_mode(&mock).unwrap_err();
         assert!(
-            err.contains("Modes do not match"),
-            "unexpected error: {err}"
+            err.downcast_ref::<crate::error::PerfZonesDiverged>()
+                .is_some(),
+            "divergence must be typed so the tray can repair it: {err}"
         );
     }
 
