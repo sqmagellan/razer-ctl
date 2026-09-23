@@ -25,6 +25,13 @@ use anyhow::Result;
 /// rather than silently in someone else's crate.
 pub trait HidTransport {
     fn send(&self, packet: Packet) -> Result<Packet>;
+
+    /// Like [`HidTransport::send`], but a command the EC answers with `Failure` is not
+    /// re-sent. Used for caller-supplied raw commands, whose idempotence is unknown.
+    /// Transports without a retry loop of their own can keep the default.
+    fn send_once(&self, packet: Packet) -> Result<Packet> {
+        self.send(packet)
+    }
 }
 
 /// Test-only `HidTransport` that records every request and replies via a

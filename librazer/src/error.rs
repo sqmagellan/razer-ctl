@@ -94,6 +94,37 @@ pub enum ExitCode {
     DeviceError = 5,
 }
 
+/// The OS-level HID exchange itself failed: the feature-report write or read was refused,
+/// or came back the wrong size. Distinct from [`crate::packet::ResponseError`], where the EC
+/// answered and the answer was bad; here nothing usable came back at all. Transient in
+/// practice (right after resume, or while another process holds the interface), so it
+/// classifies with the retryable device errors.
+#[derive(Debug)]
+pub struct TransportError(pub String);
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HID transport error: {}", self.0)
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// The EC's two perf zones report different modes on two consecutive reads, so this is
+/// not a mode change racing the read. It happens when a two-zone write is interrupted
+/// between zones (a process killed mid-apply). Typed so a caller can repair it by
+/// re-asserting intent instead of treating the device as unreadable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfZonesDiverged(pub String);
+
+impl std::fmt::Display for PerfZonesDiverged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "perf zones disagree: {}", self.0)
+    }
+}
+
+impl std::error::Error for PerfZonesDiverged {}
+
 impl ExitCode {
     /// Classify a failure into an exit status.
     ///
@@ -110,6 +141,11 @@ impl ExitCode {
             }
             if cause.downcast_ref::<DetectError>().is_some() {
                 return ExitCode::NoDevice;
+            }
+            if cause.downcast_ref::<TransportError>().is_some()
+                || cause.downcast_ref::<PerfZonesDiverged>().is_some()
+            {
+                return ExitCode::DeviceError;
             }
         }
         ExitCode::Generic
@@ -138,6 +174,15 @@ mod tests {
                 "{e:?} should be retryable, not unsupported"
             );
         }
+    }
+
+    #[test]
+    fn transport_and_divergence_errors_are_retryable_device_errors() {
+        let io = anyhow::Error::new(TransportError("get_feature_report: busy".into()))
+            .context("reading fan rpm");
+        assert_eq!(ExitCode::classify(&io), ExitCode::DeviceError);
+        let div = anyhow::Error::new(PerfZonesDiverged("Silent vs Balanced".into()));
+        assert_eq!(ExitCode::classify(&div), ExitCode::DeviceError);
     }
 
     #[test]

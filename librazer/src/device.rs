@@ -1,5 +1,5 @@
 use crate::descriptor::{Descriptor, SUPPORTED};
-use crate::error::DetectError;
+use crate::error::{DetectError, TransportError};
 use crate::packet::{Packet, ResponseError};
 use crate::transport::HidTransport;
 
@@ -83,9 +83,22 @@ impl Device {
     }
 
     pub fn send(&self, report: Packet) -> Result<Packet> {
+        self.exchange(report, true)
+    }
+
+    /// One exchange that does NOT repeat a command the EC answered with `Failure`.
+    ///
+    /// For caller-supplied raw commands (`razer-cli ... cmd`): a Failure there may mean the
+    /// command ran and reported an error, and nothing establishes that an arbitrary command is
+    /// idempotent, so sending it four more times is not a safe default. Busy (the EC did not
+    /// action it) and bus mismatches are still retried.
+    pub fn send_once(&self, report: Packet) -> Result<Packet> {
+        self.exchange(report, false)
+    }
+
+    fn exchange(&self, report: Packet, retry_failure: bool) -> Result<Packet> {
         // extra byte for report id
         let mut response_buf: Vec<u8> = vec![0x00; 1 + std::mem::size_of::<Packet>()];
-        //println!("Report {:?}", report);
 
         const MAX_RETRIES: usize = 5;
         // A busy EC (status 0x01) is asking us to come back shortly, so retry fast;
@@ -93,30 +106,58 @@ impl Device {
         const BUSY_BACKOFF: time::Duration = time::Duration::from_millis(20);
         const RETRY_BACKOFF: time::Duration = time::Duration::from_millis(500);
 
+        let request: Vec<u8> = [0_u8; 1] // report id
+            .iter()
+            .copied()
+            .chain(Into::<Vec<u8>>::into(&report))
+            .collect();
+
         for attempt in 0..MAX_RETRIES {
+            let last = attempt == MAX_RETRIES - 1;
             thread::sleep(time::Duration::from_micros(1000));
 
-            self.device
-                .send_feature_report(
-                    [0_u8; 1] // report id
-                        .iter()
-                        .copied()
-                        .chain(Into::<Vec<u8>>::into(&report))
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                )
-                .context("Failed to send feature report")?;
+            // An OS-level failure (the HID stack busy right after resume, a handle racing
+            // another process) used to abort on the first attempt and skip the retry loop
+            // entirely, and it surfaced as an unclassified error (exit 1) although it is
+            // exactly the retryable kind. Now it gets the same backoff as a bad response,
+            // and a typed error so it classifies as a device error (exit 5).
+            if let Err(e) = self.device.send_feature_report(&request) {
+                if last {
+                    return Err(anyhow::Error::new(TransportError(format!(
+                        "send_feature_report: {e}"
+                    ))));
+                }
+                thread::sleep(RETRY_BACKOFF);
+                continue;
+            }
 
             thread::sleep(time::Duration::from_micros(2000));
 
-            let response_size = self.device.get_feature_report(&mut response_buf)?;
+            let response_size = match self.device.get_feature_report(&mut response_buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    if last {
+                        return Err(anyhow::Error::new(TransportError(format!(
+                            "get_feature_report: {e}"
+                        ))));
+                    }
+                    thread::sleep(RETRY_BACKOFF);
+                    continue;
+                }
+            };
             if response_buf.len() != response_size {
-                return Err(anyhow!("Response size != {}", response_buf.len()));
+                if last {
+                    return Err(anyhow::Error::new(TransportError(format!(
+                        "response size {response_size} != {}",
+                        response_buf.len()
+                    ))));
+                }
+                thread::sleep(RETRY_BACKOFF);
+                continue;
             }
 
             // skip report id byte
             let response = <&[u8] as TryInto<Packet>>::try_into(&response_buf[1..])?;
-            //println!("Response {:?}", response);
 
             let err = match response.classify_response(&report) {
                 Ok(()) => return Ok(response),
@@ -128,11 +169,13 @@ impl Device {
             // Propagate the ERROR VALUE, not its Display string: callers (the CLI's exit
             // codes, `feature` probing) need to distinguish "this firmware lacks the
             // command" from "the bus is out of step", and `anyhow!("{}", err)` erased that.
-            if err == ResponseError::NotSupported {
+            if err == ResponseError::NotSupported
+                || (err == ResponseError::Failure && !retry_failure)
+            {
                 return Err(anyhow::Error::new(err));
             }
 
-            if attempt == MAX_RETRIES - 1 {
+            if last {
                 return Err(anyhow::Error::new(err).context(format!(
                     "failed to match report after {MAX_RETRIES} attempts"
                 )));
@@ -217,5 +260,9 @@ impl HidTransport for Device {
     /// keeps passing a `Device` unchanged.
     fn send(&self, packet: Packet) -> Result<Packet> {
         Device::send(self, packet)
+    }
+
+    fn send_once(&self, packet: Packet) -> Result<Packet> {
+        Device::send_once(self, packet)
     }
 }
