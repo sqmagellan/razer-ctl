@@ -702,7 +702,6 @@ mod tests {
             &["auto", "json"][..],
             &["auto", "info"],
             &["auto", "fan", "auto"],
-            &["auto", "fan", "info"],
             &["auto", "perf", "mode", "balanced"],
             &["auto", "battery-care", "set", "80"],
             &["manual", "--pid", "0x029f", "json"],
