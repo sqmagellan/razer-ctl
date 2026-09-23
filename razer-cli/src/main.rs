@@ -560,9 +560,9 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn real_main() -> Result<()> {
-    env_logger::init();
-
+/// The whole argument tree. Separate from `real_main` so it can be checked without a
+/// device: clap validates the tree only when it is used, and the CLI had no tests at all.
+fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
     let info_cmd = clap::Command::new("info").about("Get device info");
     let json_cmd = clap::Command::new("json").about("Print full device state as JSON");
     let auto_cmd = clap::Command::new("auto")
@@ -582,6 +582,36 @@ fn real_main() -> Result<()> {
             .subcommand(json_cmd)
             .subcommand_required(true);
 
+    clap::command!()
+        .color(clap::ColorChoice::Always)
+        // Documented here as well as in the README, because a script author reaching for
+        // `--help` shouldn't have to go find a web page to learn what a failure means.
+        .after_help(
+            "Exit codes:\n  \
+             0  success\n  \
+             1  unclassified error\n  \
+             2  usage error (emitted by the argument parser)\n  \
+             3  no usable Razer laptop found (retrying will not help)\n  \
+             4  command not supported by this model (definitive; stop asking)\n  \
+             5  device communication error: busy, rejected, or out of step (retryable)",
+        )
+        .subcommand_required(true)
+        .subcommand(update_cmd(auto_cmd, cli_features))
+        .subcommand(update_cmd(manual_cmd, cli_features))
+        .subcommand(
+            clap::Command::new("enumerate")
+                .about("List discovered Razer devices")
+                .arg(
+                    arg!(--json "Print as JSON (this is what a device-support issue needs)")
+                        .action(clap::ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"))
+}
+
+fn real_main() -> Result<()> {
+    env_logger::init();
+
     // TODO: find a better way to detect auto mode in advance
     let is_auto_mode = std::env::args_os().nth(1) == Some("auto".into());
     let device = match is_auto_mode {
@@ -596,31 +626,7 @@ fn real_main() -> Result<()> {
     let mut cli_features: Vec<Box<dyn Cli>> = gen_cli_features(feature_list);
     cli_features.push(Box::new(CustomCommand));
 
-    let cmd = clap::command!()
-        .color(clap::ColorChoice::Always)
-        // Documented here as well as in the README, because a script author reaching for
-        // `--help` shouldn't have to go find a web page to learn what a failure means.
-        .after_help(
-            "Exit codes:\n  \
-             0  success\n  \
-             1  unclassified error\n  \
-             2  usage error (emitted by the argument parser)\n  \
-             3  no usable Razer laptop found (retrying will not help)\n  \
-             4  command not supported by this model (definitive; stop asking)\n  \
-             5  device communication error: busy, rejected, or out of step (retryable)",
-        )
-        .subcommand_required(true)
-        .subcommand(update_cmd(auto_cmd, &cli_features))
-        .subcommand(update_cmd(manual_cmd, &cli_features))
-        .subcommand(
-            clap::Command::new("enumerate")
-                .about("List discovered Razer devices")
-                .arg(
-                    arg!(--json "Print as JSON (this is what a device-support issue needs)")
-                        .action(clap::ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"));
+    let cmd = build_cli(&cli_features);
 
     let matches = cmd.get_matches();
 
@@ -659,4 +665,49 @@ fn real_main() -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli() -> Command {
+        let mut features = gen_cli_features(feature::ALL_FEATURES);
+        features.push(Box::new(CustomCommand));
+        build_cli(&features)
+    }
+
+    fn parses(args: &[&str]) -> bool {
+        cli()
+            .try_get_matches_from(std::iter::once("razer-cli").chain(args.iter().copied()))
+            .is_ok()
+    }
+
+    #[test]
+    fn the_argument_tree_is_valid() {
+        cli().debug_assert();
+    }
+
+    #[test]
+    fn fan_rpm_below_every_known_floor_is_a_usage_error() {
+        assert!(!parses(&["auto", "fan", "rpm", "1800"]));
+        assert!(parses(&["auto", "fan", "rpm", "3000"]));
+        assert!(!parses(&["auto", "fan", "rpm", "9000"]));
+    }
+
+    #[test]
+    fn every_documented_subcommand_parses() {
+        for args in [
+            &["auto", "json"][..],
+            &["auto", "info"],
+            &["auto", "fan", "auto"],
+            &["auto", "fan", "info"],
+            &["auto", "perf", "mode", "balanced"],
+            &["auto", "battery-care", "set", "80"],
+            &["manual", "--pid", "0x029f", "json"],
+            &["enumerate", "--json"],
+        ] {
+            assert!(parses(args), "{args:?} should parse");
+        }
+    }
 }

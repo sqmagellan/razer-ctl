@@ -1,11 +1,9 @@
 use anyhow::{ensure, Result};
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
 /// Packet is the structure of the packet that is sent to the Razer HID device and received back.
 /// Source https://github.com/Razer-Linux/razer-laptop-control-no-dkms/blob/main/razer_control_gui/src/device.rs.
 #[repr(C)]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct Packet {
     status: u8,
     id: u8,
@@ -14,7 +12,6 @@ pub struct Packet {
     data_size: u8,
     command_class: u8,
     command_id: u8,
-    #[serde(with = "BigArray")]
     args: [u8; 80],
     crc: u8,
     reserved: u8,
@@ -259,13 +256,55 @@ impl Packet {
     }
 }
 
+impl Packet {
+    /// Bytes on the wire: the fixed 90-byte report, laid out field by field.
+    pub const WIRE_SIZE: usize = 90;
+
+    /// Encode the report, explicitly and in field order.
+    ///
+    /// This used to be `bincode::serialize` (bincode 1.3 is unmaintained, RUSTSEC-2025-0141)
+    /// for one fixed struct of plain integers. The encoding is byte-identical to what it
+    /// produced, which is what has run on hardware: `remaining_packets` stays
+    /// little-endian. OpenRazer's struct declares it big-endian, but every packet here
+    /// carries 0, where the two agree; change it only with a device that sends non-zero.
+    fn to_wire(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::WIRE_SIZE);
+        bytes.push(self.status);
+        bytes.push(self.id);
+        bytes.extend_from_slice(&self.remaining_packets.to_le_bytes());
+        bytes.push(self.protocol_type);
+        bytes.push(self.data_size);
+        bytes.push(self.command_class);
+        bytes.push(self.command_id);
+        bytes.extend_from_slice(&self.args);
+        bytes.push(self.crc);
+        bytes.push(self.reserved);
+        debug_assert_eq!(bytes.len(), Self::WIRE_SIZE);
+        bytes
+    }
+
+    /// Decode a report; the caller has checked the length.
+    fn from_wire(data: &[u8; Self::WIRE_SIZE]) -> Self {
+        let mut args = [0u8; 80];
+        args.copy_from_slice(&data[8..88]);
+        Self {
+            status: data[0],
+            id: data[1],
+            remaining_packets: u16::from_le_bytes([data[2], data[3]]),
+            protocol_type: data[4],
+            data_size: data[5],
+            command_class: data[6],
+            command_id: data[7],
+            args,
+            crc: data[88],
+            reserved: data[89],
+        }
+    }
+}
+
 impl From<&Packet> for Vec<u8> {
     fn from(packet: &Packet) -> Vec<u8> {
-        // The wire layout is a fixed 90-byte `#[repr(C)]` struct of plain integers, so
-        // bincode cannot fail here; if it somehow did, an all-zero report would be
-        // silently wrong on the bus, and a panic is the honest outcome.
-        let mut bytes = bincode::serialize(packet)
-            .expect("Packet is a fixed-size POD struct; serialization cannot fail");
+        let mut bytes = packet.to_wire();
         // Stamp the checksum over the serialized form -- this is the single choke
         // point where a packet becomes wire bytes, so nothing can bypass it.
         bytes[Packet::CRC_OFFSET] = Packet::compute_crc(&bytes);
@@ -277,18 +316,44 @@ impl TryFrom<&[u8]> for Packet {
     type Error = anyhow::Error;
 
     fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
-        ensure!(
-            data.len() == std::mem::size_of::<Packet>(),
-            "Invalid raw data size"
-        );
-
-        Ok(bincode::deserialize::<Packet>(data)?)
+        let data: &[u8; Packet::WIRE_SIZE] = data
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid raw data size: {}", data.len()))?;
+        Ok(Packet::from_wire(data))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire layout, byte by byte. Before bincode was removed, the hand encoder was
+    /// checked equal to `bincode::serialize` for these packets (and a non-zero
+    /// `remaining_packets`); this pins that layout so it cannot drift.
+    #[test]
+    fn wire_layout_is_fixed() {
+        let mut p = Packet::new(0x0d02, &[1, 2, 3, 0xff]);
+        p.remaining_packets = 0x1234;
+        p.status = 0x02;
+        p.reserved = 0x77;
+        let bytes = p.to_wire();
+        assert_eq!(bytes.len(), Packet::WIRE_SIZE);
+        assert_eq!(std::mem::size_of::<Packet>(), Packet::WIRE_SIZE);
+        assert_eq!(bytes[0], 0x02, "status");
+        assert_eq!(bytes[1], Packet::TRANSACTION_ID, "transaction id");
+        assert_eq!(
+            &bytes[2..4],
+            &[0x34, 0x12],
+            "remaining_packets, little-endian"
+        );
+        assert_eq!(bytes[5], 4, "data_size");
+        assert_eq!(&bytes[6..8], &[0x0d, 0x02], "command class, id");
+        assert_eq!(&bytes[8..12], &[1, 2, 3, 0xff], "args");
+        assert!(bytes[12..88].iter().all(|b| *b == 0), "arg padding");
+        assert_eq!(bytes[89], 0x77, "reserved");
+        let back = Packet::from_wire(bytes.as_slice().try_into().unwrap());
+        assert_eq!(back.to_wire(), bytes, "round trip");
+    }
 
     #[test]
     fn transaction_id_constant_is_fixed_0x1f() {
