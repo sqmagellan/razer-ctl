@@ -63,9 +63,12 @@ jobs:
       - name: Tag matches the crate version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
+        # Through env, not pasted into the script: a ref name is data, not code.
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           $v = (Select-String -Path razer-tray/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != razer-tray version v$v" }
+          if ("v$v" -ne $env:TAG) { throw "tag $env:TAG != razer-tray version v$v" }
 
       # The tray and CLI crates don't build on the Linux gate's test step, so their
       # tests run here.

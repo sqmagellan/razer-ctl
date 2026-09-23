@@ -694,6 +694,7 @@ pub fn spawn_display_state_monitor() {
         // The perf-cycle hotkey lives on this window too: RegisterHotKey delivers WM_HOTKEY
         // to the registering window, and this is the tray's only window with a message loop
         // of its own. Registered here, before the early return below, and independent of it.
+        let mut have_hotkey = false;
         let spec = HOTKEY_SPEC
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -705,7 +706,10 @@ pub fn spawn_display_state_monitor() {
             match parse_hotkey(&spec) {
                 Some((mods, vk)) => {
                     match RegisterHotKey(hwnd, 1, HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT, vk) {
-                        Ok(()) => log::info!("perf-cycle hotkey registered: {spec}"),
+                        Ok(()) => {
+                            have_hotkey = true;
+                            log::info!("perf-cycle hotkey registered: {spec}");
+                        }
                         // Most often: another program already owns that combination.
                         Err(e) => log::warn!("could not register hotkey {spec}: {e:?}"),
                     }
@@ -719,7 +723,7 @@ pub fn spawn_display_state_monitor() {
 
         // Independent capabilities: losing display-state should not cost us resume, and vice
         // versa. Only an empty window is worth abandoning.
-        if !have_display && !have_resume {
+        if !have_display && !have_resume && !have_hotkey {
             log::warn!("display monitor: no power notifications registered, thread exiting");
             return;
         }
@@ -821,25 +825,31 @@ pub fn set_windows_power_mode(perf: crate::state::PerfMode) -> Result<()> {
         }
     };
 
-    static LAST: std::sync::Mutex<Option<u128>> = std::sync::Mutex::new(None);
-    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
-    if *last == Some(guid.to_u128()) {
-        return Ok(());
-    }
-
-    type SetOverlay = unsafe extern "system" fn(*const GUID) -> u32;
-    // SAFETY: powrprof.dll is a system DLL; the symbol, if present, has the signature
-    // `DWORD PowerSetActiveOverlayScheme(GUID*)` used by the Settings app. We pass a
-    // pointer to a GUID that lives across the call.
+    // Compared against what Windows says is in effect, not against what we last set:
+    // Windows keeps the slider per power source, and the user can move it themselves.
+    type GetEffective = unsafe extern "system" fn(*mut GUID) -> u32;
+    // `PowerSetActiveOverlayScheme(GUID)` takes the GUID BY VALUE. Declaring it that way
+    // lets the compiler apply the platform ABI (on x64 a 16-byte struct is passed via a
+    // hidden pointer, which is why passing `&guid` also happened to work).
+    type SetOverlay = unsafe extern "system" fn(GUID) -> u32;
+    // SAFETY: powrprof.dll is a system DLL, loaded once and never freed (a leaked module
+    // handle keeps the function pointers valid). The symbols, when present, have the
+    // signatures above, as used by the Settings app.
     let status = unsafe {
         let module = LoadLibraryW(w!("powrprof.dll"))?;
+        if let Some(get) = GetProcAddress(module, s!("PowerGetEffectiveOverlayScheme")) {
+            let get: GetEffective = std::mem::transmute(get);
+            let mut current = GUID::zeroed();
+            if get(&mut current) == 0 && current == guid {
+                return Ok(());
+            }
+        }
         let proc = GetProcAddress(module, s!("PowerSetActiveOverlayScheme"))
             .ok_or_else(|| anyhow::anyhow!("PowerSetActiveOverlayScheme not available"))?;
         let set: SetOverlay = std::mem::transmute(proc);
-        set(&guid)
+        set(guid)
     };
     anyhow::ensure!(status == 0, "PowerSetActiveOverlayScheme returned {status}");
-    *last = Some(guid.to_u128());
     log::info!("Windows power mode -> {label}");
     Ok(())
 }

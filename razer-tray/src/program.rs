@@ -115,6 +115,10 @@ pub struct ProgramState {
     /// The last device exchange failed; the event loop retries [`Self::sync`] with backoff
     /// instead of blocking inside the loop.
     pub needs_sync: bool,
+    /// Whether that sync must re-apply intent (a write failed, or first contact), or only
+    /// probe with a read (a read failed: the device may be fine, and re-writing intent
+    /// would overwrite a CLI or Synapse change the user made on purpose).
+    pub sync_apply: bool,
     /// Switch the Windows power mode along with the perf mode (config, opt-in).
     pub match_power_mode: bool,
     /// Kept only so a save doesn't drop it; read once at startup by `main`.
@@ -164,6 +168,7 @@ impl ProgramState {
             action: None,
             fan_rpm_range,
             needs_sync: true,
+            sync_apply: true,
             match_power_mode: config.match_windows_power_mode,
             cycle_perf_hotkey: config.cycle_perf_hotkey,
             warning: None,
@@ -235,12 +240,30 @@ impl ProgramState {
         tray_icon: &mut tray_icon::TrayIcon,
         device: &device::Device,
     ) -> Result<()> {
+        if !self.sync_apply {
+            // After a failed READ: probe. A successful read ends the resync; the device is
+            // written only if Enforce says so, exactly as on any other read.
+            let probe = DeviceState::read(device);
+            if let Err(e) = probe {
+                if librazer::error::is_retryable(&e) {
+                    return Err(e);
+                }
+            }
+            self.needs_sync = false;
+            let write = self.enforce;
+            self.reconcile(tray_icon, device, "sync (after a read failure)", write);
+            return Ok(());
+        }
+        // Allowed to touch the device now, even though needs_sync is still set.
+        self.needs_sync = false;
         let applied = self.apply_and_refresh(tray_icon, device);
         // Reconcile whatever the apply did: a write the EC rejected is exactly when the
         // read-back matters.
         self.reconcile(tray_icon, device, "sync", true);
-        applied?;
-        self.needs_sync = false;
+        if let Err(e) = applied {
+            self.needs_sync = true;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -479,6 +502,15 @@ impl ProgramState {
         tray_icon: &mut tray_icon::TrayIcon,
         device: &device::Device,
     ) -> Result<()> {
+        // A resync is pending: record the intent and show it, but leave the device to the
+        // resync, which applies exactly this intent. Writing through a stale handle costs
+        // ~2 s per exchange of retries, on the UI thread.
+        if self.needs_sync {
+            self.sync_apply = true;
+            self.rebuild_menu(Some(tray_icon));
+            self.refresh_ui(tray_icon);
+            return Ok(());
+        }
         let result = self.device_state.apply(device);
         match &result {
             Ok(()) => self.observed = self.device_state,

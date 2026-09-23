@@ -419,7 +419,8 @@ impl DeviceState {
         }
 
         // Max fan speed is Custom-only (the EC rejects the command otherwise). Match intent
-        // while in Custom; leaving Custom clears it in the EC. Non-fatal, like the fan write.
+        // while in Custom; leaving Custom clears it in the EC. A failure is returned after the
+        // remaining writes are attempted, like the fan write.
         let max_fan_result = if matches!(self.perf_mode, PerfMode::Custom(..)) {
             let mode = if self.max_fan {
                 MaxFanSpeedMode::Enable

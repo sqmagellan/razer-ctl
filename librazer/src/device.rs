@@ -133,15 +133,15 @@ impl Device {
 
             thread::sleep(time::Duration::from_micros(2000));
 
-            // For a single-shot send, anything after a successful write is final: the EC
-            // may already have run the command, and re-sending an unknown command is
-            // exactly what send_once exists to avoid.
-            let last = last || !retry_failure;
+            // For a single-shot send, a failed read-back is final: the EC may already have
+            // run the command, and re-sending an unknown command is exactly what send_once
+            // exists to avoid.
+            let final_read = last || !retry_failure;
 
             let response_size = match self.device.get_feature_report(&mut response_buf) {
                 Ok(n) => n,
                 Err(e) => {
-                    if last {
+                    if final_read {
                         return Err(anyhow::Error::new(TransportError(format!(
                             "get_feature_report: {e}"
                         ))));
@@ -151,7 +151,7 @@ impl Device {
                 }
             };
             if response_buf.len() != response_size {
-                if last {
+                if final_read {
                     return Err(anyhow::Error::new(TransportError(format!(
                         "response size {response_size} != {}",
                         response_buf.len()
@@ -174,7 +174,9 @@ impl Device {
             // Propagate the ERROR VALUE, not its Display string: callers (the CLI's exit
             // codes, `feature` probing) need to distinguish "this firmware lacks the
             // command" from "the bus is out of step", and `anyhow!("{}", err)` erased that.
-            if err == ResponseError::NotSupported || !retry_failure {
+            // Busy means the EC did not action it, so even a single-shot send may retry that;
+            // any other answer to a single-shot send is final.
+            if err == ResponseError::NotSupported || (!retry_failure && !err.is_busy()) {
                 return Err(anyhow::Error::new(err));
             }
 

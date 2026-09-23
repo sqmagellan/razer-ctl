@@ -171,6 +171,11 @@ impl ConfigFile {
         if !self.changed_on_disk() {
             return DiskState::Unchanged;
         }
+        // Deleted while we run: nothing to adopt or protect, so the next save recreates it.
+        if !self.path.exists() {
+            self.stamp = None;
+            return DiskState::Unchanged;
+        }
         let stamp = stamp_of(&self.path);
         let Ok(text) = std::fs::read_to_string(&self.path) else {
             return DiskState::EditedButInvalid;
@@ -284,6 +289,17 @@ mod tests {
         // Still invalid on a second look, and still on disk as the user left it.
         assert!(matches!(f.check_disk(), DiskState::EditedButInvalid));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
+    }
+
+    #[test]
+    fn a_config_deleted_while_running_is_recreated_by_the_next_save() {
+        let path = scratch("deleted");
+        let mut f = ConfigFile::at(path.clone());
+        f.store(&ConfigState::default()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(f.check_disk(), DiskState::Unchanged));
+        f.store(&ConfigState::default()).unwrap();
+        assert!(path.exists());
     }
 
     #[test]

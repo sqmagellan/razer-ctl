@@ -236,6 +236,8 @@ fn main() -> Result<()> {
         Ok(()) => {}
         Err(e) => {
             log::error!("startup sync failed, will retry: {e:?}");
+            state.needs_sync = true;
+            state.sync_apply = true;
             sync_failures = 1;
             next_sync_at = std::time::Instant::now() + resync_backoff(0);
             state.refresh_ui(&tray_icon);
@@ -266,6 +268,7 @@ fn main() -> Result<()> {
     let mut last_app_scan_timestamp = std::time::Instant::now();
     let mut app_scan_sys = sysinfo::System::new();
     let mut last_config_check = std::time::Instant::now();
+    let mut last_synapse_check = std::time::Instant::now();
 
     // Wake reconciles pending: (when, why). A wake schedules a read at +3 s and a second at
     // +15 s -- the second catches an EC that settles late (the G-Helper #5682 lesson: one
@@ -430,6 +433,17 @@ fn main() -> Result<()> {
 
             // Hand edits to the config take effect without a restart (Action rules can
             // only be written by hand).
+            // Synapse started or closed since startup. A full process scan, so only every
+            // few minutes.
+            if now > last_synapse_check + std::time::Duration::from_secs(300) {
+                last_synapse_check = now;
+                let warning = platform::detect_synapse();
+                if warning != state.warning {
+                    state.warning = warning;
+                    state.rebuild_menu(Some(&tray_icon));
+                }
+            }
+
             if now > last_config_check + std::time::Duration::from_secs(5) {
                 last_config_check = now;
                 if state.reload_config_if_changed(&tray_icon) {
@@ -518,8 +532,11 @@ fn main() -> Result<()> {
                     format!("wake +15s ({source})"),
                     source,
                 ));
-                // An external display may have come or gone with the wake.
+                // An external display may have come or gone with the wake, and Synapse may
+                // have been started or closed.
                 state.refresh_rates = platform::refresh_rates();
+                state.warning = platform::detect_synapse();
+                last_synapse_check = now;
                 state.rebuild_menu(Some(&tray_icon));
             }
             if io_ok {
@@ -590,6 +607,9 @@ fn main() -> Result<()> {
                         // (a) the menu checkmark reflects it, (b) it survives an AC/battery
                         // switch, and (c) the convergence step above sees device_state
                         // == the target and does NOT re-apply -- no tug-of-war.
+                        // Adopt a pending hand edit first, so the save below neither
+                        // writes over it nor gets discarded by it.
+                        state.reload_config_if_changed(&tray_icon);
                         let observed_brightness = state.observed.lights_mode.keyboard_brightness;
                         if observed_brightness != state.device_state.lights_mode.keyboard_brightness
                         {
@@ -649,14 +669,17 @@ fn main() -> Result<()> {
                     // The bus itself is failing: stop polling and let the resync (with its
                     // device reopen) take over.
                     Err(e) if librazer::error::is_retryable(&e) => {
-                        log::warn!("mirror read failed, will resync: {e:?}");
+                        log::warn!("mirror read failed, will probe: {e:?}");
                         state.needs_sync = true;
+                        state.sync_apply = false;
                         next_sync_at = now + resync_backoff(0);
                         sync_failures = sync_failures.max(1);
                     }
                     Err(_) => {}
                 }
-                state.refresh_fan(&device);
+                if !state.needs_sync {
+                    state.refresh_fan(&device);
+                }
                 state.refresh_ui(&tray_icon);
             }
 
@@ -674,6 +697,7 @@ fn main() -> Result<()> {
             // whose only failure was the read that followed it, and it blocked inside this
             // callback until the device answered.
             log::error!("tick failed, will resync: {:?}", e);
+            state.sync_apply = true;
             if !state.needs_sync {
                 state.needs_sync = true;
                 next_sync_at = now + resync_backoff(0);
