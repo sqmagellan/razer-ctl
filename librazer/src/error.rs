@@ -125,6 +125,24 @@ impl std::fmt::Display for PerfZonesDiverged {
 
 impl std::error::Error for PerfZonesDiverged {}
 
+/// Whether retrying the same exchange later could succeed.
+///
+/// True for bus and OS trouble (a HID transport error, a busy EC, a response that never
+/// matched, perf zones left diverged). False for definitive answers -- the EC rejected
+/// the command (`Failure`) or lacks it (`NotSupported`) -- and for our own validation
+/// errors. The tray resyncs only on retryable errors; resyncing on a rejection re-sent
+/// the same rejected write every minute forever.
+pub fn is_retryable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<TransportError>().is_some()
+            || cause.downcast_ref::<PerfZonesDiverged>().is_some()
+            || matches!(
+                cause.downcast_ref::<crate::packet::ResponseError>(),
+                Some(crate::packet::ResponseError::Busy | crate::packet::ResponseError::Mismatch)
+            )
+    })
+}
+
 impl ExitCode {
     /// Classify a failure into an exit status.
     ///
@@ -183,6 +201,25 @@ mod tests {
         assert_eq!(ExitCode::classify(&io), ExitCode::DeviceError);
         let div = anyhow::Error::new(PerfZonesDiverged("Silent vs Balanced".into()));
         assert_eq!(ExitCode::classify(&div), ExitCode::DeviceError);
+    }
+
+    #[test]
+    fn only_bus_trouble_is_retryable() {
+        use crate::packet::ResponseError;
+        assert!(is_retryable(&anyhow::Error::new(TransportError(
+            "x".into()
+        ))));
+        assert!(is_retryable(
+            &anyhow::Error::new(ResponseError::Busy).context("after 5 attempts")
+        ));
+        assert!(is_retryable(&anyhow::Error::new(ResponseError::Mismatch)));
+        assert!(!is_retryable(&anyhow::Error::new(ResponseError::Failure)));
+        assert!(!is_retryable(&anyhow::Error::new(
+            ResponseError::NotSupported
+        )));
+        assert!(!is_retryable(&anyhow::anyhow!(
+            "fan 2050 is not representable"
+        )));
     }
 
     #[test]

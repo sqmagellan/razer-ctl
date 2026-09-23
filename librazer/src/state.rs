@@ -420,15 +420,18 @@ impl DeviceState {
 
         // Max fan speed is Custom-only (the EC rejects the command otherwise). Match intent
         // while in Custom; leaving Custom clears it in the EC. Non-fatal, like the fan write.
-        if matches!(self.perf_mode, PerfMode::Custom(..)) {
+        let max_fan_result = if matches!(self.perf_mode, PerfMode::Custom(..)) {
             let mode = if self.max_fan {
                 MaxFanSpeedMode::Enable
             } else {
                 MaxFanSpeedMode::Disable
             };
-            if let Err(e) = command::set_max_fan_speed_mode(device, mode) {
-                log::warn!("max fan command failed: {:?}", e);
-            }
+            command::set_max_fan_speed_mode(device, mode)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = &max_fan_result {
+            log::warn!("max fan command failed: {:?}", e);
         }
 
         let fan_result = match self.fan_speed {
@@ -457,7 +460,10 @@ impl DeviceState {
         }
 
         // Most consequential first: perf, then fan, then logo.
-        perf_result.and(fan_result).and(logo_result)
+        perf_result
+            .and(max_fan_result)
+            .and(fan_result)
+            .and(logo_result)
     }
 
     /// Carry ONLY the fields the user actually changed from `base`, leaving the rest of
@@ -761,7 +767,10 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigState {
+    // Defaulted so a hand-written file holding only Action rules still loads.
+    #[serde(default)]
     pub ac_state: DeviceState,
+    #[serde(default = "default_battery_state")]
     pub battery_state: DeviceState,
     // Opt-in "win against Synapse" mode. #[serde(default)] keeps older config
     // files (written before this field existed) loadable -> defaults to false.
@@ -787,6 +796,10 @@ pub struct ConfigState {
     /// Read at startup.
     #[serde(default)]
     pub cycle_perf_hotkey: Option<String>,
+}
+
+fn default_battery_state() -> DeviceState {
+    ConfigState::default().battery_state
 }
 
 impl Default for ConfigState {
@@ -913,7 +926,11 @@ impl ActionSession {
     ) {
         let old_seed = profile.overlay(old_base).normalized(range);
         let new_seed = profile.overlay(new_base).normalized(range);
-        self.effective = DeviceState::carry_changes(new_seed, old_seed, self.effective);
+        // Normalized again: carrying a Custom-only field (max fan) onto a new source's
+        // non-Custom perf mode produced a state the EC cannot hold, which the tray then
+        // re-applied every second until the game exited.
+        self.effective =
+            DeviceState::carry_changes(new_seed, old_seed, self.effective).normalized(range);
     }
 }
 
@@ -2026,6 +2043,46 @@ mod tests {
         assert_eq!(session.effective.perf_mode, PerfMode::Battery);
         assert_eq!(session.effective.lights_mode.keyboard_brightness, 0);
         assert_eq!(session.effective.fan_speed, FanSpeed::Manual(3000));
+    }
+
+    #[test]
+    fn a_power_switch_never_leaves_max_fan_on_outside_custom() {
+        // The reviewer's reproduction: AC saved in Custom, max fan turned on during an
+        // Action, then unplugged onto a Battery profile.
+        let ac = dstate(
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            FanSpeed::Auto,
+            0,
+        );
+        let batt = dstate(PerfMode::Battery, FanSpeed::Auto, 0);
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            fan_speed: Some(FanSpeed::Manual(4000)),
+            ..Default::default()
+        };
+        let mut session = ActionSession::start(0, &rule, &ac, RANGE);
+        session.pick(DeviceState {
+            max_fan: true,
+            ..session.effective
+        });
+        session.power_changed(&rule, &ac, &batt, RANGE);
+        assert_eq!(session.effective.perf_mode, PerfMode::Battery);
+        assert!(!session.effective.max_fan);
+        assert_eq!(session.effective, session.effective.normalized(RANGE));
+    }
+
+    #[test]
+    fn a_config_with_only_action_rules_loads() {
+        let cfg: ConfigState = toml::from_str(
+            r#"
+            [[app_profiles]]
+            process = "game.exe"
+            perf_mode = "Performance"
+            "#,
+        )
+        .expect("profiles default");
+        assert_eq!(cfg.battery_state.perf_mode, PerfMode::Battery);
+        assert_eq!(cfg.app_profiles.len(), 1);
     }
 
     #[test]

@@ -133,6 +133,11 @@ impl Device {
 
             thread::sleep(time::Duration::from_micros(2000));
 
+            // For a single-shot send, anything after a successful write is final: the EC
+            // may already have run the command, and re-sending an unknown command is
+            // exactly what send_once exists to avoid.
+            let last = last || !retry_failure;
+
             let response_size = match self.device.get_feature_report(&mut response_buf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -169,9 +174,7 @@ impl Device {
             // Propagate the ERROR VALUE, not its Display string: callers (the CLI's exit
             // codes, `feature` probing) need to distinguish "this firmware lacks the
             // command" from "the bus is out of step", and `anyhow!("{}", err)` erased that.
-            if err == ResponseError::NotSupported
-                || (err == ResponseError::Failure && !retry_failure)
-            {
+            if err == ResponseError::NotSupported || !retry_failure {
                 return Err(anyhow::Error::new(err));
             }
 
