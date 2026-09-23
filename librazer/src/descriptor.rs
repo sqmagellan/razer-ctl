@@ -58,6 +58,7 @@ pub const SUPPORTED: &[Descriptor] = &[
             "lid-logo",
             "lights-always-on",
             "perf",
+            "fn-lock", // probed 2026-09-23 (get/set round-trip); see types::FnLock
         ],
         init_cmds: &[],
         fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed
@@ -89,6 +90,7 @@ pub const SUPPORTED: &[Descriptor] = &[
             "lid-logo",
             "lights-always-on",
             "perf",
+            "fn-lock", // probed 2026-09-23 (get/set round-trip); see types::FnLock
         ],
         init_cmds: &[],
         fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed

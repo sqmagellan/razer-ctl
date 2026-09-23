@@ -19,8 +19,8 @@
 use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
-    BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn,
-    LogoMode, MaxFanSpeedMode, PerfMode,
+    BatteryCare, Cluster, CpuBoost, FanMode, FanZone, FnLock, GpuBoost, KeyboardEffect,
+    LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
 };
 
 use anyhow::{bail, ensure, Result};
@@ -373,6 +373,15 @@ pub fn get_keyboard_effect(device: &impl HidTransport) -> Result<Option<Keyboard
     })
 }
 
+/// Function-row primary mode. See [`FnLock`] for what is and isn't verified.
+pub fn set_fn_lock(device: &impl HidTransport, mode: FnLock) -> Result<()> {
+    _send_command(device, 0x0206, &[0, mode as u8]).map(|_| ())
+}
+
+pub fn get_fn_lock(device: &impl HidTransport) -> Result<FnLock> {
+    device.send(Packet::new(0x0286, &[0, 0]))?.get_args()[1].try_into()
+}
+
 /// Read the Razer **device mode** (the `0x0084` get-mirror of `0x0004`). See the module
 /// docs: `Disable` (0x00) is Normal/hardware mode, `Enable` (0x03) is Driver mode.
 pub fn get_lights_always_on(device: &impl HidTransport) -> Result<LightsAlwaysOn> {
@@ -412,6 +421,19 @@ pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
+
+    #[test]
+    fn fn_lock_uses_the_probed_wire_layout() {
+        let mock = MockTransport::echo();
+        set_fn_lock(&mock, FnLock::On).unwrap();
+        assert_eq!(mock.sent()[0], (0x0206, vec![0, 1]));
+
+        let on = MockTransport::with_responder(|req| Packet::new(req.command(), &[0, 1]));
+        assert_eq!(get_fn_lock(&on).unwrap(), FnLock::On);
+        let off = MockTransport::with_responder(|req| Packet::new(req.command(), &[0, 0]));
+        assert_eq!(get_fn_lock(&off).unwrap(), FnLock::Off);
+        assert_eq!(off.sent()[0].0, 0x0286);
+    }
 
     /// Build a canned-response packet whose args buffer begins with `args`
     /// (everything past that stays zero), mimicking a register read.

@@ -280,6 +280,34 @@ impl TryFrom<u8> for CpuBoost {
     }
 }
 
+/// Function-row primary mode ("Fn Lock"): `0x0206` set / `0x0286` get, args `[0, mode]`.
+///
+/// Probed on 0x029F 2026-09-23: the getter answers `[0, 0]` on this machine, and writing
+/// `[0, 1]` reads back `[0, 1]`. Gaming Mode (`0x0088`), boot animation (`0x0f98`) and the
+/// adapter-wattage readback (`0x078c`), found in the same Synapse captures for 2025 Blades,
+/// are NOT supported on 0x029F. Other chassis encode the value differently (`01 00`/`01 01`
+/// on `0x02e0`), so this is enabled per descriptor, not globally.
+///
+/// ⚠️ `On = 1` follows the capture's labelling. Which state makes F1-F12 the primary
+/// function on 0x029F is confirmed only by pressing a key, which has not been done yet.
+#[derive(EnumString, ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum FnLock {
+    Off = 0x00,
+    On = 0x01,
+}
+
+impl TryFrom<u8> for FnLock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(FnLock::Off),
+            1 => Ok(FnLock::On),
+            _ => bail!("Failed to convert {} to FnLock", value),
+        }
+    }
+}
+
 impl TryFrom<u8> for LightsAlwaysOn {
     type Error = anyhow::Error;
 
