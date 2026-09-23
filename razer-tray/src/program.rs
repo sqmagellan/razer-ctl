@@ -244,13 +244,18 @@ impl ProgramState {
             // After a failed READ: probe. A successful read ends the resync; the device is
             // written only if Enforce says so, exactly as on any other read.
             let probe = DeviceState::read(device);
+            // Diverged zones are a broken state, not a user's choice: repair them (the
+            // Mirror's policy). Checked before is_retryable, which also counts them and
+            // would otherwise keep the probe failing forever without ever writing.
+            let diverged = matches!(&probe, Err(e)
+                if e.downcast_ref::<librazer::error::PerfZonesDiverged>().is_some());
             if let Err(e) = probe {
-                if librazer::error::is_retryable(&e) {
+                if !diverged && librazer::error::is_retryable(&e) {
                     return Err(e);
                 }
             }
             self.needs_sync = false;
-            let write = self.enforce;
+            let write = self.enforce || diverged;
             self.reconcile(tray_icon, device, "sync (after a read failure)", write);
             return Ok(());
         }
@@ -507,6 +512,8 @@ impl ProgramState {
         // ~2 s per exchange of retries, on the UI thread.
         if self.needs_sync {
             self.sync_apply = true;
+            // Windows-side settings don't need the device.
+            self.apply_os_settings();
             self.rebuild_menu(Some(tray_icon));
             self.refresh_ui(tray_icon);
             return Ok(());

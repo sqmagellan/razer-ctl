@@ -285,8 +285,14 @@ fn main() -> Result<()> {
             if sync_failures >= 3 {
                 match device::Device::detect() {
                     Ok(d) => {
+                        // A re-enumerated device may have reset: re-apply intent, not just
+                        // probe, and replay its init sequence first.
                         log::info!("reopened the device");
                         device = d;
+                        for element in device.info().init_cmds {
+                            let _ = command::send_command(&device, *element, &[0, 0, 0, 0]);
+                        }
+                        state.sync_apply = true;
                     }
                     Err(e) => log::warn!("device reopen failed: {e:?}"),
                 }
@@ -429,6 +435,13 @@ fn main() -> Result<()> {
                 }
                 state.ac_power = ac_now;
                 last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
+                // Windows keeps the power-mode slider per power source, so the new source's
+                // slider needs setting even when the perf mode doesn't change.
+                if state.match_power_mode {
+                    if let Err(e) = platform::set_windows_power_mode(state.target().perf_mode) {
+                        log::warn!("Windows power mode: {e:?}");
+                    }
+                }
             }
 
             // Hand edits to the config take effect without a restart (Action rules can
@@ -696,6 +709,12 @@ fn main() -> Result<()> {
             // re-read the config and re-applied the SAVED profile, which reverted a change
             // whose only failure was the read that followed it, and it blocked inside this
             // callback until the device answered.
+            // Only device trouble resyncs; a failed "Close GPU apps" or a menu hiccup is not
+            // a reason to rewrite the device.
+            if !librazer::error::is_retryable(&e) {
+                log::error!("tick failed: {:?}", e);
+                return;
+            }
             log::error!("tick failed, will resync: {:?}", e);
             state.sync_apply = true;
             if !state.needs_sync {
