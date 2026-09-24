@@ -851,22 +851,40 @@ fn power_mode_for(perf: crate::state::PerfMode) -> usize {
     }
 }
 
-/// `PowerGetEffectiveOverlayScheme` from powrprof.dll, or None if this Windows lacks it.
-/// powrprof.dll is a system DLL, loaded once and never freed (a leaked module handle
-/// keeps the function pointers valid).
+/// powrprof.dll's getter and setter for the power mode, resolved once; either is None if
+/// this Windows lacks it. The DLL is loaded once and never freed, which keeps the
+/// pointers valid (it used to be loaded again on every call, and every menu rebuild
+/// calls the getter).
+#[cfg(target_os = "windows")]
+fn power_overlay_procs() -> (
+    windows::Win32::Foundation::FARPROC,
+    windows::Win32::Foundation::FARPROC,
+) {
+    use windows::core::{s, w};
+    use windows::Win32::Foundation::FARPROC;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    static PROCS: std::sync::OnceLock<(FARPROC, FARPROC)> = std::sync::OnceLock::new();
+    // SAFETY: powrprof.dll is a system DLL; looking up a missing symbol returns None.
+    *PROCS.get_or_init(|| unsafe {
+        match LoadLibraryW(w!("powrprof.dll")) {
+            Ok(module) => (
+                GetProcAddress(module, s!("PowerGetEffectiveOverlayScheme")),
+                GetProcAddress(module, s!("PowerSetActiveOverlayScheme")),
+            ),
+            Err(_) => (None, None),
+        }
+    })
+}
+
+/// The power-mode GUID Windows reports as in effect, or None if it can't be read.
 #[cfg(target_os = "windows")]
 fn effective_power_mode_guid() -> Option<windows::core::GUID> {
-    use windows::core::{s, w, GUID};
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::core::GUID;
     type GetEffective = unsafe extern "system" fn(*mut GUID) -> u32;
-    // SAFETY: the symbol, when present, has the signature above, as used by the
-    // Settings app.
+    let proc = power_overlay_procs().0?;
+    // SAFETY: the symbol has the signature above, as used by the Settings app.
     unsafe {
-        let module = LoadLibraryW(w!("powrprof.dll")).ok()?;
-        let get: GetEffective = std::mem::transmute(GetProcAddress(
-            module,
-            s!("PowerGetEffectiveOverlayScheme"),
-        )?);
+        let get: GetEffective = std::mem::transmute(proc);
         let mut current = GUID::zeroed();
         (get(&mut current) == 0).then_some(current)
     }
@@ -910,8 +928,7 @@ pub fn set_windows_power_mode_named(name: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn set_power_overlay(guid: windows::core::GUID, label: &str) -> Result<()> {
-    use windows::core::{s, w, GUID};
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::core::GUID;
 
     // Compared against what Windows says is in effect, not against what we last set:
     // Windows keeps the slider per power source, and the user can move it themselves.
@@ -922,12 +939,11 @@ fn set_power_overlay(guid: windows::core::GUID, label: &str) -> Result<()> {
     // lets the compiler apply the platform ABI (on x64 a 16-byte struct is passed via a
     // hidden pointer, which is why passing `&guid` also happened to work).
     type SetOverlay = unsafe extern "system" fn(GUID) -> u32;
-    // SAFETY: as for `effective_power_mode_guid`; the symbol, when present, has the
-    // signature above.
+    let proc = power_overlay_procs()
+        .1
+        .ok_or_else(|| anyhow::anyhow!("PowerSetActiveOverlayScheme not available"))?;
+    // SAFETY: the symbol has the signature above, as used by the Settings app.
     let status = unsafe {
-        let module = LoadLibraryW(w!("powrprof.dll"))?;
-        let proc = GetProcAddress(module, s!("PowerSetActiveOverlayScheme"))
-            .ok_or_else(|| anyhow::anyhow!("PowerSetActiveOverlayScheme not available"))?;
         let set: SetOverlay = std::mem::transmute(proc);
         set(guid)
     };

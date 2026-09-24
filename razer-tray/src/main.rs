@@ -530,8 +530,9 @@ fn main() -> Result<()> {
 
             // Converge the device on what it should be now: the Action session, else the
             // saved profile for the power source. Transient, because neither needs saving.
+            // Not while the config is unread: the target would be defaults.
             let target = state.target();
-            if io_ok && target != state.device_state {
+            if io_ok && !state.config_unread() && target != state.device_state {
                 log::info!("new_device_state 3 {:?}", target);
                 state.update_transient(&mut tray_icon, target, &device)?;
             }

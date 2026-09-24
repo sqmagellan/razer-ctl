@@ -273,7 +273,10 @@ impl ProgramState {
         tray_icon: &mut tray_icon::TrayIcon,
         device: &device::Device,
     ) -> Result<()> {
-        if !self.sync_apply {
+        // The config on disk exists but couldn't be read (still locked after the startup
+        // wait): the intent in memory is only defaults, so probe instead of writing them over
+        // the user's settings. The periodic reload adopts the file once it can be read.
+        if !self.sync_apply || self.config_unread() {
             // After a failed READ: probe. A successful read ends the resync; the device is
             // written only if Enforce says so, exactly as on any other read.
             let probe = DeviceState::read(device);
@@ -292,7 +295,11 @@ impl ProgramState {
             self.reconcile(tray_icon, device, "sync (after a read failure)", write);
             return Ok(());
         }
-        // Allowed to touch the device now, even though needs_sync is still set.
+        // Allowed to touch the device now, even though needs_sync is still set. Aimed at the
+        // current target: a plug or unplug while the resync was pending changed it, and
+        // applying the stale state first wrote the old source's profile. Picks made
+        // meanwhile are in the target already (saved profile or Action session).
+        self.device_state = self.target();
         self.needs_sync = false;
         let applied = self.apply_and_refresh(tray_icon, device);
         // Reconcile whatever the apply did: a write the EC rejected is exactly when the
@@ -595,28 +602,34 @@ impl ProgramState {
     /// plug or unplug). Failures are logged.
     pub fn sync_windows_power_mode(&mut self, perf: PerfMode) {
         let slot = self.power_mode_before.slot(self.ac_power);
-        let noted = if self.match_power_mode {
-            let fresh = slot.is_none();
-            if fresh {
+        if self.match_power_mode {
+            // Saved BEFORE Windows is changed: a crash in between must not leave the
+            // matched mode to be noted as the one to put back.
+            if slot.is_none() {
                 *slot = crate::platform::windows_power_mode().map(str::to_string);
+                if slot.is_some() {
+                    self.persist_power_mode_before();
+                }
             }
             if let Err(e) = crate::platform::set_windows_power_mode(perf) {
                 log::warn!("Windows power mode: {e:?}");
             }
-            fresh && slot.is_some()
-        } else if let Some(before) = slot.take() {
+        } else if let Some(before) = slot.clone() {
+            // Forgotten only once it is back, so a failure is retried on the next sync.
             match crate::platform::set_windows_power_mode_named(&before) {
-                Ok(()) => log::info!("Windows power mode put back to {before}"),
+                Ok(()) => {
+                    log::info!("Windows power mode put back to {before}");
+                    *slot = None;
+                    self.persist_power_mode_before();
+                }
                 Err(e) => log::warn!("Windows power mode: putting back {before}: {e:?}"),
             }
-            true
-        } else {
-            false
-        };
-        if noted {
-            if let Err(e) = self.persist() {
-                log::warn!("Failed to persist the Windows power mode to put back: {e:?}");
-            }
+        }
+    }
+
+    fn persist_power_mode_before(&mut self) {
+        if let Err(e) = self.persist() {
+            log::warn!("Failed to persist the Windows power mode to put back: {e:?}");
         }
     }
 
@@ -689,6 +702,12 @@ impl ProgramState {
         self.apply_and_refresh(tray_icon, device)
     }
 
+    /// The config file exists but could not be read, so the saved profiles are defaults
+    /// that must not be pushed to the device on their own.
+    pub fn config_unread(&self) -> bool {
+        self.config_file.is_blocked()
+    }
+
     /// A custom color is set and this model can show it.
     pub fn has_custom_color(&self) -> bool {
         self.custom_colors && self.device_state.lights_mode.keyboard_color.is_some()
@@ -707,7 +726,13 @@ impl ProgramState {
         } else {
             None
         };
-        let Some(frame) = self.device_state.keyboard_frame(battery) else {
+        // Follow-perf-mode matches the icon, which shows what the device reports: a CLI
+        // change with Enforce off moves the icon, so it moves the color too.
+        let shown = DeviceState {
+            perf_mode: self.observed.perf_mode,
+            ..self.device_state
+        };
+        let Some(frame) = shown.keyboard_frame(battery) else {
             self.painted = None;
             return;
         };

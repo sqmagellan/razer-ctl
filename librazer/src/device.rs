@@ -121,8 +121,10 @@ impl Device {
             // entirely, and it surfaced as an unclassified error (exit 1) although it is
             // exactly the retryable kind. Now it gets the same backoff as a bad response,
             // and a typed error so it classifies as a device error (exit 5).
+            // For a single-shot send this is final too: a failed send does not prove the
+            // EC never saw the report.
             if let Err(e) = self.device.send_feature_report(&request) {
-                if last {
+                if last || !retry_failure {
                     return Err(anyhow::Error::new(TransportError(format!(
                         "send_feature_report: {e}"
                     ))));

@@ -532,7 +532,8 @@ impl DeviceState {
     }
 
     pub fn apply(&self, device: &impl HidTransport) -> Result<()> {
-        self.apply_perf_fan_logo(device)?;
+        let mut first = Ok(());
+        continue_after_rejection(&mut first, self.apply_perf_fan_logo(device))?;
         // NB: always-on is deliberately NOT applied here. It is the Razer "device mode"
         // command (0x0004); Enable == driver mode, which disables the keyboard's native
         // Fn media keys (brightness/volume). The tray keeps the device in Normal mode and
@@ -540,9 +541,16 @@ impl DeviceState {
         //
         // Keyboard lighting is applied BEFORE brightness: some effect writes reset the
         // backlight brightness, so re-asserting brightness afterward keeps it authoritative.
-        self.apply_keyboard_lighting(device)?;
-        command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness)?;
-        command::set_battery_care(device, self.battery_care)
+        continue_after_rejection(&mut first, self.apply_keyboard_lighting(device))?;
+        continue_after_rejection(
+            &mut first,
+            command::set_keyboard_brightness(device, self.lights_mode.keyboard_brightness),
+        )?;
+        continue_after_rejection(
+            &mut first,
+            command::set_battery_care(device, self.battery_care),
+        )?;
+        first
     }
 
     /// Write the keyboard backlight effect, if one is configured. Driven from stored intent:
@@ -580,8 +588,13 @@ impl DeviceState {
     /// brightness write. (always-on isn't a device write at all -- it's a Normal-mode
     /// keep-alive in the tray -- so there's nothing here to exclude for it.)
     pub fn enforce_to(&self, device: &impl HidTransport) -> Result<()> {
-        self.apply_perf_fan_logo(device)?;
-        command::set_battery_care(device, self.battery_care)
+        let mut first = Ok(());
+        continue_after_rejection(&mut first, self.apply_perf_fan_logo(device))?;
+        continue_after_rejection(
+            &mut first,
+            command::set_battery_care(device, self.battery_care),
+        )?;
+        first
     }
 
     /// Whether the *enforced* fields -- perf mode, fan, logo, battery care -- of `self`
@@ -844,6 +857,23 @@ pub struct ConfigState {
     /// While a custom color is set, show the battery level on the 1-0 keys.
     #[serde(default)]
     pub keyboard_battery_bar: bool,
+}
+
+/// One step of a multi-write apply. A write the EC rejected is kept in `first` and the
+/// caller goes on: the writes are independent, and stopping left the brightness and charge
+/// limit unwritten on a model whose fan command is rejected every time. Bus trouble still
+/// stops at once, since every later write would spend its own retries on a failing bus.
+fn continue_after_rejection(first: &mut Result<()>, step: Result<()>) -> Result<()> {
+    match step {
+        Err(e) if crate::error::is_retryable(&e) => Err(e),
+        Err(e) => {
+            if first.is_ok() {
+                *first = Err(e);
+            }
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
 }
 
 /// A Windows power mode per power source, by its Settings name ("Balanced", ...).
@@ -1830,6 +1860,32 @@ mod tests {
             commands.contains(&0x0300),
             "logo write must still be attempted, got {commands:04x?}"
         );
+    }
+
+    #[test]
+    fn a_rejected_write_does_not_stop_brightness_or_the_charge_limit() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            ..DeviceState::default()
+        };
+        let mock = failing_on(0x0300);
+        assert!(
+            state.apply(&mock).is_err(),
+            "the logo rejection must be reported"
+        );
+        let commands: Vec<u16> = mock.sent().into_iter().map(|(c, _)| c).collect();
+        assert!(
+            commands.contains(&0x0303),
+            "brightness skipped: {commands:04x?}"
+        );
+        assert!(
+            commands.contains(&0x0712),
+            "charge limit skipped: {commands:04x?}"
+        );
+
+        let mock = failing_on(0x0300);
+        assert!(state.enforce_to(&mock).is_err());
+        assert!(mock.sent().iter().any(|(c, _)| *c == 0x0712));
     }
 
     #[test]
