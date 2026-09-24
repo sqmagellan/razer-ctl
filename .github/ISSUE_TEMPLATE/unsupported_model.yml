@@ -49,7 +49,7 @@ body:
       label: What actually worked
       description: Only tick what you personally observed working on the hardware.
       options:
-        - label: Performance modes (Balanced / Silent / Performance / …) change fan noise or behaviour
+        - label: Performance modes (Balanced / Silent / Performance / …) change fan noise or behavior
         - label: Manual fan RPM
         - label: Keyboard brightness
         - label: Keyboard lighting effects (Spectrum / Wave / Breathing / Off)
@@ -63,7 +63,7 @@ body:
       description: |
         Only if you actually tested it. Set a manual RPM, then read `fan_actual_rpm` from
         `razer-cli auto json`. The useful numbers are the lowest setpoint that changes anything and
-        the highest the EC will honour. **Leave blank if you're unsure** — a blank is better than a
+        the highest the EC will honor. **Leave blank if you're unsure** — a blank is better than a
         guess, since this value goes straight into the device table.
     validations:
       required: false

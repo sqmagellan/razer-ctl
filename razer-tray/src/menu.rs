@@ -28,9 +28,9 @@ pub struct MenuOptions<'a> {
     pub match_power_mode: bool,
     /// Refresh rates the display offers at its current resolution; empty hides the submenu.
     pub refresh_rates: &'a [u32],
-    /// This model's keyboard geometry is mapped, so custom colours can be offered.
+    /// This model's keyboard geometry is mapped, so custom colors can be offered.
     pub custom_colors: bool,
-    /// Named colours for the Keyboard lighting submenu.
+    /// Named colors for the Keyboard lighting submenu.
     pub keyboard_presets: &'a [KeyboardPreset],
     /// Drives the "Battery bar" toggle.
     pub battery_bar: bool,
@@ -131,7 +131,7 @@ pub fn build(
 
     let separator = PredefinedMenuItem::separator();
 
-    // Disabled header items so the two boost groups are labelled -- without them the
+    // Disabled header items so the two boost groups are labeled -- without them the
     // submenu is just "Low/Medium/High/Boost/Undervolt / --- / Low/Medium/High" and you
     // can't tell which axis is which. (HW-verified 2026-07-09: all five CPU levels and
     // all three GPU levels apply + read back on PID 0x029f.)
@@ -378,7 +378,7 @@ pub fn build(
     )?;
 
     // Keyboard lighting. A pick is stored and applied as intent. Effects are EC-animated and
-    // readable (0x0f82) but never reconciled. A custom colour is a host-written frame that the
+    // readable (0x0f82) but never reconciled. A custom color is a host-written frame that the
     // EC does not keep, so the tray repaints it (see `ProgramState::paint_keyboard`); both work
     // in Normal mode, so the Fn media keys keep working.
     let mut with_lighting = |id: String, lights_mode: LightsMode| {
@@ -465,7 +465,7 @@ pub fn build(
     // Charge-limit presets. The EC accepts every whole percent 50..=100 (HW-verified), so
     // this list is a UI convenience, not the limit of what's possible -- the CLI
     // (`battery-care set <50-100>`) reaches any value, and a config hand-set to e.g. 88
-    // is honoured and shown as the current value below. Presets stop at 5% steps up to 80
+    // is honored and shown as the current value below. Presets stop at 5% steps up to 80
     // (the healthy-longevity band) then add 90/95, which the old 8-variant enum could not
     // express at all.
     let battery_care_percents = [50u8, 60, 70, 75, 80, 85, 90, 95];

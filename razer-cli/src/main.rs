@@ -166,17 +166,17 @@ impl Cli for feature::KbdLighting {
                 .subcommand(
                     clap::Command::new("color")
                         .about(
-                            "Show a custom colour: one #rrggbb for the whole keyboard, or six \
+                            "Show a custom color: one #rrggbb for the whole keyboard, or six \
                              for the rows top to bottom. Not kept by the keyboard: sleep \
-                             brings the effect back (the tray repaints its own colour).",
+                             brings the effect back (the tray repaints its own color).",
                         )
                         .arg(
-                            arg!([COLORS] ... "Colours")
+                            arg!([COLORS] ... "Colors")
                                 .num_args(1..=6)
                                 .value_parser(clap::value_parser!(Rgb)),
                         )
                         .arg(
-                            arg!(--perf <MODE> "Instead of colours, the colour of a perf mode (battery/silent/balanced/performance/hyperboost/custom)")
+                            arg!(--perf <MODE> "Instead of colors, the color of a perf mode (battery/silent/balanced/performance/hyperboost/custom)")
                                 .required(false),
                         )
                         .arg(
@@ -197,7 +197,7 @@ impl Cli for feature::KbdLighting {
                 Some(("color", m)) => {
                     if !keyboard::supports_custom_frame(device.info.pid) {
                         bail!(
-                            "custom colour is not mapped for this model ({:#06x})",
+                            "custom color is not mapped for this model ({:#06x})",
                             device.info.pid
                         );
                     }
@@ -219,11 +219,11 @@ impl Cli for feature::KbdLighting {
                             };
                             (KeyboardColor::FollowPerfMode, perf)
                         }
-                        (Some(_), _) => bail!("give colours or --perf, not both"),
+                        (Some(_), _) => bail!("give colors or --perf, not both"),
                         (None, 1) => (KeyboardColor::solid(colors[0]), Mode::Balanced),
                         (None, n) => match <[Rgb; keyboard::ROWS]>::try_from(colors.as_slice()) {
                             Ok(rows) => (KeyboardColor::Rows(rows), Mode::Balanced),
-                            Err(_) => bail!("give one colour or six, not {n}"),
+                            Err(_) => bail!("give one color or six, not {n}"),
                         },
                     };
                     let battery =
@@ -234,7 +234,7 @@ impl Cli for feature::KbdLighting {
                             });
                     let frame = keyboard::render(color, perf, battery);
                     command::set_keyboard_frame(device, &frame)?;
-                    println!("Keyboard colour set");
+                    println!("Keyboard color set");
                     Ok(())
                 }
                 Some(("effect", m)) => {
@@ -342,7 +342,7 @@ impl Cli for feature::Fan {
                     }
                     Ok((_, fan_mode @ FanMode::Manual)) => {
                         // The set-point register reads back whatever was written, even a
-                        // value the EC is ignoring, so it is labelled as a set point, never
+                        // value the EC is ignoring, so it is labeled as a set point, never
                         // as the speed.
                         match command::get_fan_rpm(device, FanZone::Zone1) {
                             Ok(0) => println!("Fan: {:?} (no set point yet)", fan_mode),
@@ -819,7 +819,7 @@ mod tests {
             "--battery",
             "101"
         ]));
-        // Not a colour, or more colours than rows.
+        // Not a color, or more colors than rows.
         assert!(!parses(&["auto", "kbd-lighting", "color", "red"]));
         assert!(!parses(&[
             "auto",

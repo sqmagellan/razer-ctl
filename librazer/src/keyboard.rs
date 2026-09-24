@@ -1,12 +1,12 @@
-//! Custom keyboard colour: the frame model, presets, and the status overlays.
+//! Custom keyboard color: the frame model, presets, and the status overlays.
 //!
-//! The keyboard takes a full colour frame in Normal device mode, so the Fn media keys keep
+//! The keyboard takes a full color frame in Normal device mode, so the Fn media keys keep
 //! working (HW-verified on 0x029F 2026-09-23, after this project had documented it as
 //! impossible): six `0x030b` row writes, then `0x030a [0x05, 0x00]` to show them. The frame
 //! is not stored in the EC -- it is gone after Modern Standby, and the keyboard falls back to
-//! the stored `0x0f02` effect -- so whoever sets a colour must paint it again after a wake.
+//! the stored `0x0f02` effect -- so whoever sets a color must paint it again after a wake.
 //!
-//! Everything here is pure: [`render`] turns a colour choice plus live status into a
+//! Everything here is pure: [`render`] turns a color choice plus live status into a
 //! [`Frame`], and `command::set_keyboard_frame` writes one.
 
 use crate::state::PerfMode;
@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// Rows in the colour matrix, top (Esc and the function keys) to bottom.
+/// Rows in the color matrix, top (Esc and the function keys) to bottom.
 pub const ROWS: usize = 6;
-/// Columns in the colour matrix. The row write addresses columns 0..=15.
+/// Columns in the color matrix. The row write addresses columns 0..=15.
 pub const COLS: usize = 16;
 /// The number row (`` ` `` 1 2 ... 0 - = Backspace).
 pub const NUMBER_ROW: usize = 1;
@@ -31,7 +31,7 @@ pub fn supports_custom_frame(pid: u16) -> bool {
     pid == 0x029F
 }
 
-/// One LED colour. Written and read as `"#rrggbb"`.
+/// One LED color. Written and read as `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Rgb {
@@ -47,7 +47,7 @@ impl Rgb {
         Self { r, g, b }
     }
 
-    /// This colour at `percent` of its brightness.
+    /// This color at `percent` of its brightness.
     pub fn dimmed(self, percent: u8) -> Self {
         let f = |v: u8| (u16::from(v) * u16::from(percent.min(100)) / 100) as u8;
         Rgb::new(f(self.r), f(self.g), f(self.b))
@@ -61,7 +61,7 @@ impl FromStr for Rgb {
     fn from_str(s: &str) -> Result<Self> {
         let hex = s.trim().trim_start_matches('#');
         if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!("{s:?} is not a colour; expected #rrggbb");
+            bail!("{s:?} is not a color; expected #rrggbb");
         }
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16);
         Ok(Rgb::new(byte(0)?, byte(2)?, byte(4)?))
@@ -88,12 +88,12 @@ impl fmt::Display for Rgb {
     }
 }
 
-/// A custom keyboard colour.
+/// A custom keyboard color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyboardColor {
-    /// One colour per row, top to bottom. A solid colour is six equal rows.
+    /// One color per row, top to bottom. A solid color is six equal rows.
     Rows([Rgb; ROWS]),
-    /// The whole keyboard in the colour of the current perf mode ([`perf_mode_color`]).
+    /// The whole keyboard in the color of the current perf mode ([`perf_mode_color`]).
     FollowPerfMode,
 }
 
@@ -103,8 +103,8 @@ impl KeyboardColor {
     }
 }
 
-/// The colour "Follow performance mode" shows for each mode: the colour of that mode's tray
-/// icon (the dominant opaque pixel of `razer-tray/icons/razer-<colour>.png`), so the keyboard
+/// The color "Follow performance mode" shows for each mode: the color of that mode's tray
+/// icon (the dominant opaque pixel of `razer-tray/icons/razer-<color>.png`), so the keyboard
 /// and the icon agree. Balanced, Performance and Custom are more saturated than their icons
 /// (`#94d82d`, `#fa5252`, `#9c6749`): on the keyboard LEDs those looked washed out.
 pub fn perf_mode_color(mode: PerfMode) -> Rgb {
@@ -118,7 +118,7 @@ pub fn perf_mode_color(mode: PerfMode) -> Rgb {
     }
 }
 
-/// A named colour choice offered in the tray menu. `colors` holds one colour (solid) or six
+/// A named color choice offered in the tray menu. `colors` holds one color (solid) or six
 /// (one per row, top to bottom); any other count is not offered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyboardPreset {
@@ -175,7 +175,7 @@ pub const BAR_HIGH: Rgb = Rgb::new(0x00, 0xff, 0x00);
 pub const BAR_MEDIUM: Rgb = Rgb::new(0xff, 0xa0, 0x00);
 pub const BAR_LOW: Rgb = Rgb::new(0xff, 0x00, 0x00);
 
-/// One colour per key position.
+/// One color per key position.
 pub type Frame = [[Rgb; COLS]; ROWS];
 
 /// The frame to show for `color`, with the battery bar drawn over it when `battery` is set.
@@ -191,13 +191,13 @@ pub fn render(color: KeyboardColor, perf: PerfMode, battery: Option<BatteryLevel
     frame
 }
 
-/// How bright the digit keys beyond the charge are, as a percent of the bar colour. Dim
+/// How bright the digit keys beyond the charge are, as a percent of the bar color. Dim
 /// rather than off, so the whole ten-key scale stays visible.
 pub const BAR_UNLIT_PERCENT: u8 = 20;
 
-/// Light one of the ten digit keys per started 10% (so 1% still shows one key), in a colour
-/// for the level, or cyan while charging. The rest of the digit keys show the same colour
-/// dimmed, so the bar reads as a bar against any base colour.
+/// Light one of the ten digit keys per started 10% (so 1% still shows one key), in a color
+/// for the level, or cyan while charging. The rest of the digit keys show the same color
+/// dimmed, so the bar reads as a bar against any base color.
 fn draw_battery_bar(frame: &mut Frame, level: BatteryLevel) {
     let percent = usize::from(level.percent.min(100));
     let lit = percent.div_ceil(10);
@@ -224,7 +224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colours_parse_and_print_as_hex() {
+    fn colors_parse_and_print_as_hex() {
         assert_eq!(
             "#44d62c".parse::<Rgb>().unwrap(),
             Rgb::new(0x44, 0xd6, 0x2c)
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn colours_round_trip_through_toml_as_strings() {
+    fn colors_round_trip_through_toml_as_strings() {
         #[derive(Serialize, Deserialize, PartialEq, Debug)]
         struct T {
             c: KeyboardColor,
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_needs_one_or_six_colours() {
+    fn a_preset_needs_one_or_six_colors() {
         let with = |n: usize| KeyboardPreset {
             name: "x".into(),
             colors: vec![Rgb::new(9, 9, 9); n],
@@ -264,7 +264,7 @@ mod tests {
         );
         assert!(matches!(with(6).color(), Some(KeyboardColor::Rows(_))));
         for n in [0, 2, 5, 7] {
-            assert_eq!(with(n).color(), None, "{n} colours");
+            assert_eq!(with(n).color(), None, "{n} colors");
         }
         assert!(default_presets().iter().all(|p| p.color().is_some()));
     }
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_perf_mode_uses_the_mode_colour() {
+    fn follow_perf_mode_uses_the_mode_color() {
         let f = render(KeyboardColor::FollowPerfMode, PerfMode::Silent, None);
         assert!(f
             .iter()
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn the_battery_bar_colour_follows_level_and_charging() {
+    fn the_battery_bar_color_follows_level_and_charging() {
         assert_eq!(bar(80, false)[0], BAR_HIGH);
         assert_eq!(bar(30, false)[0], BAR_MEDIUM);
         assert_eq!(bar(10, false)[0], BAR_LOW);
@@ -344,9 +344,9 @@ mod tests {
             }),
         );
         for (r, row) in f.iter().enumerate() {
-            for (c, colour) in row.iter().enumerate() {
+            for (c, color) in row.iter().enumerate() {
                 if r != NUMBER_ROW || !DIGIT_COLS.contains(&c) {
-                    assert_eq!(*colour, base, "row {r} col {c}");
+                    assert_eq!(*color, base, "row {r} col {c}");
                 }
             }
         }

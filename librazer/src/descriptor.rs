@@ -34,7 +34,7 @@ pub struct Descriptor {
 ///
 /// - Set points 1800 / 1500 / 1200 / 1000 / 800 / 400 / 100 / 0 **all** settle at exactly
 ///   2000 RPM on both zones, held 40 s each, across CPU load 0-17%. 2000 and 3000 are
-///   honoured exactly. So: honoured at >= 2000, silently clamped below.
+///   honored exactly. So: honored at >= 2000, silently clamped below.
 /// - It is a floor, not the EC substituting its own thermal demand: Auto idle is
 ///   *asymmetric* (2000/1900), the manual floor is always *symmetric* (2000/2000).
 /// - A set point of 0 does **not** hand control back to the firmware curve on this

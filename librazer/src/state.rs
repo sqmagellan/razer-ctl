@@ -64,10 +64,10 @@ pub struct LightsMode {
     /// permanent drift and re-assert on every poll forever.
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
-    /// Custom keyboard colour. When set it wins over `keyboard_effect`, which is then only
+    /// Custom keyboard color. When set it wins over `keyboard_effect`, which is then only
     /// what the keyboard falls back to when the frame is lost (frames are not stored in the
     /// EC; see [`crate::keyboard`]). `apply` does not paint it: the caller renders the frame,
-    /// because the battery bar needs the battery level. `None` = no custom colour.
+    /// because the battery bar needs the battery level. `None` = no custom color.
     #[serde(default)]
     pub keyboard_color: Option<KeyboardColor>,
 }
@@ -370,7 +370,7 @@ impl DeviceState {
             // failing the whole state read and blanking the tray.
             keyboard_effect: command::get_keyboard_effect(device).unwrap_or(None),
             // A frame cannot be read back, and while one shows the effect register still
-            // reports the stored effect. Intent is the only record of a custom colour.
+            // reports the stored effect. Intent is the only record of a custom color.
             keyboard_color: None,
         };
 
@@ -491,7 +491,7 @@ impl DeviceState {
     /// picked. Their difference is exactly the user's intent, and only that lands on `base`.
     ///
     /// When no overlay is in effect `base == before`, so this returns `after` unchanged --
-    /// the no-Action path keeps its old behaviour exactly.
+    /// the no-Action path keeps its old behavior exactly.
     ///
     /// Only the *saved profile* is narrowed. What the user picked still takes effect on the
     /// device immediately, overriding the Action until it next re-applies; that half is
@@ -553,7 +553,7 @@ impl DeviceState {
     /// effect. Kept as its own method so callers beyond `apply()` (e.g. a future resume
     /// re-assert, if HW testing shows the EC drops the effect on wake) can re-push it cheaply.
     ///
-    /// With a custom colour set this writes nothing: the colour wins, and the caller paints
+    /// With a custom color set this writes nothing: the color wins, and the caller paints
     /// it with [`Self::keyboard_frame`].
     pub fn apply_keyboard_lighting(&self, device: &impl HidTransport) -> Result<()> {
         if self.lights_mode.keyboard_color.is_some() {
@@ -565,8 +565,8 @@ impl DeviceState {
         }
     }
 
-    /// The custom-colour frame this state should show, with the battery bar when `battery`
-    /// is given; `None` when no custom colour is set.
+    /// The custom-color frame this state should show, with the battery bar when `battery`
+    /// is given; `None` when no custom color is set.
     pub fn keyboard_frame(&self, battery: Option<BatteryLevel>) -> Option<Frame> {
         self.lights_mode
             .keyboard_color
@@ -676,7 +676,7 @@ pub struct AppProfile {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Higher wins when several rules match at once. Equal priorities fall back to file
-    /// order, so behaviour is fully determined by the config rather than by which
+    /// order, so behavior is fully determined by the config rather than by which
     /// process the OS happened to list first.
     #[serde(default)]
     pub priority: i32,
@@ -698,8 +698,8 @@ pub struct AppProfile {
     /// leave the keyboard lighting unchanged.
     #[serde(default)]
     pub keyboard_effect: Option<KeyboardEffect>,
-    /// Custom keyboard colour while it runs. Omit to leave it unchanged. A rule that sets
-    /// only `keyboard_effect` clears the colour, since the colour would otherwise hide it.
+    /// Custom keyboard color while it runs. Omit to leave it unchanged. A rule that sets
+    /// only `keyboard_effect` clears the color, since the color would otherwise hide it.
     #[serde(default)]
     pub keyboard_color: Option<KeyboardColor>,
     /// Charge limit to apply while it runs. Omit to leave it unchanged.
@@ -708,7 +708,7 @@ pub struct AppProfile {
     /// running a long build, without touching the saved profile.
     #[serde(default)]
     pub battery_care: Option<BatteryCare>,
-    /// Max Fan Speed Mode while it runs. Only honoured in the Custom perf mode -- the EC
+    /// Max Fan Speed Mode while it runs. Only honored in the Custom perf mode -- the EC
     /// rejects it elsewhere -- so a rule setting this should set `perf_mode` to Custom too.
     #[serde(default)]
     pub max_fan: Option<bool>,
@@ -833,11 +833,11 @@ pub struct ConfigState {
     /// Read at startup.
     #[serde(default)]
     pub cycle_perf_hotkey: Option<String>,
-    /// Named colours offered under Keyboard lighting: one colour (solid) or six (one per
+    /// Named colors offered under Keyboard lighting: one color (solid) or six (one per
     /// row, top to bottom). A new config starts with [`keyboard::default_presets`].
     #[serde(default = "keyboard::default_presets")]
     pub keyboard_presets: Vec<KeyboardPreset>,
-    /// While a custom colour is set, show the battery level on the 1-0 keys.
+    /// While a custom color is set, show the battery level on the 1-0 keys.
     #[serde(default)]
     pub keyboard_battery_bar: bool,
 }
@@ -2172,7 +2172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_colour_suppresses_the_effect_write() {
+    fn a_custom_color_suppresses_the_effect_write() {
         use crate::transport::MockTransport;
         let mut s = DeviceState::default();
         s.lights_mode.keyboard_effect = Some(KeyboardEffect::Spectrum);
@@ -2182,7 +2182,7 @@ mod tests {
         let cmds: Vec<u16> = mock.sent().iter().map(|(c, _)| *c).collect();
         assert!(
             !cmds.contains(&0x0f02),
-            "the effect would replace the colour"
+            "the effect would replace the color"
         );
         assert!(
             !cmds.contains(&0x030b),
@@ -2193,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_pick_is_carried_into_the_saved_profile() {
+    fn a_color_pick_is_carried_into_the_saved_profile() {
         let before = DeviceState::default();
         let mut after = before;
         after.lights_mode.keyboard_color = Some(red());
@@ -2202,7 +2202,7 @@ mod tests {
     }
 
     #[test]
-    fn an_action_effect_clears_the_colour_and_an_action_colour_sets_it() {
+    fn an_action_effect_clears_the_color_and_an_action_color_sets_it() {
         let mut base = DeviceState::default();
         base.lights_mode.keyboard_color = Some(red());
         let effect_rule = AppProfile {
@@ -2213,15 +2213,15 @@ mod tests {
         assert_eq!(out.lights_mode.keyboard_effect, Some(KeyboardEffect::Wave));
         assert_eq!(out.lights_mode.keyboard_color, None);
 
-        let colour_rule = AppProfile {
+        let color_rule = AppProfile {
             keyboard_color: Some(KeyboardColor::FollowPerfMode),
             ..Default::default()
         };
         assert_eq!(
-            colour_rule.overlay(&base).lights_mode.keyboard_color,
+            color_rule.overlay(&base).lights_mode.keyboard_color,
             Some(KeyboardColor::FollowPerfMode)
         );
-        // A rule that says nothing about lighting leaves the colour alone.
+        // A rule that says nothing about lighting leaves the color alone.
         assert_eq!(
             AppProfile::default()
                 .overlay(&base)
@@ -2232,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_config_gets_the_default_presets_and_no_colour() {
+    fn an_old_config_gets_the_default_presets_and_no_color() {
         let cfg: ConfigState = toml::from_str("enforce = true\n").unwrap();
         assert_eq!(cfg.keyboard_presets, crate::keyboard::default_presets());
         assert!(!cfg.keyboard_battery_bar);
@@ -2240,7 +2240,7 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_survives_a_config_round_trip() {
+    fn a_color_survives_a_config_round_trip() {
         let mut cfg = ConfigState::default();
         cfg.ac_state.lights_mode.keyboard_color = Some(red());
         cfg.battery_state.lights_mode.keyboard_color = Some(KeyboardColor::FollowPerfMode);

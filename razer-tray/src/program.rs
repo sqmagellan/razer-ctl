@@ -34,7 +34,7 @@ pub enum Pick {
 /// UTF-16 code units the tray tooltip may occupy.
 ///
 /// MEASURED, not from the docs. `NOTIFYICONDATAW::szTip` is declared `[u16; 128]` and the
-/// modern shell honours 128 -- but only when `cbSize` identifies a struct version that has
+/// modern shell honors 128 -- but only when `cbSize` identifies a struct version that has
 /// the long field. `tray-icon` 0.19 builds its `NOTIFYICONDATAW` with `..std::mem::zeroed()`,
 /// leaving **`cbSize` = 0**, which matches no declared version; the shell accepts the call
 /// (it does not return an error) and then behaves like the original layout, where `szTip` was
@@ -130,11 +130,11 @@ pub struct ProgramState {
     /// Refresh rates the display offers at its current resolution; empty hides the menu.
     pub refresh_rates: Vec<u32>,
     /// This model's keyboard geometry is mapped (`keyboard::supports_custom_frame`); set by
-    /// `main` once the device is known. Off, the colour menu is hidden and nothing is painted.
+    /// `main` once the device is known. Off, the color menu is hidden and nothing is painted.
     pub custom_colors: bool,
-    /// Named colours for the menu (config).
+    /// Named colors for the menu (config).
     pub keyboard_presets: Vec<KeyboardPreset>,
-    /// Draw the battery bar over a custom colour (config).
+    /// Draw the battery bar over a custom color (config).
     pub battery_bar: bool,
     /// The last frame written to the keyboard, so an unchanged frame is not re-sent. `None`
     /// forces the next paint. Frames cannot be read back, so this is the only record.
@@ -408,7 +408,7 @@ impl ProgramState {
         // Priorities: 0 is never dropped, larger numbers are shed first when the layout
         // exceeds TOOLTIP_MAX_UTF16. Ordered by how much the field tells you that you
         // can't already see: the perf mode is the app's whole identity, dGPU temp is
-        // invisible without us, and the logo colour is literally visible on the lid.
+        // invisible without us, and the logo color is literally visible on the lid.
         const P_MODE: u8 = 0;
         const P_FAN: u8 = 1;
         const P_GPU_TEMP: u8 = 2;
@@ -551,7 +551,7 @@ impl ProgramState {
                 }
             }
         }
-        // After the effect write, which would otherwise replace the colour.
+        // After the effect write, which would otherwise replace the color.
         self.paint_keyboard(device, true);
         self.apply_os_settings();
         self.rebuild_menu(Some(tray_icon));
@@ -651,12 +651,12 @@ impl ProgramState {
         self.apply_and_refresh(tray_icon, device)
     }
 
-    /// A custom colour is set and this model can show it.
+    /// A custom color is set and this model can show it.
     pub fn has_custom_color(&self) -> bool {
         self.custom_colors && self.device_state.lights_mode.keyboard_color.is_some()
     }
 
-    /// Show the custom keyboard colour, if one is set: rendered from intent, with the battery
+    /// Show the custom keyboard color, if one is set: rendered from intent, with the battery
     /// bar when enabled. Unless `force`, an unchanged frame is not re-sent, because every
     /// write lights the backlight back up; `force` is for when the EC may have dropped it
     /// (after an apply, a wake, or a device reopen). Failures are logged: it's cosmetic.
@@ -679,7 +679,7 @@ impl ProgramState {
         match command::set_keyboard_frame(device, &frame) {
             Ok(()) => self.painted = Some(frame),
             Err(e) => {
-                log::warn!("keyboard colour: {e:?}");
+                log::warn!("keyboard color: {e:?}");
                 self.painted = None;
             }
         }

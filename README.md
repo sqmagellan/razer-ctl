@@ -12,7 +12,7 @@ binary is 1.8 MB.
 
 **Scope, up front:** this is a fork maintained by one person with one laptop. Every hardware claim
 here was verified on a Razer Blade 16 (2023), `RZ09-0483`, USB PID `0x029F`, Windows 11, and nowhere
-else. An unrecognised model gets a generic profile instead of refusing to start, and any command the
+else. An unrecognized model gets a generic profile instead of refusing to start, and any command the
 firmware doesn't implement fails with one clean error. [Device support](#device-support) says what
 to expect.
 
@@ -103,7 +103,7 @@ lighting or battery features possibly not to, and expect to be told which. If yo
 
 ### What is NOT here, on purpose
 
-- **No arbitrary keyboard colour.** It needs Razer driver mode, which disables the Fn media keys.
+- **No arbitrary keyboard color.** It needs Razer driver mode, which disables the Fn media keys.
 - **No temperature-driven fan curve.** An honest CPU temperature on Windows needs a kernel driver,
   and the usual one (WinRing0) carries CVE-2020-14979 and has been quarantined by Defender since
   March 2025. Windows' own ACPI thermal zones aren't a substitute: tested here, they're frozen stubs
@@ -143,9 +143,9 @@ a personal machine.
 
 The hard-won ones. [`CHANGELOG.md`](CHANGELOG.md) carries the measurements behind each.
 
-- **Custom keyboard colour is a frame the tray keeps repainting.** The EC's own static effect
-  ignores the colour and shows Razer green, and this README used to say colour needed driver mode.
-  It doesn't: six `0x030b` row writes followed by `0x030a [5, 0]` show any colours in Normal mode,
+- **Custom keyboard color is a frame the tray keeps repainting.** The EC's own static effect
+  ignores the color and shows Razer green, and this README used to say color needed driver mode.
+  It doesn't: six `0x030b` row writes followed by `0x030a [5, 0]` show any colors in Normal mode,
   with the Fn keys intact (verified 2026-09-23). The EC doesn't keep the frame, and standby brings
   the stored effect back, so the tray repaints it after every wake. Effect speed is still fixed.
 - **Always-on is a keep-alive, because the firmware flag killed every Fn media key.** Razer's
@@ -157,7 +157,7 @@ The hard-won ones. [`CHANGELOG.md`](CHANGELOG.md) carries the measurements behin
   which can't happen at the measured 23–53 RPM/s slew. `FanRpmFilter` drops lone-zone reads and
   makes a stop earn two consecutive confirmations. Tach output is quantised to 100 RPM.
 - **A set point of 0 doesn't hand back to the firmware curve.** The mode stays Manual and the fan
-  holds 2000, so razer-control-revived's "0 clears the manual flag" behaviour must not be ported.
+  holds 2000, so razer-control-revived's "0 clears the manual flag" behavior must not be ported.
 - **Enforce mode is last-writer-wins.** It beats occasional changes but loses to a tool that
   re-asserts every sub-second.
 - **"Close GPU apps" is conservative on purpose.** It skips session-critical processes and anything

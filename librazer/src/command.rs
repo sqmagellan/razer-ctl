@@ -310,8 +310,8 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
 // HW-verified 2026-07-25), but it is still held as intent and re-applied rather than
 // reconciled (see `DeviceState::apply_keyboard_lighting`).
 //
-// These are the EC-animated effects. The EC's own static-colour effect ignores the colour and
-// shows Razer green, but a custom colour frame does work in Normal mode (`set_keyboard_frame`,
+// These are the EC-animated effects. The EC's own static-color effect ignores the color and
+// shows Razer green, but a custom color frame does work in Normal mode (`set_keyboard_frame`,
 // HW-verified 2026-09-23); this project wrongly called that impossible until then. All four
 // effects HW-confirmed on 0x029F at our default 0x1F transaction.
 
@@ -349,7 +349,7 @@ pub fn set_keyboard_effect(device: &impl HidTransport, effect: KeyboardEffect) -
 /// cache by writing in one `razer-cli` process and reading in another.
 ///
 /// A `None` return means the EC reported an effect id we do not model (e.g. Reactive or
-/// Static, which need driver mode and a host colour, so we deliberately don't offer them).
+/// Static, which need driver mode and a host color, so we deliberately don't offer them).
 /// That is not an error -- it just means "something we didn't set", and callers should
 /// treat it as unknown rather than fighting it.
 pub fn get_keyboard_effect(device: &impl HidTransport) -> Result<Option<KeyboardEffect>> {
@@ -373,7 +373,7 @@ pub fn get_keyboard_effect(device: &impl HidTransport) -> Result<Option<Keyboard
     })
 }
 
-/// Show a custom colour frame (see [`crate::keyboard`]): one `0x030b` write per row,
+/// Show a custom color frame (see [`crate::keyboard`]): one `0x030b` write per row,
 /// `[0xff, row, first col, last col, RGB x 16]`, then `0x030a [custom, no-store]` to display
 /// them. Works in Normal device mode, so the Fn keys keep working; not stored in the EC.
 pub fn set_keyboard_frame(
@@ -659,7 +659,7 @@ mod tests {
         }
 
         // An effect we deliberately don't model (Static/Reactive need driver mode and a
-        // host colour) must read as "unknown", NOT as an error and NOT as a wrong variant
+        // host color) must read as "unknown", NOT as an error and NOT as a wrong variant
         // -- otherwise a Synapse-set effect would look like a failed read.
         let exotic = MockTransport::with_responder(|_| reply(&[1, 5, 0x07]));
         assert_eq!(get_keyboard_effect(&exotic).unwrap(), None);

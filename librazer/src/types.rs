@@ -67,8 +67,8 @@ pub enum LogoMode {
 /// mode -- the Fn media keys keep working -- so they're Fn-safe and need no driver mode.
 ///
 /// These are the EC-animated effects: Off (0x00), Spectrum (0x03), Wave (0x04, directional),
-/// Breathing (0x02, random-colour fade). The EC's Static effect is omitted because it ignores
-/// the colour on this model. A chosen colour is a separate thing, a host-written frame that
+/// Breathing (0x02, random-color fade). The EC's Static effect is omitted because it ignores
+/// the color on this model. A chosen color is a separate thing, a host-written frame that
 /// also works in Normal mode: see [`crate::keyboard`].
 #[derive(
     EnumString, EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize,
@@ -130,7 +130,7 @@ impl BatteryCare {
     /// A limit at `percent`, rejecting anything the EC will not accept.
     ///
     /// Unlike the old `from_percent`, this does **not** round to a nearby preset: the
-    /// firmware honours every integer in range, so silently moving the user's 63% to
+    /// firmware honors every integer in range, so silently moving the user's 63% to
     /// 65% would be inventing a limitation and lying about it.
     pub fn from_percent(percent: u8) -> Result<Self> {
         if !(Self::MIN_PERCENT..=Self::MAX_PERCENT).contains(&percent) {

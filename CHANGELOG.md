@@ -1,6 +1,6 @@
 # Changelog
 
-Release history for this fork. The README carries the current behaviour; this file carries how it
+Release history for this fork. The README carries the current behavior; this file carries how it
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
@@ -73,7 +73,7 @@ HW-verified on `0x029F` (2026-09-05).
   Action's perf mode and fan, and `update()` assigned the lot to `ac_state` or `battery_state`.
   Close the game and the profile you returned to had quietly acquired the Action's settings. The
   README's claim that an Action "never overwrites a saved profile" was the intent, not the
-  behaviour. `DeviceState::carry_changes` now writes only the fields that differ between the state
+  behavior. `DeviceState::carry_changes` now writes only the fields that differ between the state
   the menu was built from and the state the user picked. With no Action active `base == before`, so
   the common path is bit-identical to the old wholesale assignment, and that equivalence is one of
   the three new tests. Only the saved profile is narrowed: whether a manual edit should override a
@@ -89,7 +89,7 @@ HW-verified on `0x029F` (2026-08-15).
 
 - **The manual fan floor is 2000 RPM, not the 2200 the descriptor claimed.** Writing raw `0x0d01`
   past the CLI's own clamp, set points of 1800 / 1500 / 1200 / 1000 / 800 / 400 / 100 / 0 all settle
-  at exactly 2000 on both zones, held 40 s each across 0–17% CPU load. 2000 and 3000 are honoured
+  at exactly 2000 on both zones, held 40 s each across 0–17% CPU load. 2000 and 3000 are honored
   exactly. It's a floor, not the EC substituting its own thermal demand: Auto idle is asymmetric
   (2000/1900) while the manual floor is always symmetric (2000/2000). Only the two `RZ09-0483` rows
   were lowered. Every other row in both tables is transcribed from a third-party `laptops.json`, and
@@ -98,7 +98,7 @@ HW-verified on `0x029F` (2026-08-15).
 - **Sub-floor fan writes are rejected instead of silently accepted.** `set_fan_rpm` had no lower
   bound, so `set_fan_rpm(dev, 400)` returned `Ok(())` while the fan kept spinning at 2000. The EC
   banks a sub-floor value in its read-back register and ignores it, so every caller above then
-  reported a speed the hardware wasn't honouring. It's bounded at both ends now, with an error that
+  reported a speed the hardware wasn't honoring. It's bounded at both ends now, with an error that
   explains why the loud case beats the silent one.
 - **Individual `0x0d88` fan reads aren't trustworthy, so they're filtered.** Roughly 3 in 10 sparse
   samples carried one impossible zone (0/1800, then 2000/0, then 0/1800 at 30 s spacing), which
@@ -111,7 +111,7 @@ HW-verified on `0x029F` (2026-08-15).
 - **Zero RPM is real, but Auto-only.** 14 of 15 consecutive reads at 1.5 s spacing returned 0/0 over
   22 s. Manual can't stop the fans, and a set point of 0 doesn't hand back to the firmware curve on
   this chassis: the mode stays Manual and the fan holds 2000. So razer-control-revived's "0 clears
-  the manual flag" behaviour must not be ported here.
+  the manual flag" behavior must not be ported here.
 - **`cargo audit` runs weekly as its own workflow.** It's separate from `ci.yml` on purpose. Every
   other gate answers "did this change break something"; audit answers "did the world change under
   code nobody touched", which only surfaces on a timer, and a `schedule:` belongs to the workflow
@@ -154,7 +154,7 @@ HW-verified on `0x029F` (2026-07-25).
   event still consumed its whole tick.
 - **Left-click no longer opens the menu *and* changes the perf mode.** `tray-icon`'s
   `menu_on_left_click` defaults to true and must be disabled explicitly. Under 0.11.3 the
-  Windows backend showed the menu only on `WM_RBUTTONUP` and ignored the flag; 0.19 honours it,
+  Windows backend showed the menu only on `WM_RBUTTONUP` and ignored the flag; 0.19 honors it,
   so a single left-click did both — the menu opened on button-*down* while the perf-mode cycle
   ran on button-*up*, changing the mode behind the popup where you couldn't see it. Worse, each
   invisible cycle *persisted*, so the saved AC/battery profile quietly drifted. Left-click is
@@ -237,8 +237,8 @@ Landed on top of `0.9.0` (tray stayed `0.9.0`, CLI `0.8.6`); all HW-verified on 
   exit. A transient override that never clobbers a saved profile; empty by default.
 - **Resume re-assert without full enforce** — the intended mode is re-applied on wake by default
   (`reassert_on_resume`), not only when enforce is on. Wake used to keep whatever the EC reset itself to.
-- **Labelled Custom boosts** — the Custom submenu now labels its two groups ("CPU boost" / "GPU boost")
-  instead of two unlabelled Low/Med/High stacks.
+- **Labeled Custom boosts** — the Custom submenu now labels its two groups ("CPU boost" / "GPU boost")
+  instead of two unlabeled Low/Med/High stacks.
 
 **Self-healing / correctness**
 - **Startup reconcile** — on launch the tray reads the device back after its startup apply and

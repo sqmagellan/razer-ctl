@@ -93,7 +93,7 @@ fn detect_with_retry() -> Result<device::Device> {
 }
 
 /// An input gap at least this long may have let the keyboard backlight fade, which can
-/// drop a custom colour. The EC fades after about 4 s idle; 3 s leaves margin for the
+/// drop a custom color. The EC fades after about 4 s idle; 3 s leaves margin for the
 /// 1 s loop tick.
 const KEYBOARD_FADE_MS: u32 = 3000;
 
@@ -166,7 +166,7 @@ fn main() -> Result<()> {
 
     // Device preparation BEFORE the profile is applied, and never fatal. It used to run
     // after init(), so an init failure skipped it, and on models with init sequences the
-    // first apply and reconcile ran against an uninitialised device.
+    // first apply and reconcile ran against an uninitialized device.
     for element in device.info().init_cmds {
         if let Err(e) = command::send_command(&device, *element, &[0, 0, 0, 0]) {
             log::warn!("init command {element:#06x} failed: {e:?}");
@@ -186,7 +186,7 @@ fn main() -> Result<()> {
     //
     // `menu_on_left_click` defaults to TRUE, and it must be turned off explicitly. Under
     // tray-icon 0.11.3 the Windows backend showed the menu only on WM_RBUTTONUP and ignored
-    // this flag, so left-click did nothing but cycle. 0.19 honours it, which made a single
+    // this flag, so left-click did nothing but cycle. 0.19 honors it, which made a single
     // left-click do BOTH: the menu opens on WM_LBUTTONDOWN while our cycle runs on
     // WM_LBUTTONUP, so the mode changed *behind* the popup and you couldn't see it until you
     // moved the mouse away and the menu dismissed.
@@ -585,16 +585,16 @@ fn main() -> Result<()> {
                         platform::WakeSource::DisplayOn => state.enforce,
                     };
                     state.reconcile(&mut tray_icon, &device, &reason, write);
-                    // A custom colour does not survive standby (the keyboard falls back to
+                    // A custom color does not survive standby (the keyboard falls back to
                     // its stored effect), so repaint it whatever the reconcile decided.
                     state.paint_keyboard(&device, true);
                 }
             }
 
-            // A custom colour can be gone after the backlight's idle fade: with "Keep
+            // A custom color can be gone after the backlight's idle fade: with "Keep
             // keyboard lit" off, the keyboard wakes back up on its stored effect, not the
             // frame (seen 2026-09-23). The first input after a pause longer than the fade
-            // repaints it. Harmless when the frame survived: the same colours are re-sent.
+            // repaints it. Harmless when the frame survived: the same colors are re-sent.
             let tick_now = platform::last_input_tick();
             if let (Some(cur), Some(prev)) = (tick_now, last_seen_input_tick) {
                 if cur != prev
