@@ -41,26 +41,13 @@ pub const FALLBACK_FAN_RPM_RANGE: (u16, u16) = (2200, 5000);
 ///
 /// `pid` is whatever the USB enumeration actually found, so the HID open path is
 /// unaffected; only the *metadata* is guessed.
-/// Everything except the features whose wire encoding is known to differ by chassis:
-/// Fn Lock takes `[0, 0|1]` on 0x029F but `[1, 0|1]` on 0x02e0, so offering it to an
-/// uncatalogued model could send it a value with another meaning.
-pub const FALLBACK_FEATURES: &[&str] = &[
-    "battery-care",
-    "lid-logo",
-    "lights-always-on",
-    "kbd-backlight",
-    "kbd-lighting",
-    "fan",
-    "perf",
-];
-
 pub fn fallback_descriptor(pid: u16) -> Descriptor {
     Descriptor {
         // Only used for display; matching has already happened by this point.
         model_number_prefix: "RZ09-",
         name: "Unrecognized Razer laptop (untested)",
         pid,
-        features: FALLBACK_FEATURES,
+        features: crate::feature::ALL_FEATURES,
         // Never guess an init sequence: the known ones are model-specific magic
         // (the 2025 Blade 16's 0x0081/0x0086/0x0f90/...), and replaying another
         // model's startup writes at an unknown EC is the one genuinely risky thing
@@ -133,19 +120,10 @@ mod tests {
         let d = fallback_descriptor(0x02e1); // Blade 18 2026, absent from SUPPORTED
         assert_eq!(d.pid, 0x02e1);
 
-        // Every feature is offered except the chassis-encoded ones: an absent one answers
-        // NotSupported and fails fast, which is better than hiding a control the chassis
-        // does have.
-        let expected: Vec<&str> = crate::feature::ALL_FEATURES
-            .iter()
-            .copied()
-            .filter(|f| *f != "fn-lock")
-            .collect();
-        let mut got = d.features.to_vec();
-        let mut want = expected.clone();
-        got.sort_unstable();
-        want.sort_unstable();
-        assert_eq!(got, want);
+        // Every feature is offered: an absent one answers NotSupported and fails fast,
+        // which is a better outcome than hiding a control the chassis does have.
+        assert_eq!(d.features, crate::feature::ALL_FEATURES);
+        assert!(!d.features.is_empty());
     }
 
     #[test]

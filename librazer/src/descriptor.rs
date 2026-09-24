@@ -58,7 +58,8 @@ pub const SUPPORTED: &[Descriptor] = &[
             "lid-logo",
             "lights-always-on",
             "perf",
-            "fn-lock", // probed 2026-09-23 (get/set round-trip); see types::FnLock
+            // Not "fn-lock": 0x0206/0x0286 [0, 0|1] round-trips here, but neither value
+            // changes the F-row (F1-F12 primary, media on Fn; key-tested 2026-09-23).
         ],
         init_cmds: &[],
         fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed
@@ -90,7 +91,6 @@ pub const SUPPORTED: &[Descriptor] = &[
             "lid-logo",
             "lights-always-on",
             "perf",
-            "fn-lock", // probed 2026-09-23 (get/set round-trip); see types::FnLock
         ],
         init_cmds: &[],
         fan_rpm_range: (2000, 5000), // MEASURED 2026-08-15, not transcribed

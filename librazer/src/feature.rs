@@ -71,5 +71,4 @@ feature_list![
     KbdLighting,
     Fan,
     Perf,
-    FnLock,
 ];

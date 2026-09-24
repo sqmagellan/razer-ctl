@@ -43,7 +43,7 @@ standby cycles in 17 days against 5 resumes).
   abort on the first attempt and exit 1. Raw `cmd` probes are sent once and never re-sent. Perf
   zones left disagreeing by an interrupted write are a typed error, and the tray repairs them.
 - **New:** refresh rate per power source; opt-in Windows power-mode matching; an opt-in perf-cycle
-  hotkey; `razer-cli auto fn-lock`; a Synapse-running warning in the menu.
+  hotkey; a Synapse-running warning in the menu.
 - **Log** moved to `%LOCALAPPDATA%\razer-tray\`, 1 MiB rotated ×4. Logging starts before anything
   else.
 - **Supply chain.** bincode is gone: the 90-byte packet is encoded by hand, checked byte-identical

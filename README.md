@@ -48,8 +48,6 @@ and [`CHANGELOG.md`](CHANGELOG.md) carries the release history and the measureme
   performance.
 - **Perf-cycle hotkey** (off by default) — set `cycle_perf_hotkey = "Ctrl+Alt+P"` in the config; it
   acts like a left-click on the tray icon. A modifier is required. Read at startup.
-- **Fn Lock** — `razer-cli auto fn-lock on|off` (the function-row primary mode). Which state makes
-  F1–F12 primary is not yet confirmed on this model.
 - **Synapse warning** — if Razer Synapse is running, the menu says so at the top. The tray never
   stops another program's services.
 - **Keyboard always-on** — a Normal-mode keep-alive, not Razer's driver-mode flag, so the Fn media

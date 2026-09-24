@@ -2,8 +2,8 @@ use librazer::command;
 use librazer::device;
 use librazer::feature;
 use librazer::types::{
-    BatteryCare, CpuBoost, FanMode, FanZone, FnLock, GpuBoost, KeyboardEffect, LightsAlwaysOn,
-    LogoMode, MaxFanSpeedMode, PerfMode,
+    BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
+    MaxFanSpeedMode, PerfMode,
 };
 
 use librazer::feature::Feature;
@@ -84,7 +84,6 @@ macro_rules! impl_unary_cli {
 
 impl_unary_cli! {<feature::KbdBacklight><u8>("Set keyboard backlight brightness", "Number in range [0, 255]", command::set_keyboard_brightness, command::get_keyboard_brightness)}
 impl_unary_cli! {<feature::LidLogo><LogoMode>("Set lid logo mode", "", command::set_logo_mode, command::get_logo_mode)}
-impl_unary_cli! {<feature::FnLock><FnLock>("Set Fn Lock (function-row primary mode; which state is F1-F12 is unconfirmed on this model)", "", command::set_fn_lock, command::get_fn_lock)}
 impl_unary_cli! {<feature::LightsAlwaysOn><LightsAlwaysOn>("Set lights always on", "", command::set_lights_always_on, command::get_lights_always_on)}
 
 impl Cli for feature::BatteryCare {
