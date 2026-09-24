@@ -465,6 +465,8 @@ pub fn spawn_gpu_telemetry_monitor() {
 }
 
 /// What woke the machine, as far as the tray can tell. See [`take_wake`].
+// Only the Windows power thread constructs these.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WakeSource {
     /// A `PBT_APMRESUME*` message. On this Blade it arrives for some resumes and not
@@ -1049,6 +1051,8 @@ pub fn set_refresh_rate(_hz: u32) -> Result<()> {
 
 /// Parse a hotkey like `"Ctrl+Alt+P"` into (modifier flags, virtual-key code).
 /// Modifiers: Ctrl/Control, Alt, Shift, Win; key: A-Z, 0-9, F1-F24. Case-insensitive.
+/// Built everywhere so its tests run on any host; only Windows registers the hotkey.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn parse_hotkey(spec: &str) -> Option<(u32, u32)> {
     const MOD_ALT: u32 = 0x1;
     const MOD_CONTROL: u32 = 0x2;
@@ -1093,8 +1097,10 @@ pub fn take_hotkey() -> bool {
 
 /// The hotkey spec handed to the power-notification thread, which owns the window that
 /// receives WM_HOTKEY. Set before `spawn_display_state_monitor`.
+#[cfg(target_os = "windows")]
 static HOTKEY_SPEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+#[cfg(target_os = "windows")]
 pub fn set_hotkey_spec(spec: Option<String>) {
     *HOTKEY_SPEC.lock().unwrap_or_else(|p| p.into_inner()) = spec;
 }
