@@ -43,9 +43,10 @@ and [`CHANGELOG.md`](CHANGELOG.md) carries the release history and the measureme
 - **Refresh rate per power source** — a menu of the rates the display offers at its current
   resolution. The pick is stored in the AC or battery profile, so it switches when you plug or
   unplug. "Don't change" (the default) leaves the display alone.
-- **Match Windows power mode** (off by default) — moves the Settings "Power mode" slider with the
-  perf mode: Battery/Silent → best power efficiency, Balanced → balanced, the rest → best
-  performance.
+- **Also switch Windows power mode** (off by default, in the Performance mode menu) — moves the
+  Settings "Power mode" slider with the perf mode: Battery/Silent → Best power efficiency,
+  Balanced → Balanced, the rest → Best performance. While it's on, a line under it shows the mode
+  Windows reports.
 - **Perf-cycle hotkey** (off by default) — set `cycle_perf_hotkey = "Ctrl+Alt+P"` in the config; it
   acts like a left-click on the tray icon. A modifier is required. Read at startup.
 - **Synapse warning** — if Razer Synapse is running, the menu says so at the top. The tray never

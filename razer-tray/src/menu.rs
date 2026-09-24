@@ -24,8 +24,10 @@ pub struct MenuOptions<'a> {
     pub fan_rpm_range: (u16, u16),
     /// Shown as a disabled item at the top (e.g. Synapse is running).
     pub warning: Option<&'a str>,
-    /// Drives the "Match Windows power mode" toggle.
+    /// Drives the "Also switch Windows power mode" toggle.
     pub match_power_mode: bool,
+    /// The Windows power mode now in effect, shown under that toggle while it is on.
+    pub windows_power_mode: Option<&'a str>,
     /// Refresh rates the display offers at its current resolution; empty hides the submenu.
     pub refresh_rates: &'a [u32],
     /// This model's keyboard geometry is mapped, so custom colors can be offered.
@@ -53,6 +55,7 @@ pub fn build(
         fan_rpm_range,
         warning,
         match_power_mode,
+        windows_power_mode,
         refresh_rates,
         custom_colors,
         keyboard_presets,
@@ -168,6 +171,23 @@ pub fn build(
         .collect();
 
     perf_modes.append(&Submenu::with_items("Custom", true, &custom_items)?)?;
+
+    // Couple the Windows power mode to the perf mode (opt-in). Next to the choice it
+    // follows, and while on, a line says what Windows is actually set to.
+    #[cfg(target_os = "windows")]
+    {
+        perf_modes.append(&PredefinedMenuItem::separator())?;
+        perf_modes.append(&CheckMenuItem::with_id(
+            "toggle_power_mode",
+            "Also switch Windows power mode",
+            true,
+            match_power_mode,
+            None,
+        ))?;
+        if let (true, Some(mode)) = (match_power_mode, windows_power_mode) {
+            perf_modes.append(&MenuItem::new(format!("Windows: {mode}"), false, None))?;
+        }
+    }
 
     menu.append(&perf_modes)?;
 
@@ -525,38 +545,6 @@ pub fn build(
     )?)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
-
-    // Couple the Windows power mode to the perf mode (opt-in). Windows-only. A submenu
-    // rather than a checkbox so the mapping is visible where the choice is made.
-    #[cfg(target_os = "windows")]
-    {
-        let follow = CheckMenuItem::with_id(
-            "power_mode:follow",
-            "Follow performance mode",
-            !match_power_mode,
-            match_power_mode,
-            None,
-        );
-        let leave = CheckMenuItem::with_id(
-            "power_mode:off",
-            "Don't change",
-            match_power_mode,
-            !match_power_mode,
-            None,
-        );
-        let separator = PredefinedMenuItem::separator();
-        let mapping = [
-            "Battery, Silent → Best power efficiency",
-            "Balanced → Balanced",
-            "Performance, Hyperboost, Custom → Best performance",
-        ]
-        .map(|text| MenuItem::new(text, false, None));
-        let items: Vec<&dyn IsMenuItem> = [&follow as &dyn IsMenuItem, &leave, &separator]
-            .into_iter()
-            .chain(mapping.iter().map(|i| i as &dyn IsMenuItem))
-            .collect();
-        menu.append(&Submenu::with_items("Windows power mode", true, &items)?)?;
-    }
 
     // Enforce settings (opt-in "win against Synapse"). Windows-only, since
     // Synapse is a Windows product. Off by default.

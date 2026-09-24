@@ -161,6 +161,7 @@ impl ProgramState {
                 fan_rpm_range,
                 warning: None,
                 match_power_mode: config.match_windows_power_mode,
+                windows_power_mode: None,
                 refresh_rates: &[],
                 custom_colors: false,
                 keyboard_presets: &config.keyboard_presets,
@@ -203,6 +204,11 @@ impl ProgramState {
             fan_rpm_range: self.fan_rpm_range,
             warning: self.warning.as_deref(),
             match_power_mode: self.match_power_mode,
+            windows_power_mode: if self.match_power_mode {
+                crate::platform::windows_power_mode()
+            } else {
+                None
+            },
             refresh_rates: &self.refresh_rates,
             custom_colors: self.custom_colors,
             keyboard_presets: &self.keyboard_presets,

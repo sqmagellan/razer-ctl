@@ -826,49 +826,92 @@ pub fn detect_synapse() -> Option<String> {
     })
 }
 
+// The three positions of the Settings "Power mode" slider, as overlay-scheme GUIDs.
+#[cfg(target_os = "windows")]
+const POWER_MODES: [(windows::core::GUID, &str); 3] = [
+    (
+        windows::core::GUID::from_u128(0x961cc777_2547_4f9d_8174_7d86181b8a7a),
+        "Best power efficiency",
+    ),
+    (windows::core::GUID::zeroed(), "Balanced"),
+    (
+        windows::core::GUID::from_u128(0xded574b5_45a0_4f42_8737_46345c09c238),
+        "Best performance",
+    ),
+];
+
+/// Which Windows power mode a perf mode maps to (an index into `POWER_MODES`).
+#[cfg(target_os = "windows")]
+fn power_mode_for(perf: crate::state::PerfMode) -> usize {
+    use crate::state::PerfMode;
+    match perf {
+        PerfMode::Battery | PerfMode::Silent => 0,
+        PerfMode::Balanced => 1,
+        PerfMode::Performance | PerfMode::Hyperboost | PerfMode::Custom(..) => 2,
+    }
+}
+
+/// `PowerGetEffectiveOverlayScheme` from powrprof.dll, or None if this Windows lacks it.
+/// powrprof.dll is a system DLL, loaded once and never freed (a leaked module handle
+/// keeps the function pointers valid).
+#[cfg(target_os = "windows")]
+fn effective_power_mode_guid() -> Option<windows::core::GUID> {
+    use windows::core::{s, w, GUID};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    type GetEffective = unsafe extern "system" fn(*mut GUID) -> u32;
+    // SAFETY: the symbol, when present, has the signature above, as used by the
+    // Settings app.
+    unsafe {
+        let module = LoadLibraryW(w!("powrprof.dll")).ok()?;
+        let get: GetEffective = std::mem::transmute(GetProcAddress(
+            module,
+            s!("PowerGetEffectiveOverlayScheme"),
+        )?);
+        let mut current = GUID::zeroed();
+        (get(&mut current) == 0).then_some(current)
+    }
+}
+
+/// The Windows power mode now in effect, as the Settings app names it.
+#[cfg(target_os = "windows")]
+pub fn windows_power_mode() -> Option<&'static str> {
+    let current = effective_power_mode_guid()?;
+    POWER_MODES
+        .iter()
+        .find(|(guid, _)| *guid == current)
+        .map(|(_, name)| *name)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn windows_power_mode() -> Option<&'static str> {
+    None
+}
+
 /// Set the Windows power mode (Settings > Power, "Power mode") to match a perf mode.
 ///
 /// Uses `PowerSetActiveOverlayScheme` from powrprof.dll: the call the Settings slider
 /// makes, and the one G-Helper and Legion Toolkit use. It is undocumented, so it is
 /// resolved at runtime; a Windows without it reports an error instead of failing to load.
-/// The overlay GUIDs are the three slider positions.
 #[cfg(target_os = "windows")]
 pub fn set_windows_power_mode(perf: crate::state::PerfMode) -> Result<()> {
-    use crate::state::PerfMode;
     use windows::core::{s, w, GUID};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
-    const BEST_EFFICIENCY: GUID = GUID::from_u128(0x961cc777_2547_4f9d_8174_7d86181b8a7a);
-    const BALANCED: GUID = GUID::zeroed();
-    const BEST_PERFORMANCE: GUID = GUID::from_u128(0xded574b5_45a0_4f42_8737_46345c09c238);
-
-    let (guid, label) = match perf {
-        PerfMode::Battery | PerfMode::Silent => (BEST_EFFICIENCY, "best power efficiency"),
-        PerfMode::Balanced => (BALANCED, "balanced"),
-        PerfMode::Performance | PerfMode::Hyperboost | PerfMode::Custom(..) => {
-            (BEST_PERFORMANCE, "best performance")
-        }
-    };
+    let (guid, label) = POWER_MODES[power_mode_for(perf)];
 
     // Compared against what Windows says is in effect, not against what we last set:
     // Windows keeps the slider per power source, and the user can move it themselves.
-    type GetEffective = unsafe extern "system" fn(*mut GUID) -> u32;
+    if effective_power_mode_guid() == Some(guid) {
+        return Ok(());
+    }
     // `PowerSetActiveOverlayScheme(GUID)` takes the GUID BY VALUE. Declaring it that way
     // lets the compiler apply the platform ABI (on x64 a 16-byte struct is passed via a
     // hidden pointer, which is why passing `&guid` also happened to work).
     type SetOverlay = unsafe extern "system" fn(GUID) -> u32;
-    // SAFETY: powrprof.dll is a system DLL, loaded once and never freed (a leaked module
-    // handle keeps the function pointers valid). The symbols, when present, have the
-    // signatures above, as used by the Settings app.
+    // SAFETY: as for `effective_power_mode_guid`; the symbol, when present, has the
+    // signature above.
     let status = unsafe {
         let module = LoadLibraryW(w!("powrprof.dll"))?;
-        if let Some(get) = GetProcAddress(module, s!("PowerGetEffectiveOverlayScheme")) {
-            let get: GetEffective = std::mem::transmute(get);
-            let mut current = GUID::zeroed();
-            if get(&mut current) == 0 && current == guid {
-                return Ok(());
-            }
-        }
         let proc = GetProcAddress(module, s!("PowerSetActiveOverlayScheme"))
             .ok_or_else(|| anyhow::anyhow!("PowerSetActiveOverlayScheme not available"))?;
         let set: SetOverlay = std::mem::transmute(proc);

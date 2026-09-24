@@ -337,11 +337,8 @@ fn main() -> Result<()> {
                     // Rebuild the menu so the checkmark reflects the new state.
                     state.rebuild_menu(Some(&tray_icon));
                     log::info!("enforce toggled to {}", state.enforce);
-                } else if let Some(follow) = match event.id.as_ref() {
-                    "power_mode:follow" => Some(true),
-                    "power_mode:off" => Some(false),
-                    _ => None,
-                } {
+                } else if event.id == MenuId("toggle_power_mode".to_string()) {
+                    let follow = !state.match_power_mode;
                     state.match_power_mode = follow;
                     if let Err(e) = state.persist() {
                         log::warn!("Failed to persist power-mode flag: {:?}", e);
