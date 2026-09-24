@@ -171,10 +171,20 @@ impl Cli for feature::KbdLighting {
                              brings the effect back (the tray repaints its own colour).",
                         )
                         .arg(
-                            arg!(<COLORS> ... "Colours")
+                            arg!([COLORS] ... "Colours")
                                 .num_args(1..=6)
                                 .value_parser(clap::value_parser!(Rgb)),
                         )
+                        .arg(
+                            arg!(--perf <MODE> "Instead of colours, the colour of a perf mode (battery/silent/balanced/performance/hyperboost/custom)")
+                                .required(false),
+                        )
+                        .arg(
+                            arg!(--battery <PERCENT> "Preview the battery bar at this charge")
+                                .required(false)
+                                .value_parser(clap::value_parser!(u8).range(0..=100)),
+                        )
+                        .arg(arg!(--charging "Preview the battery bar as charging").requires("battery"))
                         .arg_required_else_help(true),
                 )
                 .arg_required_else_help(true),
@@ -191,13 +201,38 @@ impl Cli for feature::KbdLighting {
                             device.info.pid
                         );
                     }
-                    let colors: Vec<Rgb> = m.get_many::<Rgb>("COLORS").unwrap().copied().collect();
-                    let color = match <[Rgb; keyboard::ROWS]>::try_from(colors.as_slice()) {
-                        Ok(rows) => KeyboardColor::Rows(rows),
-                        Err(_) if colors.len() == 1 => KeyboardColor::solid(colors[0]),
-                        Err(_) => bail!("give one colour or six, not {}", colors.len()),
+                    use librazer::state::PerfMode as Mode;
+                    let colors: Vec<Rgb> = m
+                        .get_many::<Rgb>("COLORS")
+                        .map(|v| v.copied().collect())
+                        .unwrap_or_default();
+                    let (color, perf) = match (m.get_one::<String>("perf"), colors.len()) {
+                        (Some(name), 0) => {
+                            let perf = match name.to_ascii_lowercase().as_str() {
+                                "battery" => Mode::Battery,
+                                "silent" => Mode::Silent,
+                                "balanced" => Mode::Balanced,
+                                "performance" => Mode::Performance,
+                                "hyperboost" => Mode::Hyperboost,
+                                "custom" => Mode::Custom(CpuBoost::Boost, GpuBoost::High),
+                                other => bail!("unknown perf mode {other:?}"),
+                            };
+                            (KeyboardColor::FollowPerfMode, perf)
+                        }
+                        (Some(_), _) => bail!("give colours or --perf, not both"),
+                        (None, 1) => (KeyboardColor::solid(colors[0]), Mode::Balanced),
+                        (None, n) => match <[Rgb; keyboard::ROWS]>::try_from(colors.as_slice()) {
+                            Ok(rows) => (KeyboardColor::Rows(rows), Mode::Balanced),
+                            Err(_) => bail!("give one colour or six, not {n}"),
+                        },
                     };
-                    let frame = keyboard::render(color, librazer::state::PerfMode::Balanced, None);
+                    let battery =
+                        m.get_one::<u8>("battery")
+                            .map(|&percent| keyboard::BatteryLevel {
+                                percent,
+                                charging: m.get_flag("charging"),
+                            });
+                    let frame = keyboard::render(color, perf, battery);
                     command::set_keyboard_frame(device, &frame)?;
                     println!("Keyboard colour set");
                     Ok(())
@@ -753,6 +788,37 @@ mod tests {
         ] {
             assert!(parses(args), "{args:?} should parse");
         }
+        assert!(parses(&[
+            "auto",
+            "kbd-lighting",
+            "color",
+            "--perf",
+            "silent"
+        ]));
+        assert!(parses(&[
+            "auto",
+            "kbd-lighting",
+            "color",
+            "#ff0000",
+            "--battery",
+            "40",
+            "--charging"
+        ]));
+        assert!(!parses(&[
+            "auto",
+            "kbd-lighting",
+            "color",
+            "#ff0000",
+            "--charging"
+        ]));
+        assert!(!parses(&[
+            "auto",
+            "kbd-lighting",
+            "color",
+            "#ff0000",
+            "--battery",
+            "101"
+        ]));
         // Not a colour, or more colours than rows.
         assert!(!parses(&["auto", "kbd-lighting", "color", "red"]));
         assert!(!parses(&[

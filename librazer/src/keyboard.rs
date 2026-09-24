@@ -46,6 +46,12 @@ impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
+
+    /// This colour at `percent` of its brightness.
+    pub fn dimmed(self, percent: u8) -> Self {
+        let f = |v: u8| (u16::from(v) * u16::from(percent.min(100)) / 100) as u8;
+        Rgb::new(f(self.r), f(self.g), f(self.b))
+    }
 }
 
 impl FromStr for Rgb {
@@ -97,15 +103,17 @@ impl KeyboardColor {
     }
 }
 
-/// The colour "Follow performance mode" shows for each mode.
+/// The colour "Follow performance mode" shows for each mode: the colour of that mode's tray
+/// icon (the dominant opaque pixel of `razer-tray/icons/razer-<colour>.png`), so the keyboard
+/// and the icon agree.
 pub fn perf_mode_color(mode: PerfMode) -> Rgb {
     match mode {
-        PerfMode::Battery => Rgb::new(0x00, 0xff, 0x40),
-        PerfMode::Silent => Rgb::new(0x00, 0x60, 0xff),
-        PerfMode::Balanced => Rgb::new(0xff, 0xff, 0xff),
-        PerfMode::Performance => Rgb::new(0xff, 0x60, 0x00),
-        PerfMode::Hyperboost => Rgb::new(0xff, 0x00, 0x00),
-        PerfMode::Custom(..) => Rgb::new(0xa0, 0x00, 0xff),
+        PerfMode::Battery => Rgb::new(0x00, 0xa2, 0xe8),
+        PerfMode::Silent => Rgb::new(0xfc, 0xc4, 0x19),
+        PerfMode::Balanced => Rgb::new(0x94, 0xd8, 0x2d),
+        PerfMode::Performance => Rgb::new(0xfa, 0x52, 0x52),
+        PerfMode::Hyperboost => Rgb::new(0xff, 0x00, 0xfa),
+        PerfMode::Custom(..) => Rgb::new(0x9c, 0x67, 0x49),
     }
 }
 
@@ -182,9 +190,13 @@ pub fn render(color: KeyboardColor, perf: PerfMode, battery: Option<BatteryLevel
     frame
 }
 
+/// How bright the digit keys beyond the charge are, as a percent of the bar colour. Dim
+/// rather than off, so the whole ten-key scale stays visible.
+pub const BAR_UNLIT_PERCENT: u8 = 20;
+
 /// Light one of the ten digit keys per started 10% (so 1% still shows one key), in a colour
-/// for the level, or cyan while charging. The unlit digit keys go dark so the bar reads as a
-/// bar against any base colour.
+/// for the level, or cyan while charging. The rest of the digit keys show the same colour
+/// dimmed, so the bar reads as a bar against any base colour.
 fn draw_battery_bar(frame: &mut Frame, level: BatteryLevel) {
     let percent = usize::from(level.percent.min(100));
     let lit = percent.div_ceil(10);
@@ -198,7 +210,11 @@ fn draw_battery_bar(frame: &mut Frame, level: BatteryLevel) {
         BAR_LOW
     };
     for (i, col) in DIGIT_COLS.enumerate() {
-        frame[NUMBER_ROW][col] = if i < lit { on } else { Rgb::BLACK };
+        frame[NUMBER_ROW][col] = if i < lit {
+            on
+        } else {
+            on.dimmed(BAR_UNLIT_PERCENT)
+        };
     }
 }
 
@@ -288,7 +304,8 @@ mod tests {
 
     #[test]
     fn the_battery_bar_lights_one_key_per_started_ten_percent() {
-        let lit = |p| bar(p, false).iter().filter(|c| **c != Rgb::BLACK).count();
+        let full = [BAR_HIGH, BAR_MEDIUM, BAR_LOW];
+        let lit = |p| bar(p, false).iter().filter(|c| full.contains(c)).count();
         assert_eq!(lit(0), 0);
         assert_eq!(lit(1), 1);
         assert_eq!(lit(10), 1);
@@ -296,6 +313,14 @@ mod tests {
         assert_eq!(lit(80), 8);
         assert_eq!(lit(100), 10);
         assert_eq!(lit(255), 10);
+    }
+
+    #[test]
+    fn the_keys_beyond_the_charge_are_dimmed_not_off() {
+        let keys = bar(80, false);
+        assert_eq!(keys[8], BAR_HIGH.dimmed(BAR_UNLIT_PERCENT));
+        assert_ne!(keys[8], Rgb::BLACK);
+        assert_eq!(Rgb::new(200, 100, 0).dimmed(50), Rgb::new(100, 50, 0));
     }
 
     #[test]
