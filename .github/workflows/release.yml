@@ -142,6 +142,6 @@ jobs:
             gh attestation verify razer-tray.exe --repo sqmagellan/razer-ctl --source-ref ${{ github.ref }} --signer-workflow sqmagellan/razer-ctl/.github/workflows/release.yml
             ```
 
-            **Tested on one model only** — see the Device support section of the README for
+            **Tested on one model only.** See the Device support section of the README for
             what to expect on other Blades, and please file an "unsupported model" issue if
             you try one.

@@ -5,7 +5,7 @@ Thanks for looking. Two things about this project shape everything below:
 1. **It talks directly to your laptop's embedded controller.** A wrong command doesn't throw an
    exception, it writes to firmware. So the bar for "we know this works" is hardware evidence, not
    plausibility.
-2. **The maintainer has one laptop** — a Blade 16 (2023), PID `0x029F`. Every other model is
+2. **The maintainer has one laptop**, a Blade 16 (2023), PID `0x029F`. Every other model is
    supported on the strength of someone else's report.
 
 ## The most useful contribution
@@ -36,7 +36,7 @@ them on its Windows job).
 
 ### Where code goes
 
-**`librazer` is the testable core** — HID protocol, device model, and every pure helper. It builds
+**`librazer` is the testable core**: HID protocol, device model, and every pure helper. It builds
 and tests on any host.
 
 **`razer-tray` can only be built for Windows.** That has a consequence people get wrong: a pure
@@ -48,18 +48,18 @@ exactly this reason (the tooltip budgeter, the perf-mode cycle, the brightness s
 
 If you're adding or changing a device descriptor:
 
-- Every entry declares a real `fan_rpm_range`. Measure it — set a manual RPM and read back
-  `fan_actual_rpm` — don't infer it from a similar model.
+- Every entry declares a real `fan_rpm_range`. Measure it: set a manual RPM and read back
+  `fan_actual_rpm`. Don't infer it from a similar model.
 - **Don't invent init sequences.** The generic profile for unknown models deliberately ships *no*
   init commands, because a plausible-but-wrong startup sequence is worse than none.
 - Say in the PR what you verified on hardware and what you didn't. "Transcribed, not tested" is a
-  perfectly acceptable and genuinely useful statement; a claim of testing that didn't happen is not.
+  useful statement; a claim of testing that didn't happen is not.
 
 ### Protocol sources and licensing
 
 This project is MIT. Reference implementations like OpenRazer and razer-laptop-control are GPL.
 
-Facts about hardware — command IDs, checksum algorithms, which byte means what — aren't
+Facts about hardware (command IDs, checksum algorithms, which byte means what) aren't
 copyrightable, and using them is fine. Their *code* is. So: read them for the facts, cite the fact,
 and write the implementation yourself. Don't paste GPL code into this tree, even temporarily as a
 scratch step. If you contribute code derived from a GPL source, say so in the PR so it can be
@@ -67,6 +67,6 @@ declined or rewritten rather than quietly relicensing someone else's work.
 
 ## Style
 
-Comments explain *why*, especially where the code looks odd — most of the strange-looking parts here
+Comments explain *why*, especially where the code looks odd. Most of the strange-looking parts here
 exist because the hardware or Windows forced them, and that reasoning is the expensive part to
 rediscover. Match the surrounding density.

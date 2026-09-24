@@ -40,7 +40,7 @@ pub struct Descriptor {
 /// - A set point of 0 does **not** hand control back to the firmware curve on this
 ///   chassis -- the mode register still reads Manual and the fan holds 2000. Other
 ///   projects treat 0 as "clear the manual flag"; do not port that here.
-/// - The EC slews manual targets at a measured ~23 RPM/s and the tach is quantised to
+/// - The EC slews manual targets at a measured ~23 RPM/s and the tach is quantized to
 ///   100 RPM, so a set must not be verified by reading back sooner than dRPM/23 seconds.
 /// - Razer documents no minimum for any model, and every other open-source project picks
 ///   a different unjustified one (3500 "for ALL laptops", 3100, per-model 2200). There is

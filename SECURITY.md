@@ -3,33 +3,31 @@
 ## Reporting
 
 Please use [GitHub's private vulnerability reporting](../../security/advisories/new) rather than a
-public issue. This is a single-maintainer hobby project — expect a considered reply, not a fast one.
+public issue. This is a single-maintainer hobby project, so replies may take a while.
 
 ## What this software does and doesn't do
 
-Worth knowing before you run it, since it's the kind of tool that reasonably invites suspicion:
+A tool that talks to your laptop's embedded controller should say what it touches:
 
 - **No kernel driver.** Everything goes over USB HID feature reports to the keyboard's control
-  interface, entirely from user space. Notably this project *rejected* the usual approach for reading
-  CPU temperature — a WinRing0-based ring-0 driver — because that driver carries CVE-2020-14979, a
-  local privilege-escalation flaw, and has been quarantined by Defender since March 2025. A fan curve
-  wasn't worth a kernel attack surface on the user's machine.
-- **No network access.** Nothing phones home, checks for updates, or sends telemetry.
+  interface, from user space. The usual way to read CPU temperature (the WinRing0 ring-0 driver) was
+  left out: it carries CVE-2020-14979, a local privilege escalation, and Defender has quarantined it
+  since March 2025. A fan curve isn't worth a kernel attack surface.
+- **No network access.** Nothing in the tray or the CLI opens a connection: no update checks, no
+  telemetry.
 - **No elevation.** It runs as a normal user. The only system-level thing it writes is an
   `HKCU\...\Run` value, when you tick "Start with Windows".
 - **What it does write:** HID commands to the Razer device, a TOML config under `%APPDATA%`, and a
   log under `%LOCALAPPDATA%` (at most 4 MiB). Only if you turn them on: the display refresh rate
   (`ChangeDisplaySettingsExW`) and the Windows power mode (`PowerSetActiveOverlayScheme`).
-- **No network access.** Nothing in the tray or the CLI opens a connection.
 - **`nvidia-smi`** is invoked as a subprocess for dGPU temperature, with no window. If it isn't
-  present the fields are simply omitted.
-- **"Close GPU apps"** terminates processes and is the most dangerous thing here. It is guarded by a
-  hard safelist of session-critical processes, because an earlier version could and did kill the
-  desktop session.
+  present the fields are left out.
+- **"Close apps using the GPU"** ends processes and is the riskiest thing here. It skips a safelist
+  of session-critical processes, because an earlier version did kill the desktop session.
 
 ## Binary integrity
 
-Release binaries are **not code-signed yet**, so SmartScreen will warn on first run. Each release
-publishes `SHA256SUMS.txt`; compare it with `Get-FileHash` if that matters to you. Code signing via
-the SignPath Foundation OSS programme is planned but not in place — assume unsigned until a release
+Release binaries are **not code-signed yet**, so SmartScreen warns on first run. Each release
+publishes `SHA256SUMS.txt` to compare against `Get-FileHash`. Code signing via
+the SignPath Foundation OSS program is planned but not in place; assume unsigned until a release
 says otherwise.

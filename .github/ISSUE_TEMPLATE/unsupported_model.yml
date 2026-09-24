@@ -1,6 +1,6 @@
 name: Unsupported / untested Blade
 description: You ran this on a Razer laptop that isn't catalogued. Report what happened so it can get a real descriptor.
-title: "[model] Razer Blade <model/year> — PID 0x____"
+title: "[model] Razer Blade <model/year>, PID 0x____"
 labels: ["device-support"]
 body:
   - type: markdown
@@ -10,7 +10,7 @@ body:
         runs on a *generic* profile, so your report is the only way another model becomes properly
         supported.
 
-        Nothing here is urgent — partial reports are still useful. If a section doesn't apply,
+        Partial reports are useful. If a section doesn't apply,
         say so rather than guessing: a guessed fan ceiling is worse than a blank one.
   - type: input
     id: model
@@ -39,7 +39,7 @@ body:
     id: status
     attributes:
       label: Output of `razer-cli auto json`
-      description: Paste it as-is, even if it errored — the error is the useful part.
+      description: Paste it as-is, even if it errored; the error is the useful part.
       render: json
     validations:
       required: false
@@ -63,7 +63,7 @@ body:
       description: |
         Only if you actually tested it. Set a manual RPM, then read `fan_actual_rpm` from
         `razer-cli auto json`. The useful numbers are the lowest setpoint that changes anything and
-        the highest the EC will honor. **Leave blank if you're unsure** — a blank is better than a
+        the highest the EC will honor. **Leave blank if you're unsure**: a blank is better than a
         guess, since this value goes straight into the device table.
     validations:
       required: false
