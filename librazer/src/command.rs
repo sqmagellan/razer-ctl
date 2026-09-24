@@ -310,10 +310,10 @@ pub fn set_keyboard_brightness(device: &impl HidTransport, brightness: u8) -> Re
 // HW-verified 2026-07-25), but it is still held as intent and re-applied rather than
 // reconciled (see `DeviceState::apply_keyboard_lighting`).
 //
-// EFFECTS-ONLY, NO ARBITRARY COLOR (by design): a chosen color needs driver mode (host-streamed
-// frames = what Synapse does), which kills the Fn keys. In Normal mode the EC ignores color
-// payloads and falls back to Razer green, so we ship only the EC-animated effects that need no
-// host color. All four HW-confirmed on 0x029F at our default 0x1F transaction.
+// These are the EC-animated effects. The EC's own static-colour effect ignores the colour and
+// shows Razer green, but a custom colour frame does work in Normal mode (`set_keyboard_frame`,
+// HW-verified 2026-09-23); this project wrongly called that impossible until then. All four
+// effects HW-confirmed on 0x029F at our default 0x1F transaction.
 
 /// Effect-command LED region: openrazer "backlight" (the whole keyboard).
 const KBD_LED_BACKLIGHT: u8 = 0x05;
@@ -372,6 +372,35 @@ pub fn get_keyboard_effect(device: &impl HidTransport) -> Result<Option<Keyboard
         _ => None,
     })
 }
+
+/// Show a custom colour frame (see [`crate::keyboard`]): one `0x030b` write per row,
+/// `[0xff, row, first col, last col, RGB x 16]`, then `0x030a [custom, no-store]` to display
+/// them. Works in Normal device mode, so the Fn keys keep working; not stored in the EC.
+pub fn set_keyboard_frame(
+    device: &impl HidTransport,
+    frame: &crate::keyboard::Frame,
+) -> Result<()> {
+    use crate::keyboard::COLS;
+    for (row, colors) in frame.iter().enumerate() {
+        let mut args = Vec::with_capacity(4 + 3 * COLS);
+        args.extend_from_slice(&[0xff, row as u8, 0, (COLS - 1) as u8]);
+        for c in colors {
+            args.extend_from_slice(&[c.r, c.g, c.b]);
+        }
+        device.send(Packet::new(0x030b, &args))?;
+    }
+    device.send(Packet::new(
+        0x030a,
+        &[KBD_EFFECT_CUSTOM_FRAME, KBD_NO_STORE],
+    ))?;
+    Ok(())
+}
+
+/// `0x030a` effect id that displays the frame written by `0x030b`.
+const KBD_EFFECT_CUSTOM_FRAME: u8 = 0x05;
+/// Storage byte: the frame is volatile. Storing frames wears the EC's flash, and OpenRazer
+/// stopped doing it for that reason.
+const KBD_NO_STORE: u8 = 0x00;
 
 /// Read the Razer **device mode** (the `0x0084` get-mirror of `0x0004`). See the module
 /// docs: `Disable` (0x00) is Normal/hardware mode, `Enable` (0x03) is Driver mode.
@@ -590,6 +619,25 @@ mod tests {
     fn get_keyboard_brightness_rejects_wrong_led_id() {
         let mock = MockTransport::with_responder(|_| reply(&[1, 4, 200]));
         assert!(get_keyboard_brightness(&mock).is_err());
+    }
+
+    #[test]
+    fn set_keyboard_frame_writes_six_rows_then_shows_them() {
+        use crate::keyboard::{Frame, Rgb, COLS, ROWS};
+        let mut frame: Frame = [[Rgb::BLACK; COLS]; ROWS];
+        frame[1][2] = Rgb::new(0x11, 0x22, 0x33);
+        let mock = MockTransport::echo();
+        set_keyboard_frame(&mock, &frame).unwrap();
+        let sent = mock.sent();
+        assert_eq!(sent.len(), ROWS + 1);
+        for (row, (cmd, args)) in sent[..ROWS].iter().enumerate() {
+            assert_eq!(*cmd, 0x030b);
+            assert_eq!(args.len(), 52);
+            assert_eq!(args[..4], [0xff, row as u8, 0, 15]);
+        }
+        // Row 1, column 2: header (4) + 2 columns x 3.
+        assert_eq!(sent[1].1[10..13], [0x11, 0x22, 0x33]);
+        assert_eq!(sent[ROWS], (0x030a, vec![0x05, 0x00]));
     }
 
     #[test]

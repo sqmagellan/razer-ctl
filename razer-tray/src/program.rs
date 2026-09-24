@@ -6,7 +6,9 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
+use librazer::command;
 use librazer::device;
+use librazer::keyboard::{Frame, KeyboardPreset};
 use librazer::types::{BatteryCare, LightsAlwaysOn};
 use tray_icon::menu::Menu;
 
@@ -127,6 +129,16 @@ pub struct ProgramState {
     pub warning: Option<String>,
     /// Refresh rates the display offers at its current resolution; empty hides the menu.
     pub refresh_rates: Vec<u32>,
+    /// This model's keyboard geometry is mapped (`keyboard::supports_custom_frame`); set by
+    /// `main` once the device is known. Off, the colour menu is hidden and nothing is painted.
+    pub custom_colors: bool,
+    /// Named colours for the menu (config).
+    pub keyboard_presets: Vec<KeyboardPreset>,
+    /// Draw the battery bar over a custom colour (config).
+    pub battery_bar: bool,
+    /// The last frame written to the keyboard, so an unchanged frame is not re-sent. `None`
+    /// forces the next paint. Frames cannot be read back, so this is the only record.
+    painted: Option<Frame>,
     config_file: ConfigFile,
 }
 
@@ -150,6 +162,9 @@ impl ProgramState {
                 warning: None,
                 match_power_mode: config.match_windows_power_mode,
                 refresh_rates: &[],
+                custom_colors: false,
+                keyboard_presets: &config.keyboard_presets,
+                battery_bar: config.keyboard_battery_bar,
             },
         )?;
         Ok(Self {
@@ -173,6 +188,10 @@ impl ProgramState {
             cycle_perf_hotkey: config.cycle_perf_hotkey,
             warning: None,
             refresh_rates: Vec::new(),
+            custom_colors: false,
+            keyboard_presets: config.keyboard_presets,
+            battery_bar: config.keyboard_battery_bar,
+            painted: None,
             config_file,
         })
     }
@@ -184,6 +203,9 @@ impl ProgramState {
             warning: self.warning.as_deref(),
             match_power_mode: self.match_power_mode,
             refresh_rates: &self.refresh_rates,
+            custom_colors: self.custom_colors,
+            keyboard_presets: &self.keyboard_presets,
+            battery_bar: self.battery_bar,
         }
     }
 
@@ -294,6 +316,8 @@ impl ProgramState {
             app_profiles: self.app_profiles.clone(),
             match_windows_power_mode: self.match_power_mode,
             cycle_perf_hotkey: self.cycle_perf_hotkey.clone(),
+            keyboard_presets: self.keyboard_presets.clone(),
+            keyboard_battery_bar: self.battery_bar,
         }
     }
 
@@ -348,6 +372,8 @@ impl ProgramState {
         self.reassert_on_resume = disk.reassert_on_resume;
         self.match_power_mode = disk.match_windows_power_mode;
         self.cycle_perf_hotkey = disk.cycle_perf_hotkey;
+        self.keyboard_presets = disk.keyboard_presets;
+        self.battery_bar = disk.keyboard_battery_bar;
         // Keep a running Action whose rule is unchanged at the same index; any other
         // change ends it, and the next process scan starts afresh.
         if let Some(session) = &self.action {
@@ -528,6 +554,8 @@ impl ProgramState {
                 }
             }
         }
+        // After the effect write, which would otherwise replace the colour.
+        self.paint_keyboard(device, true);
         self.apply_os_settings();
         self.rebuild_menu(Some(tray_icon));
         self.refresh_fan(device);
@@ -624,6 +652,35 @@ impl ProgramState {
         self.device_state = new_device_state.normalized(self.fan_rpm_range);
         log::info!("transient state applied {:?}", self.device_state);
         self.apply_and_refresh(tray_icon, device)
+    }
+
+    /// Show the custom keyboard colour, if one is set: rendered from intent, with the battery
+    /// bar when enabled. Unless `force`, an unchanged frame is not re-sent, because every
+    /// write lights the backlight back up; `force` is for when the EC may have dropped it
+    /// (after an apply, a wake, or a device reopen). Failures are logged: it's cosmetic.
+    pub fn paint_keyboard(&mut self, device: &device::Device, force: bool) {
+        if !self.custom_colors {
+            return;
+        }
+        let battery = if self.battery_bar {
+            crate::platform::battery_level()
+        } else {
+            None
+        };
+        let Some(frame) = self.device_state.keyboard_frame(battery) else {
+            self.painted = None;
+            return;
+        };
+        if !force && self.painted == Some(frame) {
+            return;
+        }
+        match command::set_keyboard_frame(device, &frame) {
+            Ok(()) => self.painted = Some(frame),
+            Err(e) => {
+                log::warn!("keyboard colour: {e:?}");
+                self.painted = None;
+            }
+        }
     }
 
     /// Read the device and compare it with intent; log any drift, and re-assert when

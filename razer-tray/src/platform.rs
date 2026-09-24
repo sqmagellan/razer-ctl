@@ -56,6 +56,31 @@ pub fn get_power_state(previous: bool) -> bool {
     }
 }
 
+/// Battery charge and whether it is charging, for the keyboard's battery bar. `None` when
+/// Windows cannot say (no battery, or an unknown percent).
+#[cfg(target_os = "windows")]
+pub fn battery_level() -> Option<librazer::keyboard::BatteryLevel> {
+    // SAFETY: as in `get_power_state`.
+    let status = unsafe {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        GetSystemPowerStatus(&mut status).ok()?;
+        status
+    };
+    // BatteryFlag 128 = no system battery, 255 = unknown; bit 8 = charging.
+    if status.BatteryLifePercent > 100 || status.BatteryFlag == 128 || status.BatteryFlag == 255 {
+        return None;
+    }
+    Some(librazer::keyboard::BatteryLevel {
+        percent: status.BatteryLifePercent,
+        charging: status.BatteryFlag & 8 != 0,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn battery_level() -> Option<librazer::keyboard::BatteryLevel> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 pub fn get_power_state(previous: bool) -> bool {
     linux_power_state().unwrap_or(previous)

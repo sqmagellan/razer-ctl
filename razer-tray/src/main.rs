@@ -219,6 +219,7 @@ fn main() -> Result<()> {
     )?;
     state.warning = platform::detect_synapse();
     state.refresh_rates = platform::refresh_rates();
+    state.custom_colors = librazer::keyboard::supports_custom_frame(device.info().pid);
     state.rebuild_menu(Some(&tray_icon));
     if first_run {
         // confy used to create the file on first run; people look for it to add Actions.
@@ -346,6 +347,16 @@ fn main() -> Result<()> {
                         "match Windows power mode toggled to {}",
                         state.match_power_mode
                     );
+                } else if event.id == MenuId("toggle_battery_bar".to_string()) {
+                    state.battery_bar = !state.battery_bar;
+                    if let Err(e) = state.persist() {
+                        log::warn!("Failed to persist battery-bar flag: {:?}", e);
+                    }
+                    state.rebuild_menu(Some(&tray_icon));
+                    if !state.needs_sync {
+                        state.paint_keyboard(&device, false);
+                    }
+                    log::info!("keyboard battery bar toggled to {}", state.battery_bar);
                 } else if event.id == MenuId("toggle_autostart".to_string()) {
                     #[cfg(target_os = "windows")]
                     {
@@ -564,6 +575,9 @@ fn main() -> Result<()> {
                         platform::WakeSource::DisplayOn => state.enforce,
                     };
                     state.reconcile(&mut tray_icon, &device, &reason, write);
+                    // A custom colour does not survive standby (the keyboard falls back to
+                    // its stored effect), so repaint it whatever the reconcile decided.
+                    state.paint_keyboard(&device, true);
                 }
             }
 
@@ -610,6 +624,9 @@ fn main() -> Result<()> {
             {
                 last_device_state_check_timestamp = now;
                 last_polled_input_tick = input_tick;
+                // The battery bar follows the charge. Only here, on input, because every
+                // frame write lights the backlight back up.
+                state.paint_keyboard(&device, false);
                 match DeviceState::read(&device) {
                     Ok(observed) => {
                         state.observed = observed;

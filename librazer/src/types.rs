@@ -66,13 +66,10 @@ pub enum LogoMode {
 /// 0x05 = backlight). HW-verified on PID 0x029F (2026-07-10): these apply in *Normal* device
 /// mode -- the Fn media keys keep working -- so they're Fn-safe and need no driver mode.
 ///
-/// v1 is **effects-only, no arbitrary color, by design.** A chosen static/per-key color on
-/// this hardware requires Razer "driver mode" (host-streamed frames, i.e. what Synapse does),
-/// which disables the Fn media keys -- our hard "no". In Normal mode the EC only self-animates
-/// its built-in effects; any color payload we send is ignored and the board falls back to
-/// Razer green. So we ship exactly the EC-animated effects that need no host color, all
-/// HW-confirmed: Off (0x00), Spectrum (0x03), Wave (0x04, directional), Breathing (0x02,
-/// random-color fade). Static/Reactive are intentionally omitted (they require a color).
+/// These are the EC-animated effects: Off (0x00), Spectrum (0x03), Wave (0x04, directional),
+/// Breathing (0x02, random-colour fade). The EC's Static effect is omitted because it ignores
+/// the colour on this model. A chosen colour is a separate thing, a host-written frame that
+/// also works in Normal mode: see [`crate::keyboard`].
 #[derive(
     EnumString, EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize,
 )]

@@ -10,6 +10,7 @@ pub mod device;
 
 pub mod error;
 pub mod feature;
+pub mod keyboard;
 pub mod matching;
 pub mod process_guard;
 pub mod state;

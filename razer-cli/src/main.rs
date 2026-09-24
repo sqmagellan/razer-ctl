@@ -7,8 +7,9 @@ use librazer::types::{
 };
 
 use librazer::feature::Feature;
+use librazer::keyboard::{self, KeyboardColor, Rgb};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{arg, Command};
 use std::process::Command as procCommand;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
@@ -162,6 +163,20 @@ impl Cli for feature::KbdLighting {
                         )
                         .arg_required_else_help(true),
                 )
+                .subcommand(
+                    clap::Command::new("color")
+                        .about(
+                            "Show a custom colour: one #rrggbb for the whole keyboard, or six \
+                             for the rows top to bottom. Not kept by the keyboard: sleep \
+                             brings the effect back (the tray repaints its own colour).",
+                        )
+                        .arg(
+                            arg!(<COLORS> ... "Colours")
+                                .num_args(1..=6)
+                                .value_parser(clap::value_parser!(Rgb)),
+                        )
+                        .arg_required_else_help(true),
+                )
                 .arg_required_else_help(true),
         )
     }
@@ -169,6 +184,24 @@ impl Cli for feature::KbdLighting {
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, sub)) if ident == self.name() => match sub.subcommand() {
+                Some(("color", m)) => {
+                    if !keyboard::supports_custom_frame(device.info.pid) {
+                        bail!(
+                            "custom colour is not mapped for this model ({:#06x})",
+                            device.info.pid
+                        );
+                    }
+                    let colors: Vec<Rgb> = m.get_many::<Rgb>("COLORS").unwrap().copied().collect();
+                    let color = match <[Rgb; keyboard::ROWS]>::try_from(colors.as_slice()) {
+                        Ok(rows) => KeyboardColor::Rows(rows),
+                        Err(_) if colors.len() == 1 => KeyboardColor::solid(colors[0]),
+                        Err(_) => bail!("give one colour or six, not {}", colors.len()),
+                    };
+                    let frame = keyboard::render(color, librazer::state::PerfMode::Balanced, None);
+                    command::set_keyboard_frame(device, &frame)?;
+                    println!("Keyboard colour set");
+                    Ok(())
+                }
                 Some(("effect", m)) => {
                     let effect = *m.get_one::<KeyboardEffect>("EFFECT").unwrap();
                     command::set_keyboard_effect(device, effect)?;
@@ -705,8 +738,34 @@ mod tests {
             &["auto", "battery-care", "set", "80"],
             &["manual", "--pid", "0x029f", "json"],
             &["enumerate", "--json"],
+            &["auto", "kbd-lighting", "color", "#ff0000"],
+            &[
+                "auto",
+                "kbd-lighting",
+                "color",
+                "#ff0000",
+                "#00ff00",
+                "#0000ff",
+                "ffffff",
+                "#000000",
+                "#123456",
+            ],
         ] {
             assert!(parses(args), "{args:?} should parse");
         }
+        // Not a colour, or more colours than rows.
+        assert!(!parses(&["auto", "kbd-lighting", "color", "red"]));
+        assert!(!parses(&[
+            "auto",
+            "kbd-lighting",
+            "color",
+            "#000000",
+            "#000000",
+            "#000000",
+            "#000000",
+            "#000000",
+            "#000000",
+            "#000000"
+        ]));
     }
 }

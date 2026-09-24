@@ -6,6 +6,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 
+use librazer::keyboard::{KeyboardColor, KeyboardPreset};
 use librazer::types::{BatteryCare, CpuBoost, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode};
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -27,6 +28,12 @@ pub struct MenuOptions<'a> {
     pub match_power_mode: bool,
     /// Refresh rates the display offers at its current resolution; empty hides the submenu.
     pub refresh_rates: &'a [u32],
+    /// This model's keyboard geometry is mapped, so custom colours can be offered.
+    pub custom_colors: bool,
+    /// Named colours for the Keyboard lighting submenu.
+    pub keyboard_presets: &'a [KeyboardPreset],
+    /// Drives the "Battery level on number keys" toggle.
+    pub battery_bar: bool,
 }
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
@@ -45,6 +52,9 @@ pub fn build(
         warning,
         match_power_mode,
         refresh_rates,
+        custom_colors,
+        keyboard_presets,
+        battery_bar,
     } = *opts;
     let mut event_handlers = std::collections::HashMap::new();
     let menu = Menu::new();
@@ -243,36 +253,82 @@ pub fn build(
             .collect::<Vec<_>>(),
     )?)?;
 
-    // Keyboard lighting (RGB / Chroma). A pick is stored and applied as intent. The effect
-    // is readable (0x0f82) and shown, but never reconciled, unlike perf/fan/logo. Effects-only, no color: an arbitrary color needs Razer driver mode
-    // (host-streamed frames = Synapse), which disables the Fn media keys, so we ship only the
-    // EC-animated effects (Off/Spectrum/Wave/Breathing). HW-verified Fn-safe on 0x029F (2026-07-10).
+    // Keyboard lighting. A pick is stored and applied as intent. Effects are EC-animated and
+    // readable (0x0f82) but never reconciled. A custom colour is a host-written frame that the
+    // EC does not keep, so the tray repaints it (see `ProgramState::paint_keyboard`); both work
+    // in Normal mode, so the Fn media keys keep working.
     menu.append(&PredefinedMenuItem::separator())?;
-    let kbd_effects: Vec<CheckMenuItem> = KeyboardEffect::iter()
-        .map(|effect| {
-            let event_id = format!("kbd_effect:{:?}", effect);
-            event_handlers.insert(
+    let mut with_lighting = |id: String, lights_mode: LightsMode| {
+        event_handlers.insert(
+            id,
+            DeviceState {
+                lights_mode,
+                ..*dstate
+            },
+        );
+    };
+    let current_color = dstate.lights_mode.keyboard_color;
+    let mut kbd_items: Vec<Box<dyn IsMenuItem>> = Vec::new();
+    for effect in KeyboardEffect::iter() {
+        let event_id = format!("kbd_effect:{:?}", effect);
+        with_lighting(
+            event_id.clone(),
+            LightsMode {
+                keyboard_effect: Some(effect),
+                keyboard_color: None,
+                ..dstate.lights_mode
+            },
+        );
+        let checked = current_color.is_none() && dstate.lights_mode.keyboard_effect == Some(effect);
+        kbd_items.push(Box::new(CheckMenuItem::with_id(
+            event_id,
+            format!("{:?}", effect),
+            !checked,
+            checked,
+            None,
+        )));
+    }
+    if custom_colors {
+        kbd_items.push(Box::new(PredefinedMenuItem::separator()));
+        let choices = keyboard_presets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                p.color()
+                    .map(|c| (format!("kbd_color:{i}"), p.name.clone(), c))
+            })
+            .chain(std::iter::once((
+                "kbd_color:perf".to_string(),
+                "Follow performance mode".to_string(),
+                KeyboardColor::FollowPerfMode,
+            )));
+        for (event_id, label, color) in choices {
+            with_lighting(
                 event_id.clone(),
-                DeviceState {
-                    lights_mode: LightsMode {
-                        keyboard_effect: Some(effect),
-                        ..dstate.lights_mode
-                    },
-                    ..*dstate
+                LightsMode {
+                    keyboard_color: Some(color),
+                    ..dstate.lights_mode
                 },
             );
-            let checked = dstate.lights_mode.keyboard_effect == Some(effect);
-            CheckMenuItem::with_id(event_id, format!("{:?}", effect), !checked, checked, None)
-        })
-        .collect();
+            let checked = current_color == Some(color);
+            kbd_items.push(Box::new(CheckMenuItem::with_id(
+                event_id, label, !checked, checked, None,
+            )));
+        }
+        kbd_items.push(Box::new(PredefinedMenuItem::separator()));
+        kbd_items.push(Box::new(CheckMenuItem::with_id(
+            "toggle_battery_bar",
+            "Battery level on number keys (with a colour)",
+            true,
+            battery_bar,
+            None,
+        )));
+    }
 
     menu.append(&Submenu::with_items(
         "Keyboard lighting",
         true,
-        &kbd_effects
-            .iter()
-            .map(|i| i as &dyn IsMenuItem)
-            .collect::<Vec<_>>(),
+        &kbd_items.iter().map(|i| i.as_ref()).collect::<Vec<_>>(),
     )?)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
