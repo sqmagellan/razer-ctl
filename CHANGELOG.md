@@ -4,6 +4,12 @@ Release history for this fork. The README carries the current behavior; this fil
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
+## Unreleased
+- **The tray no longer wakes a sleeping dGPU for the tooltip.** Before each `nvidia-smi` sample
+  it reads the GPU's power state from Windows, which doesn't wake it, and skips the sample while the
+  GPU is in D3. Only matters with Optimus; untested on a sleeping GPU because the Blade here runs in
+  dGPU-only mode, where the GPU never sleeps.
+
 ## 0.9.5: keyboard colors, a clearer menu, and a tray that can't die at login or lose its config
 Built and tested on `0x029F` (2026-09-23). Probes that set the scope, same machine: `0x070f` is Max
 Fan (fans 2100 → 4700 RPM, no charging above the limit); tray and CLI running together don't cause
