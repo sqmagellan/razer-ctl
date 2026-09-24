@@ -205,7 +205,7 @@ sequence is worse than an absent one.
 
 Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)), multi-model
 fork by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). Both MIT, and this fork
-stays MIT. Maintained by sqmagellan, developed with Claude Opus 5.
+stays MIT. Maintained by sqmagellan, developed with Claude Opus 5.5.
 
 Protocol knowledge came from reading [OpenRazer](https://github.com/openrazer/openrazer) and
 [razer-laptop-control](https://github.com/Razer-Linux/razer-laptop-control-no-dkms), both GPL, for
