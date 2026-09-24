@@ -343,13 +343,7 @@ fn main() -> Result<()> {
                     if let Err(e) = state.persist() {
                         log::warn!("Failed to persist power-mode flag: {:?}", e);
                     }
-                    if follow {
-                        if let Err(e) =
-                            platform::set_windows_power_mode(state.device_state.perf_mode)
-                        {
-                            log::warn!("Windows power mode: {e:?}");
-                        }
-                    }
+                    state.sync_windows_power_mode(state.device_state.perf_mode);
                     state.rebuild_menu(Some(&tray_icon));
                     log::info!("Windows power mode follows perf mode: {follow}");
                 } else if event.id == MenuId("toggle_battery_bar".to_string()) {
@@ -454,12 +448,9 @@ fn main() -> Result<()> {
                 state.rebuild_menu(Some(&tray_icon));
                 last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
                 // Windows keeps the power-mode slider per power source, so the new source's
-                // slider needs setting even when the perf mode doesn't change.
-                if state.match_power_mode {
-                    if let Err(e) = platform::set_windows_power_mode(state.target().perf_mode) {
-                        log::warn!("Windows power mode: {e:?}");
-                    }
-                }
+                // slider needs setting (or putting back) even when the perf mode doesn't
+                // change.
+                state.sync_windows_power_mode(state.target().perf_mode);
             }
 
             // Hand edits to the config take effect without a restart (Action rules can

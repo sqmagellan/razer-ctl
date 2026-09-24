@@ -30,7 +30,7 @@ pub enum DiskState {
     /// Nobody else wrote it since our last read or write.
     Unchanged,
     /// Someone else wrote it, and it parses.
-    Edited(ConfigState),
+    Edited(Box<ConfigState>),
     /// Someone else wrote it and it does NOT parse (a hand edit in progress, a typo).
     /// Nothing may be saved over it until it is fixed.
     EditedButInvalid,
@@ -184,7 +184,7 @@ impl ConfigFile {
             Ok(config) => {
                 self.stamp = stamp;
                 self.persist_blocked = false;
-                DiskState::Edited(config)
+                DiskState::Edited(Box::new(config))
             }
             Err(e) => {
                 use std::sync::Mutex;

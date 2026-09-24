@@ -24,7 +24,7 @@ pub struct MenuOptions<'a> {
     pub fan_rpm_range: (u16, u16),
     /// Shown as a disabled item at the top (e.g. Synapse is running).
     pub warning: Option<&'a str>,
-    /// Drives the "Also switch Windows power mode" toggle.
+    /// Drives the "Match Windows power to Razer performance mode" toggle.
     pub match_power_mode: bool,
     /// The Windows power mode now in effect, shown under that toggle while it is on.
     pub windows_power_mode: Option<&'a str>,
@@ -179,7 +179,7 @@ pub fn build(
         perf_modes.append(&PredefinedMenuItem::separator())?;
         perf_modes.append(&CheckMenuItem::with_id(
             "toggle_power_mode",
-            "Also switch Windows power mode",
+            "Match Windows power to Razer performance mode",
             true,
             match_power_mode,
             None,

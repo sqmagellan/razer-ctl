@@ -16,7 +16,7 @@ use crate::config::{ConfigFile, DiskState};
 use crate::menu;
 use crate::state::{
     brightness_to_percent, get_fan_rpm, ActionSession, AppProfile, ConfigState, DeviceState,
-    FanRpm, FanRpmFilter, FanSpeed, PerfMode,
+    FanRpm, FanRpmFilter, FanSpeed, PerfMode, PowerModeBefore,
 };
 
 /// How a user-chosen state was produced, because it decides what reaches the saved profile.
@@ -123,6 +123,8 @@ pub struct ProgramState {
     pub sync_apply: bool,
     /// Switch the Windows power mode along with the perf mode (config, opt-in).
     pub match_power_mode: bool,
+    /// What each power source's Windows power mode was before matching changed it (config).
+    pub power_mode_before: PowerModeBefore,
     /// Kept only so a save doesn't drop it; read once at startup by `main`.
     pub cycle_perf_hotkey: Option<String>,
     /// Shown as a disabled item at the top of the menu (e.g. Synapse is running).
@@ -187,6 +189,7 @@ impl ProgramState {
             needs_sync: true,
             sync_apply: true,
             match_power_mode: config.match_windows_power_mode,
+            power_mode_before: config.windows_power_mode_before,
             cycle_perf_hotkey: config.cycle_perf_hotkey,
             warning: None,
             refresh_rates: Vec::new(),
@@ -323,6 +326,7 @@ impl ProgramState {
             reassert_on_resume: self.reassert_on_resume,
             app_profiles: self.app_profiles.clone(),
             match_windows_power_mode: self.match_power_mode,
+            windows_power_mode_before: self.power_mode_before.clone(),
             cycle_perf_hotkey: self.cycle_perf_hotkey.clone(),
             keyboard_presets: self.keyboard_presets.clone(),
             keyboard_battery_bar: self.battery_bar,
@@ -348,7 +352,7 @@ impl ProgramState {
                 log::warn!(
                     "config was edited on disk; adopting the edit instead of saving over it"
                 );
-                self.adopt_config(disk);
+                self.adopt_config(*disk);
                 Ok(())
             }
             DiskState::EditedButInvalid => {
@@ -365,7 +369,7 @@ impl ProgramState {
         match self.config_file.check_disk() {
             DiskState::Edited(disk) => {
                 log::info!("config changed on disk; reloading it");
-                self.adopt_config(disk);
+                self.adopt_config(*disk);
                 self.rebuild_menu(Some(tray_icon));
                 true
             }
@@ -379,6 +383,7 @@ impl ProgramState {
         self.enforce = disk.enforce;
         self.reassert_on_resume = disk.reassert_on_resume;
         self.match_power_mode = disk.match_windows_power_mode;
+        self.power_mode_before = disk.windows_power_mode_before;
         self.cycle_perf_hotkey = disk.cycle_perf_hotkey;
         self.keyboard_presets = disk.keyboard_presets;
         self.battery_bar = disk.keyboard_battery_bar;
@@ -575,15 +580,42 @@ impl ProgramState {
     /// The settings that live in Windows rather than in the EC: the profile's display
     /// refresh rate, and (opt-in) the Windows power mode that matches the perf mode.
     /// Failures are logged; neither is worth a resync.
-    fn apply_os_settings(&self) {
+    fn apply_os_settings(&mut self) {
         if let Some(hz) = self.device_state.display_refresh_hz {
             if let Err(e) = crate::platform::set_refresh_rate(hz) {
                 log::warn!("refresh rate {hz} Hz: {e:?}");
             }
         }
-        if self.match_power_mode {
-            if let Err(e) = crate::platform::set_windows_power_mode(self.device_state.perf_mode) {
+        self.sync_windows_power_mode(self.device_state.perf_mode);
+    }
+
+    /// Matching on: set this power source's Windows power mode for `perf`, first noting
+    /// the mode it had so turning matching off can put it back. Matching off: put back a
+    /// mode noted for this power source, if any (the other source's waits until the next
+    /// plug or unplug). Failures are logged.
+    pub fn sync_windows_power_mode(&mut self, perf: PerfMode) {
+        let slot = self.power_mode_before.slot(self.ac_power);
+        let noted = if self.match_power_mode {
+            let fresh = slot.is_none();
+            if fresh {
+                *slot = crate::platform::windows_power_mode().map(str::to_string);
+            }
+            if let Err(e) = crate::platform::set_windows_power_mode(perf) {
                 log::warn!("Windows power mode: {e:?}");
+            }
+            fresh && slot.is_some()
+        } else if let Some(before) = slot.take() {
+            match crate::platform::set_windows_power_mode_named(&before) {
+                Ok(()) => log::info!("Windows power mode put back to {before}"),
+                Err(e) => log::warn!("Windows power mode: putting back {before}: {e:?}"),
+            }
+            true
+        } else {
+            false
+        };
+        if noted {
+            if let Err(e) = self.persist() {
+                log::warn!("Failed to persist the Windows power mode to put back: {e:?}");
             }
         }
     }

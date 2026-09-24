@@ -894,10 +894,24 @@ pub fn windows_power_mode() -> Option<&'static str> {
 /// resolved at runtime; a Windows without it reports an error instead of failing to load.
 #[cfg(target_os = "windows")]
 pub fn set_windows_power_mode(perf: crate::state::PerfMode) -> Result<()> {
+    let (guid, label) = POWER_MODES[power_mode_for(perf)];
+    set_power_overlay(guid, label)
+}
+
+/// Set the Windows power mode by its Settings name, as `windows_power_mode` reports it.
+#[cfg(target_os = "windows")]
+pub fn set_windows_power_mode_named(name: &str) -> Result<()> {
+    let (guid, label) = *POWER_MODES
+        .iter()
+        .find(|(_, label)| *label == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown Windows power mode {name:?}"))?;
+    set_power_overlay(guid, label)
+}
+
+#[cfg(target_os = "windows")]
+fn set_power_overlay(guid: windows::core::GUID, label: &str) -> Result<()> {
     use windows::core::{s, w, GUID};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-
-    let (guid, label) = POWER_MODES[power_mode_for(perf)];
 
     // Compared against what Windows says is in effect, not against what we last set:
     // Windows keeps the slider per power source, and the user can move it themselves.
@@ -924,6 +938,11 @@ pub fn set_windows_power_mode(perf: crate::state::PerfMode) -> Result<()> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn set_windows_power_mode(_perf: crate::state::PerfMode) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_windows_power_mode_named(_name: &str) -> Result<()> {
     Ok(())
 }
 

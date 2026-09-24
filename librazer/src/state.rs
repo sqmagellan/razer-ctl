@@ -828,6 +828,10 @@ pub struct ConfigState {
     /// setting the user may manage themselves.
     #[serde(default)]
     pub match_windows_power_mode: bool,
+    /// The Windows power mode each power source had before matching first changed it,
+    /// put back when matching is turned off. Windows keeps one slider per power source.
+    #[serde(default)]
+    pub windows_power_mode_before: PowerModeBefore,
     /// Global hotkey that cycles the perf mode like a left-click, e.g. `"Ctrl+Alt+P"`.
     /// Modifiers: Ctrl, Alt, Shift, Win; key: A-Z, 0-9 or F1-F24. `None` = no hotkey.
     /// Read at startup.
@@ -840,6 +844,23 @@ pub struct ConfigState {
     /// While a custom color is set, show the battery level on the 1-0 keys.
     #[serde(default)]
     pub keyboard_battery_bar: bool,
+}
+
+/// A Windows power mode per power source, by its Settings name ("Balanced", ...).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct PowerModeBefore {
+    pub ac: Option<String>,
+    pub battery: Option<String>,
+}
+
+impl PowerModeBefore {
+    pub fn slot(&mut self, ac_power: bool) -> &mut Option<String> {
+        if ac_power {
+            &mut self.ac
+        } else {
+            &mut self.battery
+        }
+    }
 }
 
 fn default_battery_state() -> DeviceState {
@@ -860,6 +881,7 @@ impl Default for ConfigState {
             reassert_on_resume: true,
             app_profiles: Vec::new(),
             match_windows_power_mode: false,
+            windows_power_mode_before: PowerModeBefore::default(),
             cycle_perf_hotkey: None,
             keyboard_presets: keyboard::default_presets(),
             keyboard_battery_bar: false,
@@ -2247,5 +2269,17 @@ mod tests {
         cfg.keyboard_battery_bar = true;
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(toml::from_str::<ConfigState>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn the_power_mode_to_put_back_is_kept_per_power_source() {
+        let mut cfg = ConfigState::default();
+        *cfg.windows_power_mode_before.slot(true) = Some("Balanced".into());
+        assert_eq!(cfg.windows_power_mode_before.battery, None);
+        let text = toml::to_string(&cfg).unwrap();
+        assert_eq!(toml::from_str::<ConfigState>(&text).unwrap(), cfg);
+        // Configs from before this field start with nothing to put back.
+        let old: ConfigState = toml::from_str("match_windows_power_mode = true\n").unwrap();
+        assert_eq!(old.windows_power_mode_before, PowerModeBefore::default());
     }
 }
