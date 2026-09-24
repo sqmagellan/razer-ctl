@@ -32,8 +32,10 @@ pub struct MenuOptions<'a> {
     pub custom_colors: bool,
     /// Named colours for the Keyboard lighting submenu.
     pub keyboard_presets: &'a [KeyboardPreset],
-    /// Drives the "Battery level on number keys" toggle.
+    /// Drives the "Battery bar" toggle.
     pub battery_bar: bool,
+    /// Which profile the header says the picks go to.
+    pub ac_power: bool,
 }
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
@@ -55,6 +57,7 @@ pub fn build(
         custom_colors,
         keyboard_presets,
         battery_bar,
+        ac_power,
     } = *opts;
     let mut event_handlers = std::collections::HashMap::new();
     let menu = Menu::new();
@@ -63,8 +66,19 @@ pub fn build(
     // label, not an action: the tray never stops another program's services.
     if let Some(text) = warning {
         menu.append(&MenuItem::new(format!("⚠ {text}"), false, None))?;
-        menu.append(&PredefinedMenuItem::separator())?;
     }
+    // Which saved profile the picks below go to. The tray keeps one for plugged in and one
+    // for battery and switches between them by itself, which the menu never used to say.
+    menu.append(&MenuItem::new(
+        if ac_power {
+            "Plugged in: changes apply while plugged in"
+        } else {
+            "On battery: changes apply while on battery"
+        },
+        false,
+        None,
+    ))?;
+    menu.append(&PredefinedMenuItem::separator())?;
 
     // perf
     let perf_modes = Submenu::new("Performance mode", true);
@@ -158,7 +172,6 @@ pub fn build(
     menu.append(&perf_modes)?;
 
     // Fan Speed
-    menu.append(&PredefinedMenuItem::separator())?;
     let (fan_min, fan_max) = fan_rpm_range;
     // Manual presets spanning this chassis's usable range, always including both endpoints
     // (the step may not land on `fan_max` exactly, so append it if missing).
@@ -219,8 +232,55 @@ pub fn build(
             .collect::<Vec<_>>(),
     )?)?;
 
+    // Display refresh rate for the current power source. Shown only when the display
+    // offers more than one rate at its current resolution. A pick is stored in the
+    // AC/battery profile like every other setting, so it switches with the power source.
+    #[cfg(target_os = "windows")]
+    if refresh_rates.len() > 1 {
+        let leave_checked = dstate.display_refresh_hz.is_none();
+        let mut items = vec![CheckMenuItem::with_id(
+            "refresh:none",
+            "Leave as Windows has it",
+            !leave_checked,
+            leave_checked,
+            None,
+        )];
+        event_handlers.insert(
+            "refresh:none".to_string(),
+            DeviceState {
+                display_refresh_hz: None,
+                ..*dstate
+            },
+        );
+        for hz in refresh_rates {
+            let id = format!("refresh:{hz}");
+            let checked = dstate.display_refresh_hz == Some(*hz);
+            items.push(CheckMenuItem::with_id(
+                id.clone(),
+                format!("{hz} Hz"),
+                !checked,
+                checked,
+                None,
+            ));
+            event_handlers.insert(
+                id,
+                DeviceState {
+                    display_refresh_hz: Some(*hz),
+                    ..*dstate
+                },
+            );
+        }
+        menu.append(&Submenu::with_items(
+            "Screen refresh rate",
+            true,
+            &items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem)
+                .collect::<Vec<_>>(),
+        )?)?;
+    }
+
     // logo
-    menu.append(&PredefinedMenuItem::separator())?;
     let modes = LogoMode::iter()
         .map(|mode| {
             let event_id = format!("logo_mode:{:?}", mode);
@@ -244,20 +304,83 @@ pub fn build(
         })
         .collect::<Vec<_>>();
 
-    menu.append(&Submenu::with_items(
+    // Appended after Keyboard lighting.
+    let logo_menu = Submenu::with_items(
         "Logo lighting",
         true,
         &modes
             .iter()
             .map(|i| i as &dyn IsMenuItem)
             .collect::<Vec<_>>(),
-    )?)?;
+    )?;
+
+    // Keep keyboard lit (the always-on keep-alive). In the Keyboard lighting submenu.
+    let always_on_item = CheckMenuItem::with_id(
+        "lights_always_on",
+        "Keep keyboard lit",
+        true,
+        dstate.lights_mode.always_on == LightsAlwaysOn::Enable,
+        None,
+    );
+    event_handlers.insert(
+        "lights_always_on".to_string(),
+        DeviceState {
+            lights_mode: LightsMode {
+                always_on: match dstate.lights_mode.always_on {
+                    LightsAlwaysOn::Enable => LightsAlwaysOn::Disable,
+                    LightsAlwaysOn::Disable => LightsAlwaysOn::Enable,
+                },
+                ..dstate.lights_mode
+            },
+            ..*dstate
+        },
+    );
+
+    // Brightness submenu: 0..100% in 10% steps, mapped onto the device's full
+    // 0..255 range. The hardware Fn keys use a 16-step ladder that doesn't line
+    // up with the 10% marks, so an external (Fn-key) value usually lands between
+    // our steps -- we highlight the *nearest* percent step so there's always
+    // exactly one check. The exact 0..255 value still shows in the tooltip.
+    let nearest_percent: u8 =
+        crate::state::nearest_brightness_percent(dstate.lights_mode.keyboard_brightness);
+
+    let brightness_modes: Vec<CheckMenuItem> = (0u8..=100)
+        .step_by(10)
+        .map(|percent| {
+            let event_id = format!("brightness:{}", percent);
+            event_handlers.insert(
+                event_id.clone(),
+                DeviceState {
+                    lights_mode: LightsMode {
+                        keyboard_brightness: percent_to_brightness(percent),
+                        ..dstate.lights_mode
+                    },
+                    ..*dstate
+                },
+            );
+            CheckMenuItem::with_id(
+                event_id,
+                format!("{}%", percent),
+                percent != nearest_percent,
+                percent == nearest_percent,
+                None,
+            )
+        })
+        .collect();
+
+    let brightness_menu = Submenu::with_items(
+        "Brightness",
+        true,
+        &brightness_modes
+            .iter()
+            .map(|i| i as &dyn IsMenuItem)
+            .collect::<Vec<_>>(),
+    )?;
 
     // Keyboard lighting. A pick is stored and applied as intent. Effects are EC-animated and
     // readable (0x0f82) but never reconciled. A custom colour is a host-written frame that the
     // EC does not keep, so the tray repaints it (see `ProgramState::paint_keyboard`); both work
     // in Normal mode, so the Fn media keys keep working.
-    menu.append(&PredefinedMenuItem::separator())?;
     let mut with_lighting = |id: String, lights_mode: LightsMode| {
         event_handlers.insert(
             id,
@@ -315,89 +438,29 @@ pub fn build(
                 event_id, label, !checked, checked, None,
             )));
         }
-        kbd_items.push(Box::new(PredefinedMenuItem::separator()));
+    }
+    kbd_items.push(Box::new(PredefinedMenuItem::separator()));
+    kbd_items.push(Box::new(brightness_menu));
+    kbd_items.push(Box::new(PredefinedMenuItem::separator()));
+    if custom_colors {
         kbd_items.push(Box::new(CheckMenuItem::with_id(
             "toggle_battery_bar",
-            "Battery level on number keys (with a colour)",
+            "Battery bar",
             true,
             battery_bar,
             None,
         )));
     }
+    kbd_items.push(Box::new(always_on_item));
 
     menu.append(&Submenu::with_items(
         "Keyboard lighting",
         true,
         &kbd_items.iter().map(|i| i.as_ref()).collect::<Vec<_>>(),
     )?)?;
-
-    menu.append(&PredefinedMenuItem::separator())?;
-
-    // keyboard always on
-    menu.append(&CheckMenuItem::with_id(
-        "lights_always_on",
-        "Keyboard always on",
-        true,
-        dstate.lights_mode.always_on == LightsAlwaysOn::Enable,
-        None,
-    ))?;
-    event_handlers.insert(
-        "lights_always_on".to_string(),
-        DeviceState {
-            lights_mode: LightsMode {
-                always_on: match dstate.lights_mode.always_on {
-                    LightsAlwaysOn::Enable => LightsAlwaysOn::Disable,
-                    LightsAlwaysOn::Disable => LightsAlwaysOn::Enable,
-                },
-                ..dstate.lights_mode
-            },
-            ..*dstate
-        },
-    );
-
-    // Brightness submenu: 0..100% in 10% steps, mapped onto the device's full
-    // 0..255 range. The hardware Fn keys use a 16-step ladder that doesn't line
-    // up with the 10% marks, so an external (Fn-key) value usually lands between
-    // our steps -- we highlight the *nearest* percent step so there's always
-    // exactly one check. The exact 0..255 value still shows in the tooltip.
-    let nearest_percent: u8 =
-        crate::state::nearest_brightness_percent(dstate.lights_mode.keyboard_brightness);
-
-    let brightness_modes: Vec<CheckMenuItem> = (0u8..=100)
-        .step_by(10)
-        .map(|percent| {
-            let event_id = format!("brightness:{}", percent);
-            event_handlers.insert(
-                event_id.clone(),
-                DeviceState {
-                    lights_mode: LightsMode {
-                        keyboard_brightness: percent_to_brightness(percent),
-                        ..dstate.lights_mode
-                    },
-                    ..*dstate
-                },
-            );
-            CheckMenuItem::with_id(
-                event_id,
-                format!("{}%", percent),
-                percent != nearest_percent,
-                percent == nearest_percent,
-                None,
-            )
-        })
-        .collect();
-
-    menu.append(&Submenu::with_items(
-        "Keyboard brightness",
-        true,
-        &brightness_modes
-            .iter()
-            .map(|i| i as &dyn IsMenuItem)
-            .collect::<Vec<_>>(),
-    )?)?;
+    menu.append(&logo_menu)?;
 
     // battery care submenu
-    menu.append(&PredefinedMenuItem::separator())?;
 
     // Charge-limit presets. The EC accepts every whole percent 50..=100 (HW-verified), so
     // this list is a UI convenience, not the limit of what's possible -- the CLI
@@ -461,76 +524,47 @@ pub fn build(
             .collect::<Vec<_>>(),
     )?)?;
 
-    // Display refresh rate for the current power source. Shown only when the display
-    // offers more than one rate at its current resolution. A pick is stored in the
-    // AC/battery profile like every other setting, so it switches with the power source.
-    #[cfg(target_os = "windows")]
-    if refresh_rates.len() > 1 {
-        let leave_checked = dstate.display_refresh_hz.is_none();
-        let mut items = vec![CheckMenuItem::with_id(
-            "refresh:none",
-            "Don't change",
-            !leave_checked,
-            leave_checked,
-            None,
-        )];
-        event_handlers.insert(
-            "refresh:none".to_string(),
-            DeviceState {
-                display_refresh_hz: None,
-                ..*dstate
-            },
-        );
-        for hz in refresh_rates {
-            let id = format!("refresh:{hz}");
-            let checked = dstate.display_refresh_hz == Some(*hz);
-            items.push(CheckMenuItem::with_id(
-                id.clone(),
-                format!("{hz} Hz"),
-                !checked,
-                checked,
-                None,
-            ));
-            event_handlers.insert(
-                id,
-                DeviceState {
-                    display_refresh_hz: Some(*hz),
-                    ..*dstate
-                },
-            );
-        }
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&Submenu::with_items(
-            "Refresh rate (this power source)",
-            true,
-            &items
-                .iter()
-                .map(|i| i as &dyn IsMenuItem)
-                .collect::<Vec<_>>(),
-        )?)?;
-    }
+    menu.append(&PredefinedMenuItem::separator())?;
 
-    // Couple the Windows power mode to the perf mode (opt-in). Windows-only.
+    // Couple the Windows power mode to the perf mode (opt-in). Windows-only. A submenu
+    // rather than a checkbox so the mapping is visible where the choice is made.
     #[cfg(target_os = "windows")]
     {
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&CheckMenuItem::with_id(
-            "toggle_power_mode",
-            "Match Windows power mode",
-            true,
+        let follow = CheckMenuItem::with_id(
+            "power_mode:follow",
+            "Follow performance mode",
+            !match_power_mode,
             match_power_mode,
             None,
-        ))?;
+        );
+        let leave = CheckMenuItem::with_id(
+            "power_mode:off",
+            "Don't change",
+            match_power_mode,
+            !match_power_mode,
+            None,
+        );
+        let separator = PredefinedMenuItem::separator();
+        let mapping = [
+            "Battery, Silent → Best power efficiency",
+            "Balanced → Balanced",
+            "Performance, Hyperboost, Custom → Best performance",
+        ]
+        .map(|text| MenuItem::new(text, false, None));
+        let items: Vec<&dyn IsMenuItem> = [&follow as &dyn IsMenuItem, &leave, &separator]
+            .into_iter()
+            .chain(mapping.iter().map(|i| i as &dyn IsMenuItem))
+            .collect();
+        menu.append(&Submenu::with_items("Windows power mode", true, &items)?)?;
     }
 
     // Enforce settings (opt-in "win against Synapse"). Windows-only, since
     // Synapse is a Windows product. Off by default.
     #[cfg(target_os = "windows")]
     {
-        menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&CheckMenuItem::with_id(
             "toggle_enforce",
-            "Keep settings enforced (override Synapse)",
+            "Undo changes made by Synapse",
             true,
             enforce,
             None,
@@ -540,7 +574,6 @@ pub fn build(
     // Start with Windows (launch at login). Windows-only.
     #[cfg(target_os = "windows")]
     {
-        menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&CheckMenuItem::with_id(
             "toggle_autostart",
             "Start with Windows",
@@ -552,7 +585,12 @@ pub fn build(
 
     // gpu task killer
     menu.append(&PredefinedMenuItem::separator())?;
-    let terminate_item = MenuItem::with_id("dgpu_terminate_proc", "Close GPU apps", true, None);
+    let terminate_item = MenuItem::with_id(
+        "dgpu_terminate_proc",
+        "Close apps using the GPU",
+        true,
+        None,
+    );
     menu.append(&terminate_item)?;
     // footer
     menu.append(&PredefinedMenuItem::separator())?;

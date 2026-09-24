@@ -105,15 +105,16 @@ impl KeyboardColor {
 
 /// The colour "Follow performance mode" shows for each mode: the colour of that mode's tray
 /// icon (the dominant opaque pixel of `razer-tray/icons/razer-<colour>.png`), so the keyboard
-/// and the icon agree.
+/// and the icon agree. Balanced, Performance and Custom are more saturated than their icons
+/// (`#94d82d`, `#fa5252`, `#9c6749`): on the keyboard LEDs those looked washed out.
 pub fn perf_mode_color(mode: PerfMode) -> Rgb {
     match mode {
         PerfMode::Battery => Rgb::new(0x00, 0xa2, 0xe8),
         PerfMode::Silent => Rgb::new(0xfc, 0xc4, 0x19),
-        PerfMode::Balanced => Rgb::new(0x94, 0xd8, 0x2d),
-        PerfMode::Performance => Rgb::new(0xfa, 0x52, 0x52),
+        PerfMode::Balanced => Rgb::new(0x6c, 0xff, 0x00),
+        PerfMode::Performance => Rgb::new(0xff, 0x14, 0x14),
         PerfMode::Hyperboost => Rgb::new(0xff, 0x00, 0xfa),
-        PerfMode::Custom(..) => Rgb::new(0x9c, 0x67, 0x49),
+        PerfMode::Custom(..) => Rgb::new(0xa8, 0x40, 0x00),
     }
 }
 
@@ -143,7 +144,7 @@ pub fn default_presets() -> Vec<KeyboardPreset> {
     };
     vec![
         preset("White", &["#ffffff"]),
-        preset("Razer green", &["#44d62c"]),
+        preset("Razer Green", &["#44d62c"]),
         preset("Red", &["#ff0000"]),
         preset("Blue", &["#0050ff"]),
         preset("Purple", &["#8000ff"]),

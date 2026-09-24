@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use librazer::command;
 use librazer::device;
 use librazer::keyboard::{Frame, KeyboardPreset};
-use librazer::types::{BatteryCare, LightsAlwaysOn};
+use librazer::types::BatteryCare;
 use tray_icon::menu::Menu;
 
 use crate::config::{ConfigFile, DiskState};
@@ -165,6 +165,7 @@ impl ProgramState {
                 custom_colors: false,
                 keyboard_presets: &config.keyboard_presets,
                 battery_bar: config.keyboard_battery_bar,
+                ac_power,
             },
         )?;
         Ok(Self {
@@ -206,6 +207,7 @@ impl ProgramState {
             custom_colors: self.custom_colors,
             keyboard_presets: &self.keyboard_presets,
             battery_bar: self.battery_bar,
+            ac_power: self.ac_power,
         }
     }
 
@@ -414,8 +416,7 @@ impl ProgramState {
         const P_CHARGE: u8 = 4;
         const P_BRIGHTNESS: u8 = 5;
         const P_GPU_WATTS: u8 = 6;
-        const P_ALWAYS_ON: u8 = 7;
-        const P_LOGO: u8 = 8;
+        const P_LOGO: u8 = 7;
 
         let mode = match s.perf_mode {
             PerfMode::Battery => "Battery".to_string(),
@@ -477,12 +478,8 @@ impl ProgramState {
                 ),
             ));
         }
-        // 💡 reflects the always-on *intent* (the keep-alive), not the device-mode
-        // read in `observed` -- we keep the device in Normal mode, so that read is
-        // always Disable.
-        if self.device_state.lights_mode.always_on == LightsAlwaysOn::Enable {
-            lights_line.push((P_ALWAYS_ON, "💡".to_string()));
-        }
+        // No always-on marker: it was a bare 💡 at the end of this line, the one field with no
+        // value, and it read as a number that had gone missing. The menu shows the setting.
         lights_line.push((P_LOGO, format!("Logo {:?}", s.lights_mode.logo_mode)));
 
         let layout = vec![vec![(P_MODE, mode)], fan_line, gpu_line, lights_line];
@@ -652,6 +649,11 @@ impl ProgramState {
         self.device_state = new_device_state.normalized(self.fan_rpm_range);
         log::info!("transient state applied {:?}", self.device_state);
         self.apply_and_refresh(tray_icon, device)
+    }
+
+    /// A custom colour is set and this model can show it.
+    pub fn has_custom_color(&self) -> bool {
+        self.custom_colors && self.device_state.lights_mode.keyboard_color.is_some()
     }
 
     /// Show the custom keyboard colour, if one is set: rendered from intent, with the battery

@@ -92,6 +92,11 @@ fn detect_with_retry() -> Result<device::Device> {
     Err(last.unwrap_or_else(|| anyhow::anyhow!("device detection failed")))
 }
 
+/// An input gap at least this long may have let the keyboard backlight fade, which can
+/// drop a custom colour. The EC fades after about 4 s idle; 3 s leaves margin for the
+/// 1 s loop tick.
+const KEYBOARD_FADE_MS: u32 = 3000;
+
 /// Backoff for resync attempts after a failed exchange: 2 s doubling to 60 s. The old
 /// recovery slept 1 s at a time INSIDE the event-loop callback until it succeeded, so a
 /// lasting failure froze the menu, hover and Quit.
@@ -259,6 +264,8 @@ fn main() -> Result<()> {
     // (the EC fades it after ~4s idle). This records the last keep-alive tick.
     #[cfg(target_os = "windows")]
     let mut last_keepalive_timestamp = std::time::Instant::now();
+    // The input tick seen on the previous loop pass, to spot input after an idle spell.
+    let mut last_seen_input_tick: Option<u32> = platform::last_input_tick();
     // Throttles the on-hover Mirror refresh (tray-icon Enter/Move events fire rapidly).
     let mut last_hover_refresh = std::time::Instant::now();
 
@@ -330,12 +337,16 @@ fn main() -> Result<()> {
                     // Rebuild the menu so the checkmark reflects the new state.
                     state.rebuild_menu(Some(&tray_icon));
                     log::info!("enforce toggled to {}", state.enforce);
-                } else if event.id == MenuId("toggle_power_mode".to_string()) {
-                    state.match_power_mode = !state.match_power_mode;
+                } else if let Some(follow) = match event.id.as_ref() {
+                    "power_mode:follow" => Some(true),
+                    "power_mode:off" => Some(false),
+                    _ => None,
+                } {
+                    state.match_power_mode = follow;
                     if let Err(e) = state.persist() {
                         log::warn!("Failed to persist power-mode flag: {:?}", e);
                     }
-                    if state.match_power_mode {
+                    if follow {
                         if let Err(e) =
                             platform::set_windows_power_mode(state.device_state.perf_mode)
                         {
@@ -343,10 +354,7 @@ fn main() -> Result<()> {
                         }
                     }
                     state.rebuild_menu(Some(&tray_icon));
-                    log::info!(
-                        "match Windows power mode toggled to {}",
-                        state.match_power_mode
-                    );
+                    log::info!("Windows power mode follows perf mode: {follow}");
                 } else if event.id == MenuId("toggle_battery_bar".to_string()) {
                     state.battery_bar = !state.battery_bar;
                     if let Err(e) = state.persist() {
@@ -445,6 +453,8 @@ fn main() -> Result<()> {
                     }
                 }
                 state.ac_power = ac_now;
+                // The header names the profile picks go to.
+                state.rebuild_menu(Some(&tray_icon));
                 last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
                 // Windows keeps the power-mode slider per power source, so the new source's
                 // slider needs setting even when the perf mode doesn't change.
@@ -580,6 +590,22 @@ fn main() -> Result<()> {
                     state.paint_keyboard(&device, true);
                 }
             }
+
+            // A custom colour can be gone after the backlight's idle fade: with "Keep
+            // keyboard lit" off, the keyboard wakes back up on its stored effect, not the
+            // frame (seen 2026-09-23). The first input after a pause longer than the fade
+            // repaints it. Harmless when the frame survived: the same colours are re-sent.
+            let tick_now = platform::last_input_tick();
+            if let (Some(cur), Some(prev)) = (tick_now, last_seen_input_tick) {
+                if cur != prev
+                    && cur.wrapping_sub(prev) >= KEYBOARD_FADE_MS
+                    && io_ok
+                    && state.has_custom_color()
+                {
+                    state.paint_keyboard(&device, true);
+                }
+            }
+            last_seen_input_tick = tick_now;
 
             // Keyboard always-on (opt-in) keep-alive. The keyboard's EC fades the
             // backlight after ~4s of no input. The ONLY way to keep it lit without Razer

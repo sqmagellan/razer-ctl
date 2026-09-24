@@ -143,10 +143,11 @@ a personal machine.
 
 The hard-won ones. [`CHANGELOG.md`](CHANGELOG.md) carries the measurements behind each.
 
-- **No arbitrary keyboard color, because it needs driver mode and we refuse.** In Normal mode the EC
-  ignores any color bytes we send and falls back to Razer green. Verified across both matrix command
-  families (`0x0f02`, `0x030a`), both transaction ids (`0x1F`, `0xFF`), and the custom-frame path.
-  Effect speed is fixed for the same reason. The effect itself reads back fine, via `0x0f82`.
+- **Custom keyboard colour is a frame the tray keeps repainting.** The EC's own static effect
+  ignores the colour and shows Razer green, and this README used to say colour needed driver mode.
+  It doesn't: six `0x030b` row writes followed by `0x030a [5, 0]` show any colours in Normal mode,
+  with the Fn keys intact (verified 2026-09-23). The EC doesn't keep the frame, and standby brings
+  the stored effect back, so the tray repaints it after every wake. Effect speed is still fixed.
 - **Always-on is a keep-alive, because the firmware flag killed every Fn media key.** Razer's
   `0x0004` is device mode, and Enable is `0x03` = driver mode, which hands the whole Fn layer to a
   host driver. There's no firmware backlight-timeout knob and no HID LampArray, so we stay in Normal
