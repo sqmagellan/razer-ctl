@@ -364,6 +364,75 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
     None
 }
 
+/// Whether the NVIDIA dGPU is powered down (D3), from the power state Windows keeps for
+/// the device. Reading it asks the PnP manager, not the GPU, so it can't wake the GPU;
+/// `nvidia-smi` can. None if there is no NVIDIA display adapter or the state can't be read.
+#[cfg(target_os = "windows")]
+fn nvidia_gpu_asleep() -> Option<bool> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_Get_DevNode_PropertyW, CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW,
+        CM_Locate_DevNodeW, CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_PRESENT,
+        CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
+    };
+    use windows::Win32::Devices::Properties::{DEVPKEY_Device_PowerData, DEVPROPTYPE};
+
+    // The Display adapter setup class.
+    let class = w!("{4d36e968-e325-11ce-bfc1-08002be10318}");
+    let flags = CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT;
+    // SAFETY: plain Configuration Manager calls with buffers sized as the API reports;
+    // the returned list is NUL-separated wide strings ending in an empty one.
+    unsafe {
+        let mut len = 0u32;
+        if CM_Get_Device_ID_List_SizeW(&mut len, class, flags) != CR_SUCCESS || len == 0 {
+            return None;
+        }
+        let mut list = vec![0u16; len as usize];
+        if CM_Get_Device_ID_ListW(class, &mut list, flags) != CR_SUCCESS {
+            return None;
+        }
+        for id in list.split(|&c| c == 0).filter(|id| !id.is_empty()) {
+            if !String::from_utf16_lossy(id)
+                .to_ascii_uppercase()
+                .starts_with("PCI\\VEN_10DE")
+            {
+                continue;
+            }
+            let mut id_z = id.to_vec();
+            id_z.push(0);
+            let mut devinst = 0u32;
+            if CM_Locate_DevNodeW(
+                &mut devinst,
+                PCWSTR(id_z.as_ptr()),
+                CM_LOCATE_DEVNODE_NORMAL,
+            ) != CR_SUCCESS
+            {
+                continue;
+            }
+            // CM_POWER_DATA: u32 size, then the most recent DEVICE_POWER_STATE
+            // (1 = D0 ... 4 = D3).
+            let mut data = [0u8; 64];
+            let mut size = data.len() as u32;
+            let mut kind = DEVPROPTYPE::default();
+            if CM_Get_DevNode_PropertyW(
+                devinst,
+                &DEVPKEY_Device_PowerData,
+                &mut kind,
+                Some(data.as_mut_ptr()),
+                &mut size,
+                0,
+            ) != CR_SUCCESS
+                || size < 8
+            {
+                continue;
+            }
+            let state = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            return Some(state >= 4);
+        }
+        None
+    }
+}
+
 /// Poll dGPU temperature and power on a background thread.
 ///
 /// Deliberately a *subprocess* (`nvidia-smi`) rather than FFI into `nvml.dll`, even though
@@ -374,6 +443,11 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
 ///
 /// Fails open and silent: a machine with no NVIDIA tools, or no dGPU, simply never gets a
 /// reading and the tooltip omits those fields.
+///
+/// A powered-down dGPU is left alone: `nvidia-smi` would wake it, which on battery would
+/// cost more than the reading is worth. The fields drop out of the tooltip until the GPU
+/// is awake for some other reason. (Untested on a sleeping GPU: the Blade here runs in
+/// dGPU-only mode, where the GPU never sleeps.)
 ///
 /// It tolerates [`GPU_MAX_CONSECUTIVE_FAILURES`] failures before giving up, rather than
 /// quitting on the first. The tray starts at login, and that is exactly when the NVIDIA
@@ -389,7 +463,29 @@ pub fn spawn_gpu_telemetry_monitor() {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let mut failures = 0u32;
+    let mut was_asleep = false;
     std::thread::spawn(move || loop {
+        let state = nvidia_gpu_asleep();
+        static FIRST_STATE: std::sync::Once = std::sync::Once::new();
+        FIRST_STATE.call_once(|| log::info!("dGPU power state: asleep = {state:?}"));
+        let asleep = state == Some(true);
+        if asleep != was_asleep {
+            was_asleep = asleep;
+            log::info!(
+                "dGPU {}",
+                if asleep {
+                    "powered down; pausing telemetry"
+                } else {
+                    "awake; resuming telemetry"
+                }
+            );
+        }
+        if asleep {
+            GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            std::thread::sleep(GPU_POLL_INTERVAL);
+            continue;
+        }
         let output = procCommand::new("nvidia-smi")
             .args([
                 "--query-gpu=temperature.gpu,power.draw",
