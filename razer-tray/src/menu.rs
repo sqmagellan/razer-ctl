@@ -580,6 +580,12 @@ pub fn build(
         None,
     );
     menu.append(&terminate_item)?;
+    menu.append(&MenuItem::with_id(
+        "dgpu_sleep_check",
+        "What's keeping the GPU awake?",
+        true,
+        None,
+    ))?;
     // footer
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&PredefinedMenuItem::about(None, Some(about())))?;

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod gpu_sleep;
 mod menu;
 mod platform;
 mod program;
@@ -115,6 +116,20 @@ fn main() -> Result<()> {
     // "another instance is running" exit and any startup failure.
     if let Err(e) = init_logging_to_file() {
         eprintln!("razer-tray: could not open the log: {e:?}");
+    }
+
+    // `razer-tray --gpu-report <file>`: write the dGPU sleep report and exit. For remote
+    // diagnosis (this is a GUI-subsystem exe, so it has no console to print to). Handled
+    // before the single-instance check so it works while the tray is running.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--gpu-report") {
+        let report = gpu_sleep::report(true);
+        let text = format!("{}\n{report:#?}\n", gpu_sleep::format_report(&report));
+        match args.get(2) {
+            Some(path) => std::fs::write(path, text)?,
+            None => anyhow::bail!("usage: razer-tray --gpu-report <file>"),
+        }
+        return Ok(());
     }
 
     // Single instance before any thread or subprocess is started.
@@ -329,6 +344,17 @@ fn main() -> Result<()> {
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
                     log::info!("match event id");
                     platform::gpu_taskkill()?;
+                } else if event.id == MenuId("dgpu_sleep_check".to_string()) {
+                    // Its own thread: the dialog is modal and would stall the tray loop.
+                    std::thread::spawn(|| {
+                        let report = gpu_sleep::report(false);
+                        log::info!("dGPU sleep check: {report:?}");
+                        let _ = native_dialog::MessageDialog::new()
+                            .set_type(native_dialog::MessageType::Info)
+                            .set_title("What's keeping the GPU awake")
+                            .set_text(&gpu_sleep::format_report(&report))
+                            .show_alert();
+                    });
                 } else if event.id == MenuId("toggle_enforce".to_string()) {
                     state.enforce = !state.enforce;
                     if let Err(e) = state.persist() {

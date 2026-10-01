@@ -368,7 +368,7 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
 /// the device. Reading it asks the PnP manager, not the GPU, so it can't wake the GPU;
 /// `nvidia-smi` can. None if there is no NVIDIA display adapter or the state can't be read.
 #[cfg(target_os = "windows")]
-fn nvidia_gpu_asleep() -> Option<bool> {
+pub(crate) fn nvidia_gpu_asleep() -> Option<bool> {
     use windows::core::{w, PCWSTR};
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         CM_Get_DevNode_PropertyW, CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW,
@@ -446,8 +446,10 @@ fn nvidia_gpu_asleep() -> Option<bool> {
 ///
 /// A powered-down dGPU is left alone: `nvidia-smi` would wake it, which on battery would
 /// cost more than the reading is worth. The fields drop out of the tooltip until the GPU
-/// is awake for some other reason. (Untested on a sleeping GPU: the Blade here runs in
-/// dGPU-only mode, where the GPU never sleeps.)
+/// is awake for some other reason. In hybrid mode an awake dGPU that no app holds is left
+/// alone too (see `gpu_sleep`), or the poll itself would keep it from powering down.
+/// (Untested on a sleeping GPU: the Blade here runs in dGPU-only mode, where the GPU never
+/// sleeps.)
 ///
 /// It tolerates [`GPU_MAX_CONSECUTIVE_FAILURES`] failures before giving up, rather than
 /// quitting on the first. The tray starts at login, and that is exactly when the NVIDIA
@@ -464,6 +466,7 @@ pub fn spawn_gpu_telemetry_monitor() {
 
     let mut failures = 0u32;
     let mut was_asleep = false;
+    let mut was_idle = false;
     std::thread::spawn(move || loop {
         let state = nvidia_gpu_asleep();
         static FIRST_STATE: std::sync::Once = std::sync::Once::new();
@@ -480,7 +483,22 @@ pub fn spawn_gpu_telemetry_monitor() {
                 }
             );
         }
-        if asleep {
+        // Awake but held by nothing (hybrid mode only): it is on its way down, and a
+        // 5-second nvidia-smi poll would keep restarting its idle timer, so the tray
+        // itself would keep it awake. Leave it alone until an app really uses it.
+        let idle = !asleep && crate::gpu_sleep::others_hold_dgpu() == Some(false);
+        if idle != was_idle {
+            was_idle = idle;
+            log::info!(
+                "dGPU {}",
+                if idle {
+                    "awake with no app using it; not polling so it can power down"
+                } else {
+                    "in use by an app (or dGPU-only mode); polling"
+                }
+            );
+        }
+        if asleep || idle {
             GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
             GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
             std::thread::sleep(GPU_POLL_INTERVAL);
