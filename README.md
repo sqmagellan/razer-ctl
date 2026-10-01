@@ -54,6 +54,8 @@ history and measurements; `README.upstream.md` covers the original project.
   die. The GPU figure comes from Windows, as in Task Manager. `nvidia-smi` runs only for GPU watts,
   and for the temperature where Windows doesn't report it.
 - **Close apps using the GPU**: ends dGPU processes, skipping system ones.
+- **What's keeping the GPU awake?**: lists the apps holding memory on the NVIDIA GPU, without
+  waking it. `razer-tray --gpu-report <file>` writes the same report.
 - **Start with Windows**: an `HKCU\…\Run` entry.
 - **Status for scripts**: `razer-cli auto json` prints the state as flat JSON, actual fan RPM
   included (for a Home Assistant sensor or a status line). A value the laptop doesn't report is

@@ -526,6 +526,12 @@ fn nvidia_gpu() -> Option<NvidiaGpu> {
     }
 }
 
+/// Whether the dGPU is powered down (D3), for `gpu_sleep`. See [`nvidia_gpu`].
+#[cfg(target_os = "windows")]
+pub(crate) fn nvidia_gpu_asleep() -> Option<bool> {
+    nvidia_gpu().map(|g| g.asleep)
+}
+
 /// Whole degrees from the tenths D3DKMT reports. 0 is what a driver that doesn't fill the
 /// field leaves there, and anything at or above 150 °C isn't a reading.
 #[cfg(any(target_os = "windows", test))]
