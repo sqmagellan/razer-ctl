@@ -10,7 +10,8 @@ A tray app and a CLI that set a Razer Blade's performance mode, fans, lighting a
 HID, without Synapse. No installer, service or account. The tray binary is 1.8 MB.
 
 This fork is maintained by one person with one laptop. Every hardware claim here was checked on a
-Razer Blade 16 (2023), `RZ09-0483`, USB PID `0x029F`, Windows 11, and nowhere else. An unknown model
+Razer Blade 16 (2023), `RZ09-0483`, USB PID `0x029F`, Windows 11, and nowhere else, unless a user's
+report is cited. An unknown model
 starts on a generic profile, and a command its firmware lacks fails with one clear error. See
 [Device support](#device-support).
 
@@ -77,6 +78,12 @@ The config is `%APPDATA%\razer-tray\config\default-config.toml`. The log is
 
 **Tested:** Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11. One unit.
 
+**Reported by users:** tested by someone else on their own machine. What they found:
+
+| Model | USB PID | Works | Doesn't work yet |
+|---|---|---|---|
+| Razer Blade 18 (2023), `RZ09-0484U` ([#1](../../issues/1)) | `0x02A0` | Perf modes, Auto fan, Max Fan, keyboard brightness and effects, logo, charge limit, Fn keys | Manual fan RPM: every set point holds the fans near 3200/3300 |
+
 **Catalogued:** these have a specific profile from the upstream project's tables. Not tested here.
 
 | Model | USB PID | Manual fan range |
@@ -89,7 +96,7 @@ The config is `%APPDATA%\razer-tray\config\default-config.toml`. The log is
 | Razer Blade 15 (2022) | `0x028A` | 3500–5000 RPM |
 
 **Other models** start on a generic profile with every feature offered. The fan range comes from a
-table of 44 more PIDs transcribed from community data. There is no init sequence, because a guessed
+table of 43 more PIDs transcribed from community data. There is no init sequence, because a guessed
 one is worse than none. Commands the firmware lacks answer `NotSupported` and fail at once. Expect
 perf modes and fans to work and some lighting or battery features not to; the error says which. If
 you try one, please [open an issue](../../issues/new/choose).

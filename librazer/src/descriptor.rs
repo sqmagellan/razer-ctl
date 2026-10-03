@@ -175,6 +175,26 @@ pub const SUPPORTED: &[Descriptor] = &[
         init_cmds: &[],
         fan_rpm_range: (3500, 5000),
     },
+    // Reported on hardware by a user (issue #1, 2026-09-30; SKU RZ09-0484UEH4-R3U1, Windows
+    // 25H2): perf modes, Auto fan, Max Fan, keyboard brightness and effects, logo, charge
+    // limit and the Fn keys all work. Manual RPM does NOT: every set point held the fans at
+    // ~3200/3300, so the range below is still the transcribed one, not a measurement.
+    Descriptor {
+        model_number_prefix: "RZ09-0484U",
+        name: "Razer Blade 18 (2023)",
+        pid: 0x02a0,
+        features: &[
+            "battery-care",
+            "fan",
+            "kbd-backlight",
+            "kbd-lighting",
+            "lid-logo",
+            "lights-always-on",
+            "perf",
+        ],
+        init_cmds: &[],
+        fan_rpm_range: (2200, 5000),
+    },
 ];
 
 const _VALIDATE_FEATURES: () = {
@@ -249,7 +269,6 @@ pub const FAN_RANGE_BY_PID: &[(u16, (u16, u16))] = &[
     (0x028c, (3500, 5000)), // Blade 14 2022
     // 2023+: transcribed floor of 2200. Unverified, and known too high for 0x029F.
     (0x029e, (2200, 5000)), // Blade 15 2023
-    (0x02a0, (2200, 5000)), // Blade 18 2023
     (0x02b6, (2200, 5000)), // Blade 14 2024
     (0x02b8, (2200, 5000)), // Blade 18 2024
     (0x02c5, (2200, 5600)), // Blade 14 2025 -- highest ceiling
@@ -322,6 +341,7 @@ mod tests {
         assert_eq!(fan_range_for_pid(0x02c5), Some((2200, 5600)));
         // A PID in SUPPORTED is deliberately absent from the fallback table.
         assert_eq!(fan_range_for_pid(0x029f), None);
+        assert_eq!(fan_range_for_pid(0x02a0), None);
         assert_eq!(fan_range_for_pid(0xFFFF), None);
     }
 }

@@ -4,6 +4,14 @@ Release history for this fork. The README carries the current behavior; this fil
 got there. Every hardware claim was verified on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`,
 Windows 11, and nowhere else.
 
+## Unreleased
+
+**New**
+- **Razer Blade 18 (2023), `RZ09-0484U`, PID `0x02A0`**, from a user's hardware report
+  ([#1](https://github.com/sqmagellan/razer-ctl/issues/1)). It now gets its own profile instead of
+  the generic one. Everything worked for them except manual fan RPM, which holds the fans near
+  3200/3300 whatever the set point; that is still open. Not tested here.
+
 ## 0.9.5: keyboard colors, a clearer menu, and a tray that can't die at login or lose its config
 Built and tested on `0x029F` (2026-09-23). Probes that set the scope, same machine: `0x070f` is Max
 Fan (fans 2100 → 4700 RPM, no charging above the limit); tray and CLI running together don't cause
