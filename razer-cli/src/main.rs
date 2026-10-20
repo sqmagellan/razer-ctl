@@ -44,19 +44,6 @@ macro_rules! impl_unary_handle_cli {
     };
 }
 
-macro_rules! impl_unary_handle_with_arg_cli {
-    (<$arg_type:ty>($matches:ident, $device:ident, $name:literal, $arg_name:literal, $arg2:literal, $setter:path)) => {
-        match $matches.subcommand() {
-            Some(($name, matches)) => $setter(
-                $device,
-                *matches.get_one::<$arg_type>($arg_name).unwrap(),
-                $arg2,
-            )?,
-            _ => (),
-        }
-    };
-}
-
 macro_rules! impl_unary_cli {
     (<$feature_type:ty><$arg_type:ty>($desc:literal,$arg_desc:literal,$setter:path,$getter:path)) => {
         impl Cli for $feature_type {
@@ -319,7 +306,7 @@ impl Cli for feature::Fan {
                 .about("Control fan")
                 .subcommand(clap::Command::new("auto").about("Set fan mode to auto"))
                 .subcommand(clap::Command::new("manual").about("Set fan mode to manual"))
-                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm", "Fan RPM, a multiple of 100, within this laptop's fan range (`info` prints it as fan_rpm_range)"})
+                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm, switching the fan to manual", "Fan RPM, a multiple of 100, within this laptop's fan range (`info` prints it as fan_rpm_range)"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(MaxFanSpeedMode)}, "max", "MAX", "Control Max Fan Speed Mode", "Max Fan Speed Mode"})
                 .arg_required_else_help(true),
         )
@@ -339,8 +326,13 @@ impl Cli for feature::Fan {
                          EC would run at {} RPM and report success",
                         if rpm < min { min } else { max }
                     );
+                    // Before anything is written, as the mode switch below is a write.
+                    anyhow::ensure!(
+                        rpm.is_multiple_of(100),
+                        "{rpm} RPM is not a multiple of 100; the EC stores rpm/100"
+                    );
+                    set_fan_rpm_manual(device, rpm)?;
                 }
-                impl_unary_handle_with_arg_cli! {<u16>(matches, device, "rpm", "RPM", false, command::set_fan_rpm)}
                 impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
 
                 match matches.subcommand() {
@@ -518,6 +510,42 @@ fn json_read<T>(
         }
         Err(e) => Err(e),
     }
+}
+
+/// `auto fan rpm`. The set point alone used to leave an Auto fan in Auto, so a user's
+/// sweep could measure the firmware curve instead (issue #10). Switch to Manual first, the
+/// order the tray uses, and say so on stderr, where scripts reading stdout won't see it.
+fn set_fan_rpm_manual(device: &device::Device, rpm: u16) -> Result<()> {
+    // A laptop without the mode read gets the old behavior: the set point alone.
+    let (perf, fan) = match command::get_perf_mode(device) {
+        Ok(modes) => modes,
+        Err(e) if librazer::error::is_not_supported(&e) => {
+            return command::set_fan_rpm(device, rpm, false);
+        }
+        Err(e) => return Err(e),
+    };
+    let switched = fan != FanMode::Manual;
+    if switched {
+        command::set_fan_mode_confirmed(device, FanMode::Manual)?;
+    }
+    if let Err(e) = command::set_fan_rpm(device, rpm, false) {
+        // Don't leave the fan in Manual on a set point nobody asked for.
+        if switched {
+            if let Err(back) = command::set_fan_mode(device, fan) {
+                eprintln!("could not put the fan back to {fan:?}: {back}");
+            }
+        }
+        return Err(e);
+    }
+    if switched {
+        eprintln!("fan mode was {fan:?}; switched to Manual");
+    }
+    // Measured on 0x029F: Balanced holds a set point either side of the fans' speed, while
+    // Hyperboost runs its own curve when that is faster.
+    if perf != PerfMode::Balanced {
+        eprintln!("note: Balanced is the mode known to hold a set point; {perf:?} may run the fans faster");
+    }
+    Ok(())
 }
 
 fn print_json(device: &device::Device) -> Result<()> {
