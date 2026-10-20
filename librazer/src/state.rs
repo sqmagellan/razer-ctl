@@ -390,7 +390,9 @@ impl DeviceState {
         // outside Custom, and skipping it spares a HID read on every (frequent) poll.
         let max_fan = matches!(perf_mode, PerfMode::Custom(..))
             && matches!(
-                command::get_max_fan_speed_mode(device)?,
+                read_optional(device, Optional::MaxFan, MaxFanSpeedMode::Disable, || {
+                    command::get_max_fan_speed_mode(device)
+                })?,
                 MaxFanSpeedMode::Enable
             );
 
@@ -439,14 +441,17 @@ impl DeviceState {
 
         // Max fan speed is Custom-only (the EC rejects the command otherwise). Match intent
         // while in Custom; leaving Custom clears it in the EC. A failure is returned after the
-        // remaining writes are attempted, like the fan write.
+        // remaining writes are attempted, like the fan write. A laptop without it (issue
+        // #10) is left alone like a missing logo.
         let max_fan_result = if matches!(self.perf_mode, PerfMode::Custom(..)) {
             let mode = if self.max_fan {
                 MaxFanSpeedMode::Enable
             } else {
                 MaxFanSpeedMode::Disable
             };
-            command::set_max_fan_speed_mode(device, mode)
+            write_optional(device, Optional::MaxFan, || {
+                command::set_max_fan_speed_mode(device, mode)
+            })
         } else {
             Ok(())
         };
@@ -501,6 +506,9 @@ impl DeviceState {
         }
         if lacking.contains(Optional::BatteryCare) {
             self.battery_care = intent.battery_care;
+        }
+        if lacking.contains(Optional::MaxFan) {
+            self.max_fan = intent.max_fan;
         }
         self
     }
@@ -656,7 +664,7 @@ impl DeviceState {
     fn enforced_fields_differ_except(&self, intended: &DeviceState, skip: Unsupported) -> bool {
         self.perf_mode != intended.perf_mode
             || self.fan_speed != intended.fan_speed
-            || self.max_fan != intended.max_fan
+            || (!skip.contains(Optional::MaxFan) && self.max_fan != intended.max_fan)
             || (!skip.contains(Optional::Logo)
                 && self.lights_mode.logo_mode != intended.lights_mode.logo_mode)
             || (!skip.contains(Optional::BatteryCare) && self.battery_care != intended.battery_care)
@@ -2872,5 +2880,137 @@ colors = ["#ffffff"]
             seen.lights_mode.logo_mode, reading.lights_mode.logo_mode,
             "logo was read"
         );
+    }
+
+    // ---- a laptop without Max Fan (issue #10) ----
+
+    /// A Custom/Auto laptop whose EC answers the requests `rejects` picks with "not
+    /// supported" and echoes every other write. Max Fan reads back off.
+    fn custom_laptop_rejecting(
+        rejects: fn(&crate::packet::Packet) -> bool,
+    ) -> crate::transport::MockTransport {
+        use crate::packet::{Packet, ResponseError};
+        crate::transport::MockTransport::with_fallible_responder(move |req| {
+            if rejects(req) {
+                return Err(anyhow::Error::new(ResponseError::NotSupported));
+            }
+            let mut p = Packet::new(req.command(), &[]);
+            match req.command() {
+                0x0d82 => p.set_args(&[
+                    0,
+                    req.get_args()[1],
+                    crate::types::PerfMode::Custom as u8,
+                    crate::types::FanMode::Auto as u8,
+                ]),
+                0x0d87 => p.set_args(&[0, req.get_args()[1], 1]),
+                0x078f => p.set_args(&[MaxFanSpeedMode::Disable as u8]),
+                0x0382 => p.set_args(&[1, 4, 2]),
+                0x0383 => p.set_args(&[1, 5, 200]),
+                0x0084 => p.set_args(&[0, 0]),
+                0x0f82 => p.set_args(&[1, 5, 0x00]),
+                0x0792 => p.set_args(&[BatteryCare::from_percent(80).unwrap().wire_byte()]),
+                _ => return Ok(Packet::new(req.command(), req.get_args())),
+            }
+            Ok(p)
+        })
+    }
+
+    /// #10's Blade 17 2022: Max Fan "on" is rejected, the getter answers.
+    fn rejects_max_fan_on(req: &crate::packet::Packet) -> bool {
+        req.command() == 0x070f && req.get_args()[0] == MaxFanSpeedMode::Enable as u8
+    }
+
+    fn custom_with_max_fan(max_fan: bool) -> DeviceState {
+        DeviceState {
+            perf_mode: PerfMode::Custom(CpuBoost::Medium, GpuBoost::Medium),
+            max_fan,
+            ..DeviceState::default()
+        }
+    }
+
+    #[test]
+    fn a_supported_model_still_fails_a_max_fan_write_the_ec_rejects() {
+        let mock = custom_laptop_rejecting(rejects_max_fan_on);
+        let err = custom_with_max_fan(true).apply(&mock).unwrap_err();
+        assert!(crate::error::is_not_supported(&err));
+    }
+
+    #[test]
+    fn max_fan_off_is_accepted_until_someone_picks_on() {
+        let mock = custom_laptop_rejecting(rejects_max_fan_on).learning();
+        custom_with_max_fan(false).apply(&mock).unwrap();
+        assert!(sent_command(&mock, 0x070f), "off was written");
+        assert!(unsupported_on(&mock).is_empty());
+
+        custom_with_max_fan(true)
+            .apply(&mock)
+            .expect("a missing Max Fan is not an error");
+        assert!(unsupported_on(&mock).contains(Optional::MaxFan));
+    }
+
+    #[test]
+    fn a_learning_model_without_max_fan_writes_the_rest_and_stops_asking() {
+        let mock = custom_laptop_rejecting(rejects_max_fan_on).learning();
+        let state = custom_with_max_fan(true);
+        state.apply(&mock).unwrap();
+        let sent = mock.sent();
+        let at = sent.iter().position(|(c, _)| *c == 0x070f).unwrap();
+        for (command, what) in [
+            (0x0d02, "fan mode"),
+            (0x0300, "logo"),
+            (0x0303, "brightness"),
+            (0x0712, "charge limit"),
+        ] {
+            assert!(
+                sent[at..].iter().any(|(c, _)| *c == command),
+                "{what} was still written after the rejection"
+            );
+        }
+
+        let before = mock.sent_count();
+        state.apply(&mock).unwrap();
+        assert!(!DeviceState::read(&mock).unwrap().max_fan);
+        assert!(
+            !mock.sent()[before..]
+                .iter()
+                .any(|(c, _)| *c == 0x070f || *c == 0x078f),
+            "a recorded setting is not written or read again"
+        );
+    }
+
+    #[test]
+    fn a_rejected_max_fan_read_is_learned_too() {
+        let mock = custom_laptop_rejecting(|req| req.command() == 0x078f).learning();
+        let state = DeviceState::read(&mock).expect("Max Fan is optional");
+        assert!(!state.max_fan);
+        assert!(unsupported_on(&mock).contains(Optional::MaxFan));
+    }
+
+    #[test]
+    fn a_failed_perf_read_before_max_fan_is_not_blamed_on_max_fan() {
+        // `set_max_fan_speed_mode` reads the perf mode first; that read failing must not
+        // record Max Fan as missing.
+        let mock = custom_laptop_rejecting(|req| req.command() == 0x0d82).learning();
+        assert!(custom_with_max_fan(true).apply(&mock).is_err());
+        assert!(!unsupported_on(&mock).contains(Optional::MaxFan));
+        assert!(!sent_command(&mock, 0x070f));
+    }
+
+    #[test]
+    fn a_missing_max_fan_is_not_drift_and_never_replaces_the_intent() {
+        let mock = custom_laptop_rejecting(rejects_max_fan_on).learning();
+        let mut intended = DeviceState::read(&mock).unwrap();
+        intended.max_fan = true;
+        intended.enforce_to(&mock).unwrap();
+
+        let observed = DeviceState::read(&mock).unwrap();
+        assert!(!observed.max_fan);
+        assert!(
+            observed.enforced_fields_differ(&intended),
+            "plain compare sees it"
+        );
+        assert!(!observed.enforced_fields_differ_on(&intended, &mock));
+        let seen = observed.with_lacking_from(&intended, unsupported_on(&mock));
+        assert!(seen.max_fan, "the profile keeps its own value");
     }
 }

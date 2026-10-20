@@ -16,7 +16,9 @@
 //!
 //! A few ECs accept a command and ignore it, so they never answer 0x05 and nothing is
 //! learned. [`KNOWN_LACKING`] lists those per PID from user reports; such a setting starts
-//! out recorded as lacking.
+//! out recorded as lacking. An EC that rejects only Max Fan "on" (issue #10) needs no entry:
+//! the tray writes "off" on every Custom apply, and the first "on" someone picks is
+//! rejected, recorded and grayed out.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -26,13 +28,16 @@ pub enum Optional {
     Logo,
     KeyboardBrightness,
     BatteryCare,
+    /// Custom mode's Max Fan Speed (`0x070f`/`0x078f`).
+    MaxFan,
 }
 
 impl Optional {
-    pub const ALL: [Optional; 3] = [
+    pub const ALL: [Optional; 4] = [
         Optional::Logo,
         Optional::KeyboardBrightness,
         Optional::BatteryCare,
+        Optional::MaxFan,
     ];
 
     fn bit(self) -> u8 {
@@ -40,6 +45,7 @@ impl Optional {
             Optional::Logo => 1,
             Optional::KeyboardBrightness => 2,
             Optional::BatteryCare => 4,
+            Optional::MaxFan => 8,
         }
     }
 
@@ -49,6 +55,7 @@ impl Optional {
             Optional::Logo => "logo",
             Optional::KeyboardBrightness => "keyboard brightness",
             Optional::BatteryCare => "battery care",
+            Optional::MaxFan => "max fan speed",
         }
     }
 }
@@ -135,6 +142,14 @@ mod tests {
         // Already recorded, so a later 0x05 isn't logged as news.
         assert!(!log.mark(Optional::Logo));
         assert!(log.mark(Optional::BatteryCare));
+    }
+
+    #[test]
+    fn every_setting_has_its_own_bit() {
+        for f in Optional::ALL {
+            let alone = Unsupported::default().with(f);
+            assert_eq!(alone.iter().collect::<Vec<_>>(), vec![f]);
+        }
     }
 
     #[test]
