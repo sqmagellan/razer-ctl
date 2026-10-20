@@ -23,7 +23,7 @@ use crate::types::{
     LogoMode, MaxFanSpeedMode, PerfMode,
 };
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 fn _send_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;
@@ -89,14 +89,11 @@ pub fn get_perf_mode(device: &impl HidTransport) -> Result<(PerfMode, FanMode)> 
             ))
         });
 
-        ensure!(
-            r1.is_ok() && r2.is_ok(),
-            "Failed to get performance mode and fan mode: r1 = {:?}, r2 = {:?}",
-            r1,
-            r2
-        );
-
-        Ok((r1?, r2?))
+        // Keep the cause's type (busy, transport, "not supported"): it decides whether a
+        // caller retries and which exit code the CLI gives. A formatted ensure! dropped it.
+        let r1 = r1.context("Failed to get performance mode and fan mode (zone 1)")?;
+        let r2 = r2.context("Failed to get performance mode and fan mode (zone 2)")?;
+        Ok((r1, r2))
     }
 
     let (r1, r2) = read_zones(device)?;
@@ -243,6 +240,52 @@ pub fn get_max_fan_speed_mode(device: &impl HidTransport) -> Result<MaxFanSpeedM
 
 pub fn set_fan_mode(device: &impl HidTransport, mode: FanMode) -> Result<()> {
     _set_perf_mode(device, get_perf_mode(device)?.0, mode)
+}
+
+/// How long [`confirm_perf_mode`] waits before its one re-read.
+const CONFIRM_REREAD_DELAY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(200)
+};
+
+/// Read the perf/fan mode back and fail with [`crate::error::PerfNotApplied`] unless it is
+/// `perf_mode`/`fan_mode`. A write's own answer proves nothing: `0x029F` answered `0x0d02`
+/// with success and its args echoed for writes it ignored (hours into Modern Standby,
+/// 2026-10-19). One re-read after a short pause covers a mode that lands a moment late.
+pub fn confirm_perf_mode(
+    device: &impl HidTransport,
+    perf_mode: PerfMode,
+    fan_mode: FanMode,
+) -> Result<()> {
+    let wanted = (perf_mode, fan_mode);
+    let mut read = get_perf_mode(device)?;
+    if read != wanted {
+        std::thread::sleep(CONFIRM_REREAD_DELAY);
+        read = get_perf_mode(device)?;
+    }
+    if read == wanted {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(crate::error::PerfNotApplied {
+            wanted,
+            read,
+        }))
+    }
+}
+
+/// [`set_perf_mode`], then [`confirm_perf_mode`]. A perf mode write also sets the fan to
+/// Auto.
+pub fn set_perf_mode_confirmed(device: &impl HidTransport, perf_mode: PerfMode) -> Result<()> {
+    set_perf_mode(device, perf_mode)?;
+    confirm_perf_mode(device, perf_mode, FanMode::Auto)
+}
+
+/// [`set_fan_mode`], then [`confirm_perf_mode`].
+pub fn set_fan_mode_confirmed(device: &impl HidTransport, mode: FanMode) -> Result<()> {
+    let perf_mode = get_perf_mode(device)?.0;
+    _set_perf_mode(device, perf_mode, mode)?;
+    confirm_perf_mode(device, perf_mode, mode)
 }
 
 pub fn custom_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Result<()> {
@@ -963,5 +1006,101 @@ mod tests {
             2,
             "agreement must not cost an extra round-trip"
         );
+    }
+
+    // ---- a mode write the EC acknowledges and ignores (0x029F, Modern Standby) ----
+
+    /// An EC whose perf/fan mode starts Balanced/Auto and takes `0x0d02` writes only if
+    /// `applies`. Every write is acknowledged with its args echoed either way.
+    fn ec_with_mode(applies: bool) -> MockTransport {
+        let mode = std::cell::Cell::new((PerfMode::Balanced as u8, FanMode::Auto as u8));
+        MockTransport::with_responder(move |req| match req.command() {
+            0x0d02 => {
+                if applies {
+                    mode.set((req.get_args()[2], req.get_args()[3]));
+                }
+                Packet::new(req.command(), req.get_args())
+            }
+            0x0d82 => {
+                let (perf, fan) = mode.get();
+                reply(&[0, req.get_args()[1], perf, fan])
+            }
+            _ => Packet::new(req.command(), req.get_args()),
+        })
+    }
+
+    #[test]
+    fn a_confirmed_perf_write_passes_when_the_ec_takes_it() {
+        set_perf_mode_confirmed(&ec_with_mode(true), PerfMode::Custom).unwrap();
+        set_fan_mode_confirmed(&ec_with_mode(true), FanMode::Manual).unwrap();
+    }
+
+    #[test]
+    fn a_confirmed_perf_write_reports_an_acknowledged_write_the_ec_ignored() {
+        let ignoring = ec_with_mode(false);
+        // The gap this closes: the plain write's own answer looks like success.
+        set_perf_mode(&ignoring, PerfMode::Custom).unwrap();
+
+        let err = set_perf_mode_confirmed(&ignoring, PerfMode::Custom).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<crate::error::PerfNotApplied>(),
+            Some(&crate::error::PerfNotApplied {
+                wanted: (PerfMode::Custom, FanMode::Auto),
+                read: (PerfMode::Balanced, FanMode::Auto),
+            })
+        );
+        assert!(crate::error::is_perf_not_applied(&err));
+        assert!(crate::error::is_retryable(&err));
+        assert_eq!(
+            crate::error::ExitCode::classify(&err),
+            crate::error::ExitCode::DeviceError
+        );
+        assert!(set_fan_mode_confirmed(&ignoring, FanMode::Manual).is_err());
+    }
+
+    #[test]
+    fn confirm_perf_mode_rereads_once_for_a_mode_that_lands_late() {
+        // The first two-zone read still shows Balanced; the re-read shows Custom.
+        let reads = std::cell::Cell::new(0);
+        let mock = MockTransport::with_responder(move |req| {
+            reads.set(reads.get() + 1);
+            let perf = if reads.get() <= 2 {
+                PerfMode::Balanced
+            } else {
+                PerfMode::Custom
+            };
+            reply(&[0, req.get_args()[1], perf as u8, FanMode::Auto as u8])
+        });
+        confirm_perf_mode(&mock, PerfMode::Custom, FanMode::Auto).unwrap();
+        assert_eq!(
+            mock.sent_count(),
+            4,
+            "one read, one re-read, two zones each"
+        );
+    }
+
+    #[test]
+    fn a_failed_perf_read_keeps_the_cause_that_decides_retry_and_exit_code() {
+        use crate::packet::ResponseError;
+        for (answer, retryable, code) in [
+            (
+                ResponseError::Busy,
+                true,
+                crate::error::ExitCode::DeviceError,
+            ),
+            (
+                ResponseError::NotSupported,
+                false,
+                crate::error::ExitCode::Unsupported,
+            ),
+        ] {
+            let mock = MockTransport::with_fallible_responder(move |req| match req.command() {
+                0x0d82 => Err(anyhow::Error::new(answer)),
+                _ => Ok(Packet::new(req.command(), req.get_args())),
+            });
+            let err = confirm_perf_mode(&mock, PerfMode::Balanced, FanMode::Auto).unwrap_err();
+            assert_eq!(crate::error::is_retryable(&err), retryable, "{answer:?}");
+            assert_eq!(crate::error::ExitCode::classify(&err), code, "{answer:?}");
+        }
     }
 }

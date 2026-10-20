@@ -319,7 +319,8 @@ fn main() -> Result<()> {
         // Retry a failed exchange without blocking the loop. After a few failures the
         // handle itself may be stale (the device re-enumerated across a resume), so reopen.
         if state.needs_sync && now >= next_sync_at {
-            if sync_failures >= 3 {
+            // Not for a mode the EC acknowledged and ignored: that handle works.
+            if sync_failures >= 3 && !state.perf_retry.pending {
                 match device::Device::detect() {
                     Ok(d) => {
                         // A re-enumerated device may have reset: re-apply intent, not just

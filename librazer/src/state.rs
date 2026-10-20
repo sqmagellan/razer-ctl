@@ -427,8 +427,10 @@ impl DeviceState {
             PerfMode::Hyperboost => {
                 command::set_perf_mode(device, crate::types::PerfMode::Hyperboost)
             }
+            // Confirmed: the boosts need Custom, and an EC that acknowledged the switch and
+            // ignored it would otherwise surface only as their "must be Custom" error.
             PerfMode::Custom(cpu_boost, gpu_boost) => {
-                command::set_perf_mode(device, crate::types::PerfMode::Custom)
+                command::set_perf_mode_confirmed(device, crate::types::PerfMode::Custom)
                     .and_then(|_| command::set_cpu_boost(device, cpu_boost))
                     .and_then(|_| command::set_gpu_boost(device, gpu_boost))
             }
@@ -584,6 +586,24 @@ impl DeviceState {
             }),
         )?;
         first
+    }
+
+    /// Check that the EC is in this state's perf and fan mode, after [`Self::apply`]. See
+    /// [`command::confirm_perf_mode`] for why an acknowledged write isn't enough.
+    pub fn confirm_modes(&self, device: &impl HidTransport) -> Result<()> {
+        let perf = match self.perf_mode {
+            PerfMode::Battery => crate::types::PerfMode::Battery,
+            PerfMode::Silent => crate::types::PerfMode::Silent,
+            PerfMode::Balanced => crate::types::PerfMode::Balanced,
+            PerfMode::Performance => crate::types::PerfMode::Performance,
+            PerfMode::Hyperboost => crate::types::PerfMode::Hyperboost,
+            PerfMode::Custom(..) => crate::types::PerfMode::Custom,
+        };
+        let fan = match self.fan_speed {
+            FanSpeed::Auto => FanMode::Auto,
+            FanSpeed::Manual(_) => FanMode::Manual,
+        };
+        command::confirm_perf_mode(device, perf, fan)
     }
 
     /// Write the keyboard backlight effect, if one is configured. Driven from stored intent:
@@ -1041,7 +1061,11 @@ fn note_unsupported(log: &crate::unsupported::UnsupportedLog, feature: Optional)
 /// stops at once, since every later write would spend its own retries on a failing bus.
 fn continue_after_rejection(first: &mut Result<()>, step: Result<()>) -> Result<()> {
     match step {
-        Err(e) if crate::error::is_retryable(&e) => Err(e),
+        // A mode the EC acknowledged and ignored is retryable, but the bus is fine: the
+        // lighting, brightness and charge limit still go out.
+        Err(e) if crate::error::is_retryable(&e) && !crate::error::is_perf_not_applied(&e) => {
+            Err(e)
+        }
         Err(e) => {
             if first.is_ok() {
                 *first = Err(e);
@@ -2872,5 +2896,73 @@ colors = ["#ffffff"]
             seen.lights_mode.logo_mode, reading.lights_mode.logo_mode,
             "logo was read"
         );
+    }
+
+    #[test]
+    fn confirm_modes_maps_every_perf_mode_and_the_fan_mode() {
+        for (perf, ec) in [
+            (PerfMode::Battery, crate::types::PerfMode::Battery),
+            (PerfMode::Silent, crate::types::PerfMode::Silent),
+            (PerfMode::Balanced, crate::types::PerfMode::Balanced),
+            (PerfMode::Performance, crate::types::PerfMode::Performance),
+            (PerfMode::Hyperboost, crate::types::PerfMode::Hyperboost),
+            (
+                PerfMode::Custom(CpuBoost::Low, GpuBoost::Low),
+                crate::types::PerfMode::Custom,
+            ),
+        ] {
+            let mock = crate::transport::MockTransport::with_responder(move |req| {
+                let mut p = crate::packet::Packet::new(req.command(), &[]);
+                p.set_args(&[0, req.get_args()[1], ec as u8, FanMode::Manual as u8]);
+                p
+            });
+            let state = DeviceState {
+                perf_mode: perf,
+                fan_speed: FanSpeed::Manual(3000),
+                ..DeviceState::default()
+            };
+            state.confirm_modes(&mock).unwrap();
+            let auto = DeviceState {
+                fan_speed: FanSpeed::Auto,
+                ..state
+            };
+            assert!(
+                auto.confirm_modes(&mock).is_err(),
+                "fan mode is checked too"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ignored_switch_to_custom_is_reported_as_not_applied() {
+        // The EC stays Balanced/Auto whatever is written, and acknowledges every write.
+        let mock = crate::transport::MockTransport::with_responder(|req| {
+            let mut p = crate::packet::Packet::new(req.command(), req.get_args());
+            if req.command() == 0x0d82 {
+                p.set_args(&[
+                    0,
+                    req.get_args()[1],
+                    crate::types::PerfMode::Balanced as u8,
+                    FanMode::Auto as u8,
+                ]);
+            }
+            p
+        });
+        let state = DeviceState {
+            perf_mode: PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            ..DeviceState::default()
+        };
+        let err = state.apply(&mock).unwrap_err();
+        assert!(crate::error::is_perf_not_applied(&err), "{err:?}");
+        assert!(
+            !mock.sent().iter().any(|(c, _)| *c == 0x0d07),
+            "no boost is written into a mode the EC never entered"
+        );
+        for (command, what) in [(0x0303, "brightness"), (0x0712, "charge limit")] {
+            assert!(
+                mock.sent().iter().any(|(c, _)| *c == command),
+                "{what} is still written"
+            );
+        }
     }
 }

@@ -344,8 +344,8 @@ impl Cli for feature::Fan {
                 impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
 
                 match matches.subcommand() {
-                    Some(("auto", _)) => command::set_fan_mode(device, FanMode::Auto),
-                    Some(("manual", _)) => command::set_fan_mode(device, FanMode::Manual),
+                    Some(("auto", _)) => command::set_fan_mode_confirmed(device, FanMode::Auto),
+                    Some(("manual", _)) => command::set_fan_mode_confirmed(device, FanMode::Manual),
                     _ => Ok(()),
                 }
             }
@@ -404,7 +404,7 @@ impl Cli for feature::Perf {
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
-                impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
+                impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode_confirmed)}
                 impl_unary_handle_cli! {<CpuBoost>(matches, device, "cpu", "CPU", command::set_cpu_boost)}
                 impl_unary_handle_cli! {<GpuBoost>(matches, device, "gpu", "GPU", command::set_gpu_boost)}
                 Ok(())
