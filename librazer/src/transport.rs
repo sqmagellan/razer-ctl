@@ -37,6 +37,13 @@ pub trait HidTransport {
     /// The optional settings this device has turned out not to have, when it is a model
     /// that learns them (see [`crate::unsupported`]). `None`, the default, keeps every
     /// "not supported" answer an error.
+    /// Wait between exchanges, e.g. before re-reading a value that may still be settling.
+    /// The real device sleeps; the simulator advances its own clock instead, so logic that
+    /// depends on time runs in tests without real delays.
+    fn pause(&self, duration: std::time::Duration) {
+        std::thread::sleep(duration);
+    }
+
     fn unsupported(&self) -> Option<&UnsupportedLog> {
         None
     }
@@ -109,6 +116,9 @@ impl HidTransport for MockTransport {
         self.sent.borrow_mut().push((packet.command(), args));
         response
     }
+
+    /// Mock time doesn't pass: tests that read twice shouldn't sleep.
+    fn pause(&self, _duration: std::time::Duration) {}
 
     fn unsupported(&self) -> Option<&UnsupportedLog> {
         self.unsupported.as_ref()

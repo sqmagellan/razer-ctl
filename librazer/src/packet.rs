@@ -181,6 +181,22 @@ impl Packet {
         self.status = status;
     }
 
+    /// The status byte: 0x02 success, 0x01 busy, 0x03 failure, 0x05 not supported.
+    pub fn status(&self) -> u8 {
+        self.status
+    }
+
+    /// The reply an EC would send to this request: same header and transaction, with
+    /// `args` and `status`. For transports that stand in for the EC (the simulator).
+    pub fn response(&self, args: &[u8], status: u8) -> Packet {
+        let mut p = Packet::new(self.command(), args);
+        p.id = self.id;
+        p.remaining_packets = self.remaining_packets;
+        p.data_size = self.data_size.max(args.len() as u8);
+        p.status = status;
+        p
+    }
+
     /// The 16-bit command (class<<8 | id) this packet carries -- the inverse of the
     /// `command` argument to `new`. Lets tests/inspection recover which command a
     /// packet represents without reaching into the private wire fields.

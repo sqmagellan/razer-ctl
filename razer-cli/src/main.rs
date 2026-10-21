@@ -470,6 +470,34 @@ fn enumerate(as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `probe`: read-only capture of every getter (see `librazer::probe`). The summary goes to
+/// stderr so stdout stays clean JSON.
+fn probe(out: Option<&String>) -> Result<()> {
+    let device = device::Device::detect()?.recording();
+    let (_, model_number) = device::Device::enumerate()?;
+    let catalogued =
+        librazer::matching::find_descriptor(&model_number, librazer::descriptor::SUPPORTED)
+            .is_some();
+    let machine = librazer::capture::Machine {
+        pid: device.info.pid,
+        model_number,
+        profile: device.info.name.to_string(),
+        catalogued,
+    };
+    let tool = concat!("razer-cli ", env!("CARGO_PKG_VERSION"));
+    let capture = librazer::probe::run(&device, machine, tool);
+    eprint!("{}", librazer::probe::summary(&capture));
+    let json = serde_json::to_string_pretty(&capture)? + "\n";
+    match out {
+        Some(path) => {
+            std::fs::write(path, json)?;
+            eprintln!("wrote {path}");
+        }
+        None => print!("{json}"),
+    }
+    Ok(())
+}
+
 /// Machine-readable device state, one JSON object per line-free block. Kept as a flat,
 /// stable shape (no nested enum tuples) so downstream consumers -- a Home Assistant
 /// command-line sensor, a status line -- can parse it without knowing Rust's serde
@@ -795,6 +823,11 @@ fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
                         .action(clap::ArgAction::SetTrue),
                 ),
         )
+        .subcommand(
+            clap::Command::new("probe")
+                .about("Read every setting the tools use and record each answer from the EC, for a device-support issue (read-only)")
+                .arg(arg!(-o --out <FILE> "Write the JSON to FILE instead of stdout").required(false)),
+        )
         .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"))
 }
 
@@ -825,6 +858,9 @@ fn real_main() -> Result<()> {
         }
         Some(("taskkill", _)) => {
             taskkill()?;
+        }
+        Some(("probe", submatches)) => {
+            probe(submatches.get_one::<String>("out"))?;
         }
         Some(("auto", submatches)) => {
             // Set above when the first argument is `auto`; the expect documents that
@@ -915,6 +951,8 @@ mod tests {
             &["auto", "battery-care", "set", "80"],
             &["manual", "--pid", "0x029f", "json"],
             &["enumerate", "--json"],
+            &["probe"],
+            &["probe", "--out", "capture.json"],
             &["auto", "kbd-lighting", "color", "#ff0000"],
             &[
                 "auto",

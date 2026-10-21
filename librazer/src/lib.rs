@@ -4,6 +4,7 @@
 // The command protocol is pure logic over the `HidTransport` seam, so it builds
 // (and unit-tests, via a mock transport) on any host. Only `device` -- the real
 // hidapi/winreg-backed transport -- is Windows/Linux-only.
+pub mod capture;
 pub mod command;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod device;
@@ -13,7 +14,12 @@ pub mod feature;
 pub mod keyboard;
 pub mod matching;
 pub mod observe;
+pub mod probe;
 pub mod process_guard;
+pub mod retry;
+// The simulated EC: for tests, and for `--features sim` builds of the binaries.
+#[cfg(any(test, feature = "sim"))]
+pub mod sim;
 pub mod state;
 pub mod transport;
 pub mod types;

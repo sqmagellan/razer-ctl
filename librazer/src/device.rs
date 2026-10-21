@@ -1,6 +1,8 @@
+use crate::capture::{Exchange, Outcome, Recorder, Recording};
 use crate::descriptor::{Descriptor, SUPPORTED};
 use crate::error::{DetectError, TransportError};
 use crate::packet::{Packet, ResponseError};
+use crate::retry::{self, Decision, MAX_ATTEMPTS, RETRY_BACKOFF};
 use crate::transport::HidTransport;
 use crate::unsupported::UnsupportedLog;
 
@@ -12,6 +14,8 @@ pub struct Device {
     pub info: Descriptor,
     /// Set for a model not in the supported list: see [`crate::unsupported`].
     unsupported: Option<UnsupportedLog>,
+    /// Set by [`Device::recording`]: every attempt is logged for `razer-cli probe`.
+    recorder: Option<Recorder>,
 }
 
 // Read the model id and clip to conform with https://mysupport.razer.com/app/answers/detail/a_id/5481
@@ -105,6 +109,7 @@ impl Device {
                     device,
                     info: descriptor.clone(),
                     unsupported: None,
+                    recorder: None,
                 });
             }
         }
@@ -121,6 +126,12 @@ impl Device {
         self.exchange(report, true)
     }
 
+    /// Log every attempt from now on, for `razer-cli probe`; see [`crate::capture`].
+    pub fn recording(mut self) -> Self {
+        self.recorder = Some(Recorder::default());
+        self
+    }
+
     /// One exchange that does NOT repeat a command the EC answered with `Failure`.
     ///
     /// For caller-supplied raw commands (`razer-cli ... cmd`): a Failure there may mean the
@@ -135,20 +146,22 @@ impl Device {
         // extra byte for report id
         let mut response_buf: Vec<u8> = vec![0x00; 1 + std::mem::size_of::<Packet>()];
 
-        const MAX_RETRIES: usize = 5;
-        // A busy EC (status 0x01) is asking us to come back shortly, so retry fast;
-        // anything else that's still worth retrying gets the original slow backoff.
-        const BUSY_BACKOFF: time::Duration = time::Duration::from_millis(20);
-        const RETRY_BACKOFF: time::Duration = time::Duration::from_millis(500);
-
         let request: Vec<u8> = [0_u8; 1] // report id
             .iter()
             .copied()
             .chain(Into::<Vec<u8>>::into(&report))
             .collect();
 
-        for attempt in 0..MAX_RETRIES {
-            let last = attempt == MAX_RETRIES - 1;
+        // Each attempt goes into the recording, if one is on, before anything decides
+        // what to do with it.
+        let note = |attempt: usize, error: String| {
+            if let Some(rec) = &self.recorder {
+                rec.record(&report, attempt, Outcome::TransportError { error });
+            }
+        };
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let last = attempt == MAX_ATTEMPTS - 1;
             thread::sleep(time::Duration::from_micros(1000));
 
             // An OS-level failure (the HID stack busy right after resume, a handle racing
@@ -159,6 +172,7 @@ impl Device {
             // For a single-shot send this is final too: a failed send does not prove the
             // EC never saw the report.
             if let Err(e) = self.device.send_feature_report(&request) {
+                note(attempt, format!("send_feature_report: {e}"));
                 if last || !retry_failure {
                     return Err(anyhow::Error::new(TransportError(format!(
                         "send_feature_report: {e}"
@@ -178,6 +192,7 @@ impl Device {
             let response_size = match self.device.get_feature_report(&mut response_buf) {
                 Ok(n) => n,
                 Err(e) => {
+                    note(attempt, format!("get_feature_report: {e}"));
                     if final_read {
                         return Err(anyhow::Error::new(TransportError(format!(
                             "get_feature_report: {e}"
@@ -188,6 +203,10 @@ impl Device {
                 }
             };
             if response_buf.len() != response_size {
+                note(
+                    attempt,
+                    format!("response size {response_size} != {}", response_buf.len()),
+                );
                 if final_read {
                     return Err(anyhow::Error::new(TransportError(format!(
                         "response size {response_size} != {}",
@@ -200,6 +219,9 @@ impl Device {
 
             // skip report id byte
             let response = <&[u8] as TryInto<Packet>>::try_into(&response_buf[1..])?;
+            if let Some(rec) = &self.recorder {
+                rec.record_response(&report, &response, attempt, None);
+            }
 
             let err = match response.classify_response(&report) {
                 Ok(()) => return Ok(response),
@@ -219,28 +241,19 @@ impl Device {
                 }
             };
 
-            // NotSupported is a definitive answer from the firmware -- the command will
-            // never succeed on this device, so retrying just burns ~2.5s before failing.
+            // The policy (shared with the simulator) is in `retry::after_rejection`.
             // Propagate the ERROR VALUE, not its Display string: callers (the CLI's exit
             // codes, `feature` probing) need to distinguish "this firmware lacks the
             // command" from "the bus is out of step", and `anyhow!("{}", err)` erased that.
-            // Busy means the EC did not action it, so even a single-shot send may retry that;
-            // any other answer to a single-shot send is final.
-            if err == ResponseError::NotSupported || (!retry_failure && !err.is_busy()) {
-                return Err(with_header(err));
+            match retry::after_rejection(err, retry_failure, attempt) {
+                Decision::Fail => return Err(with_header(err)),
+                Decision::Exhausted => {
+                    return Err(with_header(err).context(format!(
+                        "failed to match report after {MAX_ATTEMPTS} attempts"
+                    )))
+                }
+                Decision::RetryAfter(backoff) => thread::sleep(backoff),
             }
-
-            if last {
-                return Err(with_header(err).context(format!(
-                    "failed to match report after {MAX_RETRIES} attempts"
-                )));
-            }
-
-            thread::sleep(if err.is_busy() {
-                BUSY_BACKOFF
-            } else {
-                RETRY_BACKOFF
-            });
         }
 
         Err(anyhow!("Failed to send feature report"))
@@ -332,5 +345,14 @@ impl HidTransport for Device {
 
     fn unsupported(&self) -> Option<&UnsupportedLog> {
         self.unsupported.as_ref()
+    }
+}
+
+impl Recording for Device {
+    fn drain_exchanges(&self) -> Vec<Exchange> {
+        self.recorder
+            .as_ref()
+            .map(Recorder::drain)
+            .unwrap_or_default()
     }
 }

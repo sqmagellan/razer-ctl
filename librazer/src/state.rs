@@ -1222,7 +1222,7 @@ pub fn sample_fan_rpm(device: &impl HidTransport, max_reads: usize) -> Result<(F
     let mut last = get_fan_rpm(device)?;
     for i in 0..max_reads.max(1) {
         if i > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            device.pause(std::time::Duration::from_millis(150));
             last = get_fan_rpm(device)?;
         }
         if let Some(trusted) = filter.accept(last) {

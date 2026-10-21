@@ -473,7 +473,7 @@ pub fn get_battery_care(device: &impl HidTransport) -> Result<BatteryCare> {
     if !first.is_disabled() {
         return Ok(first);
     }
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    device.pause(std::time::Duration::from_millis(50));
     match read() {
         Ok((_, second_byte, _)) if second_byte == first_byte => Ok(first),
         Ok((second, second_byte, second_header)) => {

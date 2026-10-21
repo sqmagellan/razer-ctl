@@ -3,6 +3,10 @@ name = "librazer"
 version = "0.10.0"
 edition = "2021"
 
+[features]
+# The simulated EC (`librazer::sim`) outside tests. Never in a release build.
+sim = []
+
 [dependencies]
 anyhow = "1.0.80"
 clap = { version = "4.5.1", features = ["derive"] }
