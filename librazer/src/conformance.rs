@@ -355,3 +355,70 @@ fn custom_manual_runs_at_least_3800() {
         4500
     );
 }
+
+/// The tray and CLI take a perf mode's fan floor from `unsupported::MANUAL_FLOOR_BY_PERF`,
+/// the simulator from each EC model. Both record the same hardware runs, so they agree on
+/// every fixture, and every row in the table has a fixture behind it.
+#[test]
+fn the_manual_floor_table_matches_the_ec_models() {
+    use crate::types::PerfMode as Wire;
+    use crate::unsupported::{manual_fan_floor, MANUAL_FLOOR_BY_PERF};
+    use strum::IntoEnumIterator;
+
+    let models: Vec<Model> = FIXTURES.iter().map(|(_, json)| model(json)).collect();
+    for m in &models {
+        for perf in Wire::iter() {
+            assert_eq!(
+                manual_fan_floor(m.pid, perf),
+                m.fan.manual_floor_by_mode.get(&(perf as u8)).copied(),
+                "{} in {perf:?}",
+                m.name
+            );
+        }
+    }
+    for (pid, perf, rpm) in MANUAL_FLOOR_BY_PERF {
+        assert!(
+            models
+                .iter()
+                .any(|m| m.pid == *pid
+                    && m.fan.manual_floor_by_mode.get(&(*perf as u8)) == Some(rpm)),
+            "{pid:#06x} {perf:?} {rpm}: no EC model records this floor"
+        );
+    }
+}
+
+/// What the tray and CLI say the fans run at is what the simulated Blade 16 (2023) fans do:
+/// the floor below it in Custom, the set point above it, and the set point in Balanced.
+#[test]
+fn the_predicted_manual_speed_is_what_the_fans_settle_at() {
+    use crate::types::FanZone;
+    use crate::unsupported::manual_fan_runs_at;
+    let sim = blade16();
+    let pid = model(FIXTURES[0].1).pid;
+    for (perf, rpm) in [
+        (CUSTOM, 3000),
+        (CUSTOM, 2000),
+        (CUSTOM, 3800),
+        (CUSTOM, 4500),
+        (PerfMode::Balanced, 3000),
+        (PerfMode::Balanced, 2000),
+    ] {
+        profile(perf, FanSpeed::Manual(rpm), false)
+            .apply(&sim)
+            .unwrap();
+        sim.advance(std::time::Duration::from_secs(180));
+        let predicted = manual_fan_runs_at(pid, perf.wire(), rpm).unwrap_or(rpm);
+        for zone in [FanZone::Zone1, FanZone::Zone2] {
+            assert_eq!(
+                crate::command::get_fan_rpm(&sim, zone).unwrap(),
+                rpm,
+                "{perf:?} {rpm}: the set point reads back as written"
+            );
+            assert_eq!(
+                crate::command::get_fan_actual_rpm(&sim, zone).unwrap(),
+                predicted,
+                "{perf:?} {rpm}"
+            );
+        }
+    }
+}

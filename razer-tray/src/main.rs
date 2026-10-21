@@ -254,6 +254,7 @@ fn main() -> Result<()> {
     state.warning = platform::detect_synapse();
     state.refresh_rates = platform::refresh_rates();
     state.custom_colors = librazer::keyboard::supports_custom_frame(device.info().pid);
+    state.pid = device.info().pid;
     state.rebuild_menu(Some(&tray_icon));
     if first_run {
         // confy used to create the file on first run; people look for it to add Actions.

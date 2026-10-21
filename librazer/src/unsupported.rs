@@ -17,8 +17,15 @@
 //! A few ECs accept a command and ignore it, so they never answer 0x05 and nothing is
 //! learned. [`KNOWN_LACKING`] lists those per PID from user reports; such a setting starts
 //! out recorded as lacking.
+//!
+//! An EC can also ignore part of a manual fan set point: in some perf modes it runs the
+//! fans faster than a low set point asks, while the set point still reads back as written.
+//! [`MANUAL_FLOOR_BY_PERF`] lists those per PID from hardware runs, so the tray and CLI can
+//! say what the fans run at instead of showing a set point they don't follow.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+
+use crate::types::PerfMode;
 
 /// A setting the tray and CLI can work without.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +98,45 @@ pub fn known_lacking(pid: u16) -> Unsupported {
         .fold(Unsupported::default(), |set, f| set.with(*f))
 }
 
+/// Perf modes in which a model's EC runs a manual fan at no less than a given speed, by
+/// PID, as (PID, perf mode, RPM). Below that speed the EC accepts the set point and reads it
+/// back unchanged, but the fans run at the floor. Above it the set point is followed.
+///
+/// Measured rows only, each backed by an EC model under `librazer/tests/ec/` with the same
+/// floor (a conformance test checks they agree). A model or perf mode that isn't listed is
+/// unknown, not floor-free: never copy a row to a similar chassis.
+pub const MANUAL_FLOOR_BY_PERF: &[(u16, PerfMode, u16)] = &[
+    // Blade 16 (2023), hw-test runs on 2026-10-20 (20:26, 20:41 and 20:51): in Custom with
+    // the fan in Manual the fans run at the larger of the set point and 3800, with every
+    // boost pair tried and with or without a Max Fan toggle first. A 3000 set point reads
+    // back as 3000 while the fans hold 3800/3800; 4500 is followed. Balanced honors 2000 to
+    // 5000. Hyperboost lifts the fans too, but along its own curve, so it has no fixed row.
+    // Measured on an RZ09-0483U; the Black edition (RZ09-0483T) shares the PID and the row.
+    (0x029f, PerfMode::Custom, 3800),
+];
+
+/// The perf modes [`MANUAL_FLOOR_BY_PERF`] lists for `pid`, with their floors.
+pub fn manual_fan_floors(pid: u16) -> impl Iterator<Item = (PerfMode, u16)> {
+    MANUAL_FLOOR_BY_PERF
+        .iter()
+        .filter(move |(p, _, _)| *p == pid)
+        .map(|(_, perf, rpm)| (*perf, *rpm))
+}
+
+/// The lowest speed a manual fan runs at in `perf` on the model with `pid`, if
+/// [`MANUAL_FLOOR_BY_PERF`] lists one. `None` leaves only the chassis range.
+pub fn manual_fan_floor(pid: u16, perf: PerfMode) -> Option<u16> {
+    manual_fan_floors(pid)
+        .find(|(mode, _)| *mode == perf)
+        .map(|(_, rpm)| rpm)
+}
+
+/// What the fans run at instead of a manual set point of `rpm` in `perf`: the listed floor
+/// when it is above `rpm`, else `None` (the set point is followed, as far as is known).
+pub fn manual_fan_runs_at(pid: u16, perf: PerfMode, rpm: u16) -> Option<u16> {
+    manual_fan_floor(pid, perf).filter(|floor| *floor > rpm)
+}
+
 /// The record a device keeps while it runs. Atomic so a `Device` stays `Sync`.
 #[derive(Debug, Default)]
 pub struct UnsupportedLog(AtomicU8);
@@ -135,6 +181,54 @@ mod tests {
         // Already recorded, so a later 0x05 isn't logged as news.
         assert!(!log.mark(Optional::Logo));
         assert!(log.mark(Optional::BatteryCare));
+    }
+
+    #[test]
+    fn the_blade_16_2023_runs_a_manual_fan_at_3800_or_more_in_custom_only() {
+        assert_eq!(manual_fan_floor(0x029f, PerfMode::Custom), Some(3800));
+        assert_eq!(
+            manual_fan_floors(0x029f).collect::<Vec<_>>(),
+            vec![(PerfMode::Custom, 3800)]
+        );
+        for perf in [
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Silent,
+            PerfMode::Battery,
+            PerfMode::Hyperboost,
+        ] {
+            assert_eq!(manual_fan_floor(0x029f, perf), None, "{perf:?}");
+        }
+        // Below the floor the fans run at it; at or above it they follow the set point.
+        assert_eq!(
+            manual_fan_runs_at(0x029f, PerfMode::Custom, 3000),
+            Some(3800)
+        );
+        assert_eq!(
+            manual_fan_runs_at(0x029f, PerfMode::Custom, 3700),
+            Some(3800)
+        );
+        assert_eq!(manual_fan_runs_at(0x029f, PerfMode::Custom, 3800), None);
+        assert_eq!(manual_fan_runs_at(0x029f, PerfMode::Custom, 4500), None);
+        assert_eq!(manual_fan_runs_at(0x029f, PerfMode::Balanced, 2000), None);
+    }
+
+    #[test]
+    fn no_other_model_has_a_perf_mode_fan_floor() {
+        // Rows are measured, never carried over to a similar chassis.
+        for pid in [0x029d, 0x02a0, 0x02b7, 0x023b, 0x028b, 0xffff] {
+            assert_eq!(manual_fan_floors(pid).count(), 0, "{pid:#06x}");
+            assert_eq!(manual_fan_runs_at(pid, PerfMode::Custom, 2000), None);
+        }
+        // One row per (PID, perf mode), so a lookup can't depend on table order.
+        for (i, (pid, perf, _)) in MANUAL_FLOOR_BY_PERF.iter().enumerate() {
+            assert!(
+                !MANUAL_FLOOR_BY_PERF[..i]
+                    .iter()
+                    .any(|(p, m, _)| p == pid && m == perf),
+                "{pid:#06x} {perf:?} listed twice"
+            );
+        }
     }
 
     #[test]

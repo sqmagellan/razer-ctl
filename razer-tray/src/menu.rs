@@ -23,6 +23,9 @@ pub struct MenuOptions<'a> {
     pub enforce: bool,
     /// Usable manual-fan RPM bounds for this chassis.
     pub fan_rpm_range: (u16, u16),
+    /// This laptop's USB PID, for the fan floors measured per perf mode
+    /// (`librazer::unsupported::MANUAL_FLOOR_BY_PERF`). 0 until the device is known.
+    pub pid: u16,
     /// Shown as a disabled item at the top (e.g. Synapse is running).
     pub warning: Option<&'a str>,
     /// Why the tray is not applying its config (a file that doesn't parse or can't be read),
@@ -61,6 +64,7 @@ pub fn build(
     let MenuOptions {
         enforce,
         fan_rpm_range,
+        pid,
         warning,
         config_problem,
         offer_reset,
@@ -249,16 +253,8 @@ pub fn build(
                 ..*dstate
             },
         );
-        // Label the extremes so it's clear these are the chassis's real limits
-        // (below min the EC floors the fan, above max it clamps). Range is per-device
-        // (Descriptor::fan_rpm_range), so this stays honest on every supported chassis.
-        let label = if rpm == fan_min {
-            format!("{} RPM (min)", rpm)
-        } else if rpm == fan_max {
-            format!("{} RPM (max)", rpm)
-        } else {
-            format!("{} RPM", rpm)
-        };
+        let runs_at = librazer::unsupported::manual_fan_runs_at(pid, dstate.perf_mode.wire(), rpm);
+        let label = fan_preset_label(rpm, fan_rpm_range, runs_at);
         CheckMenuItem::with_id(
             event_id,
             label,
@@ -638,5 +634,61 @@ fn about() -> tray_icon::menu::AboutMetadata {
         )),
         comments: Some(env!("CARGO_PKG_DESCRIPTION").into()),
         ..Default::default()
+    }
+}
+
+/// A manual fan preset's label. The chassis range's ends are marked (below min the EC holds
+/// the fan at min, above max it clamps). A preset the current perf mode runs faster, as
+/// Custom does below 3800 on the Blade 16 (2023), says what the fans run at instead: the EC
+/// keeps the set point and reads it back, so the bare number would be wrong.
+///
+/// Labeled, not clamped or hidden: the pick is stored in the power source's profile and
+/// outlives the perf mode (the left-click cycle, an Action, the next Balanced), where the
+/// set point is followed again.
+fn fan_preset_label(rpm: u16, (min, max): (u16, u16), runs_at: Option<u16>) -> String {
+    match runs_at {
+        Some(floor) => format!("{rpm} RPM (runs at {floor})"),
+        None if rpm == min => format!("{rpm} RPM (min)"),
+        None if rpm == max => format!("{rpm} RPM (max)"),
+        None => format!("{rpm} RPM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librazer::types::{CpuBoost, GpuBoost};
+    use librazer::unsupported::manual_fan_runs_at;
+
+    const BLADE16: u16 = 0x029f;
+    const RANGE: (u16, u16) = (2000, 5000);
+    const CUSTOM: PerfMode = PerfMode::Custom(CpuBoost::Medium, GpuBoost::High);
+
+    fn label(pid: u16, perf: PerfMode, rpm: u16) -> String {
+        fan_preset_label(rpm, RANGE, manual_fan_runs_at(pid, perf.wire(), rpm))
+    }
+
+    #[test]
+    fn presets_below_the_custom_floor_say_what_they_run_at() {
+        assert_eq!(label(BLADE16, CUSTOM, 2000), "2000 RPM (runs at 3800)");
+        assert_eq!(label(BLADE16, CUSTOM, 3600), "3600 RPM (runs at 3800)");
+        assert_eq!(label(BLADE16, CUSTOM, 4000), "4000 RPM");
+        assert_eq!(label(BLADE16, CUSTOM, 5000), "5000 RPM (max)");
+        // Every boost pair: the runs found the same floor whatever the boosts.
+        let other = PerfMode::Custom(CpuBoost::Low, GpuBoost::Low);
+        assert_eq!(label(BLADE16, other, 2400), "2400 RPM (runs at 3800)");
+    }
+
+    #[test]
+    fn presets_outside_custom_or_on_other_models_are_unchanged() {
+        for perf in [PerfMode::Balanced, PerfMode::Silent, PerfMode::Hyperboost] {
+            assert_eq!(label(BLADE16, perf, 2000), "2000 RPM (min)", "{perf:?}");
+            assert_eq!(label(BLADE16, perf, 2400), "2400 RPM", "{perf:?}");
+        }
+        // Unknown until the device is detected, and any model without a measured floor.
+        for pid in [0, 0x02a0, 0x02b7] {
+            assert_eq!(label(pid, CUSTOM, 2000), "2000 RPM (min)", "{pid:#06x}");
+            assert_eq!(label(pid, CUSTOM, 3000), "3000 RPM", "{pid:#06x}");
+        }
     }
 }

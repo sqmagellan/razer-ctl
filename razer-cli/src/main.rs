@@ -315,6 +315,29 @@ impl Cli for CustomCommand {
     }
 }
 
+/// The line `fan rpm` and `info` print when this laptop runs a manual fan faster than `rpm`
+/// in `perf_mode` (measured per model: `librazer::unsupported::MANUAL_FLOOR_BY_PERF`). The
+/// set point still reads back as written, so without this line the CLI would show only a
+/// speed the fans don't run at.
+fn fan_floor_note(pid: u16, perf_mode: PerfMode, rpm: u16) -> Option<String> {
+    let floor = librazer::unsupported::manual_fan_runs_at(pid, perf_mode, rpm)?;
+    Some(format!(
+        "In {perf_mode:?} this laptop runs a manual fan at {floor} RPM or more; a {rpm} set \
+         point runs at {floor}."
+    ))
+}
+
+/// [`fan_floor_note`] after `fan rpm` wrote `rpm`. The perf mode is read only on a laptop
+/// with a listed floor above `rpm`, and a failed read prints nothing: the write succeeded.
+fn fan_floor_note_after_set(device: &Laptop, rpm: u16) -> Option<String> {
+    let pid = device.info.pid;
+    if !librazer::unsupported::manual_fan_floors(pid).any(|(_, floor)| floor > rpm) {
+        return None;
+    }
+    let (perf_mode, _) = command::get_perf_mode(device).ok()?;
+    fan_floor_note(pid, perf_mode, rpm)
+}
+
 impl Cli for feature::Fan {
     fn cmd(&self) -> Option<Command> {
         Some(
@@ -344,6 +367,13 @@ impl Cli for feature::Fan {
                     );
                 }
                 impl_unary_handle_with_arg_cli! {<u16>(matches, device, "rpm", "RPM", false, command::set_fan_rpm)}
+                if let Some(("rpm", m)) = matches.subcommand() {
+                    if let Some(note) =
+                        fan_floor_note_after_set(device, *m.get_one::<u16>("RPM").unwrap())
+                    {
+                        println!("{note}");
+                    }
+                }
                 impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
 
                 match matches.subcommand() {
@@ -357,13 +387,19 @@ impl Cli for feature::Fan {
                     Ok((_, fan_mode @ FanMode::Auto)) => {
                         println!("Fan: {:?}", fan_mode)
                     }
-                    Ok((_, fan_mode @ FanMode::Manual)) => {
+                    Ok((perf_mode, fan_mode @ FanMode::Manual)) => {
                         // The set-point register reads back whatever was written, even a
                         // value the EC is ignoring, so it is labeled as a set point, never
                         // as the speed.
                         match command::get_fan_rpm(device, FanZone::Zone1) {
                             Ok(0) => println!("Fan: {:?} (no set point yet)", fan_mode),
-                            Ok(rpm) => println!("Fan: {:?}, set point {} RPM", fan_mode, rpm),
+                            Ok(rpm) => {
+                                println!("Fan: {:?}, set point {} RPM", fan_mode, rpm);
+                                if let Some(note) = fan_floor_note(device.info.pid, perf_mode, rpm)
+                                {
+                                    println!("{note}");
+                                }
+                            }
                             Err(e) => println!("Fan: {:?}, set point unreadable: {}", fan_mode, e),
                         }
                     }
@@ -674,6 +710,12 @@ struct JsonStatus {
     gpu_boost: Option<String>,
     fan_mode: Option<String>,
     fan_setpoint_rpm: Option<u16>,
+    /// In Manual, the lowest speed this laptop runs the fans at in the current perf mode,
+    /// where that was measured above the chassis minimum (Blade 16 2023: 3800 in Custom).
+    /// The fans run at the larger of this and `fan_setpoint_rpm`. Left out otherwise, so
+    /// the output is unchanged wherever no such floor is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fan_floor_rpm: Option<u16>,
     fan_actual_rpm: Option<[u16; 2]>,
     /// False when no read could be confirmed: a lone-zero zone never cleared, or a stop
     /// was seen only once. One raw read is wrong about 3 times in 10 on this hardware.
@@ -751,6 +793,12 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         )?,
         _ => None,
     };
+    let fan_floor_rpm = match modes {
+        Some((perf, FanMode::Manual)) => {
+            librazer::unsupported::manual_fan_floor(device.info.pid, perf)
+        }
+        _ => None,
+    };
     let fan = json_read(
         &mut unsupported,
         "fan_actual_rpm",
@@ -793,6 +841,7 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         gpu_boost: gpu_boost.map(|b| format!("{b:?}")),
         fan_mode: modes.map(|(_, fan)| format!("{fan:?}")),
         fan_setpoint_rpm,
+        fan_floor_rpm,
         fan_actual_rpm: fan.map(|(rpm, _)| [rpm.fan1, rpm.fan2]),
         fan_actual_trusted: fan.map(|(_, trusted)| trusted),
         keyboard_brightness_percent: brightness.map(brightness_to_percent),
@@ -1175,6 +1224,31 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_note_names_the_floor_only_where_it_lifts_the_set_point() {
+        assert_eq!(
+            fan_floor_note(0x029f, PerfMode::Custom, 3000).as_deref(),
+            Some("In Custom this laptop runs a manual fan at 3800 RPM or more; a 3000 set point runs at 3800.")
+        );
+        assert!(fan_floor_note(0x029f, PerfMode::Custom, 2000)
+            .unwrap()
+            .ends_with("a 2000 set point runs at 3800."));
+        for (pid, perf, rpm) in [
+            (0x029f, PerfMode::Custom, 3800),
+            (0x029f, PerfMode::Custom, 4500),
+            (0x029f, PerfMode::Balanced, 3000),
+            (0x029f, PerfMode::Hyperboost, 2000),
+            (0x02a0, PerfMode::Custom, 3000),
+            (0x0eee, PerfMode::Custom, 2000),
+        ] {
+            assert_eq!(
+                fan_floor_note(pid, perf, rpm),
+                None,
+                "{pid:#06x} {perf:?} {rpm}"
+            );
+        }
+    }
+
+    #[test]
     fn fan_rpm_below_every_known_floor_is_a_usage_error() {
         assert!(!parses(&["auto", "fan", "rpm", "1800"]));
         assert!(parses(&["auto", "fan", "rpm", "3000"]));
@@ -1392,6 +1466,100 @@ mod tests {
         assert!(laptop.drain_exchanges().is_empty());
         auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
         assert_eq!(json_status(&laptop).unwrap().fan_setpoint_rpm, Some(3000));
+    }
+
+    /// The Blade 16 (2023) EC model from the hardware runs, as the conformance suite uses it.
+    fn blade16_2023() -> Laptop {
+        Simulation::new(
+            Model::from_json(include_str!(
+                "../../librazer/tests/ec/0x029f-blade16-2023.json"
+            ))
+            .unwrap(),
+        )
+        .detect()
+    }
+
+    /// 2026-10-20 hardware runs: in Custom/Manual a 3000 set point reads back as 3000 while
+    /// the fans hold 3800. `fan rpm` says so, `json` carries the floor, and the speed the
+    /// note names is the one the fans settle at.
+    #[test]
+    fn a_set_point_below_the_custom_floor_gets_a_note_on_the_blade_16_2023() {
+        let laptop = blade16_2023();
+        auto(&laptop, &["perf", "mode", "custom"]).unwrap();
+        auto(&laptop, &["fan", "manual"]).unwrap();
+        auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
+        let note = fan_floor_note_after_set(&laptop, 3000).unwrap();
+        assert!(note.contains("3800 RPM or more"), "{note}");
+
+        laptop.pause(std::time::Duration::from_secs(180));
+        let status = json_status(&laptop).unwrap();
+        assert_eq!(status.fan_setpoint_rpm, Some(3000));
+        assert_eq!(status.fan_floor_rpm, Some(3800));
+        assert_eq!(status.fan_actual_rpm, Some([3800, 3800]));
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["fan_floor_rpm"], json!(3800));
+
+        // At or above the floor the set point is followed and nothing is printed.
+        auto(&laptop, &["fan", "rpm", "4500"]).unwrap();
+        assert_eq!(fan_floor_note_after_set(&laptop, 4500), None);
+        laptop.pause(std::time::Duration::from_secs(180));
+        let status = json_status(&laptop).unwrap();
+        assert_eq!(status.fan_actual_rpm, Some([4500, 4500]));
+        assert_eq!(status.fan_floor_rpm, Some(3800), "still Custom/Manual");
+        assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
+    }
+
+    #[test]
+    fn balanced_and_auto_have_no_floor_note_or_field() {
+        let laptop = blade16_2023();
+        auto(&laptop, &["fan", "manual"]).unwrap();
+        auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
+        assert_eq!(fan_floor_note_after_set(&laptop, 3000), None);
+        let value = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
+        assert_eq!(value["perf_mode"], json!("Balanced"));
+        assert!(value.get("fan_floor_rpm").is_none(), "{value}");
+
+        // Custom with the fan on Auto: no manual speed to lift, so no field.
+        auto(&laptop, &["perf", "mode", "custom"]).unwrap();
+        let value = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
+        assert_eq!(value["fan_mode"], json!("Auto"));
+        assert!(value.get("fan_floor_rpm").is_none(), "{value}");
+        assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
+    }
+
+    /// Only a laptop with a listed floor above the set point pays for the perf-mode read.
+    #[test]
+    fn fan_rpm_reads_the_perf_mode_only_when_a_floor_could_apply() {
+        for (pid, rpm, reads) in [
+            (0x029f, 3000, true),
+            (0x029f, 4500, false),
+            (0x0eee, 3500, false),
+        ] {
+            let laptop = Simulation::new(model(&model_json(pid))).detect();
+            auto(&laptop, &["fan", "manual"]).unwrap();
+            laptop.drain_exchanges();
+            auto(&laptop, &["fan", "rpm", &rpm.to_string()]).unwrap();
+            let sent: Vec<u16> = laptop.drain_exchanges().iter().map(|e| e.command).collect();
+            assert_eq!(
+                sent.contains(&0x0d82),
+                reads,
+                "{pid:#06x} at {rpm}: {sent:x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_info_runs_with_the_floor_note_in_custom() {
+        let laptop = blade16_2023();
+        for args in [
+            &["perf", "mode", "custom"][..],
+            &["fan", "manual"],
+            &["fan", "rpm", "3000"],
+            &["info"],
+        ] {
+            auto(&laptop, args).unwrap();
+        }
+        assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
     }
 
     #[test]

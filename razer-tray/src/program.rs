@@ -137,6 +137,10 @@ pub struct ProgramState {
     /// Usable manual-fan RPM bounds for this chassis (from `Descriptor::fan_rpm_range`),
     /// captured once at startup so menu rebuilds don't need the `Device` on hand.
     pub fan_rpm_range: (u16, u16),
+    /// This laptop's USB PID, for the fan floors measured per perf mode
+    /// (`librazer::unsupported::MANUAL_FLOOR_BY_PERF`); set by `main` once the device is
+    /// known, like `custom_colors`. 0 matches no row.
+    pub pid: u16,
     /// The last device exchange failed; the event loop retries [`Self::sync`] with backoff
     /// instead of blocking inside the loop.
     pub needs_sync: bool,
@@ -189,6 +193,7 @@ impl ProgramState {
             &menu::MenuOptions {
                 enforce: config.enforce,
                 fan_rpm_range,
+                pid: 0,
                 warning: None,
                 config_problem: None,
                 offer_reset: false,
@@ -222,6 +227,7 @@ impl ProgramState {
             app_profiles: config.app_profiles,
             action: None,
             fan_rpm_range,
+            pid: 0,
             needs_sync: true,
             sync_apply: true,
             match_power_mode: config.match_windows_power_mode,
@@ -242,6 +248,7 @@ impl ProgramState {
         menu::MenuOptions {
             enforce: self.enforce,
             fan_rpm_range: self.fan_rpm_range,
+            pid: self.pid,
             warning: self.warning.as_deref(),
             config_problem: self.config_problem(),
             offer_reset: self.config_file.health() == ConfigHealth::Corrupt,
@@ -635,13 +642,19 @@ impl ProgramState {
         // The set-point register reads back whatever was written, even a value the EC is
         // ignoring, so it is never shown as if it were the speed. 0 in Manual is the
         // fresh-boot register value, not a request for 0; below the chassis floor the fan
-        // actually runs at the floor (measured: 800 set -> 2000 actual).
+        // actually runs at the floor (measured: 800 set -> 2000 actual), and below a perf
+        // mode's measured floor at that one (0x029F in Custom: 3000 set -> 3800 actual).
         let (floor, _) = self.fan_rpm_range;
         let fan = match s.fan_speed {
             FanSpeed::Auto => "Fan Auto".to_string(),
             FanSpeed::Manual(0) => "Fan Manual".to_string(),
-            FanSpeed::Manual(rpm) if rpm < floor => format!("Fan {floor} floor"),
-            FanSpeed::Manual(rpm) => format!("Fan {rpm} set"),
+            FanSpeed::Manual(rpm) => {
+                match librazer::unsupported::manual_fan_runs_at(self.pid, s.perf_mode.wire(), rpm) {
+                    Some(mode_floor) => format!("Fan {mode_floor} floor"),
+                    None if rpm < floor => format!("Fan {floor} floor"),
+                    None => format!("Fan {rpm} set"),
+                }
+            }
         };
         let fan = if s.max_fan {
             format!("{fan} (max)")
@@ -1054,6 +1067,34 @@ mod tests {
         assert!(state.tooltip().unwrap().contains("Fan 2200 floor"));
         state.fan_actual = None;
         assert!(state.tooltip().unwrap().contains('…'));
+    }
+
+    /// 2026-10-20: in Custom on 0x029F a 3000 set point reads back while the fans hold
+    /// 3800. The tooltip names the floor, as it does for the chassis floor.
+    #[test]
+    fn the_tooltip_shows_the_custom_floor_not_a_set_point_below_it() {
+        use librazer::types::{CpuBoost, GpuBoost};
+        let custom = PerfMode::Custom(CpuBoost::Medium, GpuBoost::High);
+        let mut state = test_state(DeviceState::default());
+        state.pid = 0x029f;
+        state.observed.perf_mode = custom;
+        state.observed.fan_speed = FanSpeed::Manual(3000);
+        let tip = state.tooltip().unwrap();
+        assert!(tip.contains("Fan 3800 floor"), "{tip}");
+        assert!(!tip.contains("3000"), "{tip}");
+        // Below both floors, the higher one is what the fans run at.
+        state.observed.fan_speed = FanSpeed::Manual(800);
+        assert!(state.tooltip().unwrap().contains("Fan 3800 floor"));
+        // Above it the set point is followed.
+        state.observed.fan_speed = FanSpeed::Manual(4500);
+        assert!(state.tooltip().unwrap().contains("Fan 4500 set"));
+        // Balanced follows 3000, and a model without a measured floor is unchanged.
+        state.observed.perf_mode = PerfMode::Balanced;
+        state.observed.fan_speed = FanSpeed::Manual(3000);
+        assert!(state.tooltip().unwrap().contains("Fan 3000 set"));
+        state.observed.perf_mode = custom;
+        state.pid = 0x02a0;
+        assert!(state.tooltip().unwrap().contains("Fan 3000 set"));
     }
 
     /// The layout must fit the real szTip budget for every perf mode, including the

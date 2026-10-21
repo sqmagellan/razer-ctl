@@ -21,8 +21,8 @@ history and the measurements behind it; `README.upstream.md` covers the project 
 
 - **Performance mode**: Battery, Silent, Balanced, Performance, Hyperboost, and Custom (CPU and GPU
   boost, plus Max fan speed).
-- **Fan**: Auto, or Manual at a set RPM within the model's range (2000–5000 on the 2023 Blade 16).
-  Only Auto can stop the fans.
+- **Fan**: Auto, or Manual at a set RPM within the model's range (2000–5000 on the 2023 Blade 16,
+  3800–5000 in Custom). Only Auto can stop the fans.
 - **Keyboard lighting**: the EC's effects (Off, Spectrum, Wave, Breathing) or a custom color: presets
   from the config, one color or one per row, or "Follow performance mode" (matches the tray icon).
   Optional **Battery bar**: keys 1–0 show the charge in tens, cyan while charging. Brightness 0–100%.
@@ -50,7 +50,9 @@ history and the measurements behind it; `README.upstream.md` covers the project 
 - **Start with Windows**: an `HKCU\…\Run` entry.
 - **Status for scripts**: `razer-cli auto json` prints the state, actual fan RPM included, as flat
   JSON (a Home Assistant sensor, a status line). A value the laptop doesn't report is `null` and
-  listed in `unsupported`. `razer-cli enumerate --json` prints what a device-support report needs.
+  listed in `unsupported`. In Manual, `fan_floor_rpm` appears where the perf mode has a measured
+  minimum (3800 in Custom on the 2023 Blade 16); the fans run at the larger of it and
+  `fan_setpoint_rpm`. `razer-cli enumerate --json` prints what a device-support report needs.
 
 CLI exit codes:
 
@@ -136,6 +138,9 @@ Release binaries are built by GitHub Actions from a tag, never uploaded by hand.
 - **Fan reads need filtering.** About 3 in 10 `0x0d88` samples carry one impossible zone. The tray
   drops them, and a stop needs two reads in a row. The tach reads in 100 RPM steps.
 - **A set point of 0 doesn't hand the fan back to the firmware.** It stays Manual at 2000.
+- **In Custom the 2023 Blade 16 runs a manual fan at 3800 RPM or more.** A lower set point reads
+  back as written while the fans hold 3800, whatever the boosts; Balanced follows 2000–5000. The
+  menu marks those presets "(runs at 3800)", and `razer-cli` says so.
 - **Undo changes made by Synapse is last-writer-wins.** It beats occasional changes, not a tool that
   writes constantly.
 - **Close apps using the GPU is conservative.** It skips session-critical processes and anything

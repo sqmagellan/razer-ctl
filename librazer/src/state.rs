@@ -48,6 +48,21 @@ pub enum PerfMode {
     Custom(CpuBoost, GpuBoost),
 }
 
+impl PerfMode {
+    /// The EC's perf mode, without Custom's boosts: what per-model tables such as
+    /// [`crate::unsupported::MANUAL_FLOOR_BY_PERF`] are keyed by.
+    pub fn wire(self) -> crate::types::PerfMode {
+        match self {
+            PerfMode::Battery => crate::types::PerfMode::Battery,
+            PerfMode::Silent => crate::types::PerfMode::Silent,
+            PerfMode::Balanced => crate::types::PerfMode::Balanced,
+            PerfMode::Performance => crate::types::PerfMode::Performance,
+            PerfMode::Hyperboost => crate::types::PerfMode::Hyperboost,
+            PerfMode::Custom(..) => crate::types::PerfMode::Custom,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LightsMode {
     pub logo_mode: LogoMode,
@@ -2952,5 +2967,34 @@ colors = ["#ffffff"]
             seen.lights_mode.logo_mode, reading.lights_mode.logo_mode,
             "logo was read"
         );
+    }
+
+    #[test]
+    fn every_perf_mode_maps_to_the_ec_mode_it_writes() {
+        use crate::transport::MockTransport;
+        let modes = [
+            PerfMode::Battery,
+            PerfMode::Silent,
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Hyperboost,
+            PerfMode::Custom(CpuBoost::Low, GpuBoost::Low),
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+        ];
+        for mode in modes {
+            // The first 0x0d02 `apply` sends carries the perf mode's wire value.
+            let mock = MockTransport::echo();
+            let _ = DeviceState {
+                perf_mode: mode,
+                ..DeviceState::default()
+            }
+            .apply(&mock);
+            let wrote = mock
+                .sent()
+                .into_iter()
+                .find(|(command, _)| *command == 0x0d02)
+                .map(|(_, args)| args[2]);
+            assert_eq!(wrote, Some(mode.wire() as u8), "{mode:?}");
+        }
     }
 }
