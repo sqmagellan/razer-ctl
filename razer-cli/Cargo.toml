@@ -15,3 +15,12 @@ log = "0.4.22"
 env_logger = "0.11.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[features]
+# `--sim MODEL.json`: every command talks to a simulated EC (`librazer::sim`) built from an
+# EC model file instead of the hardware. For development and tests; never in a release.
+sim = ["librazer/sim"]
+
+# The CLI tests drive the real handlers against a simulated EC in a plain `cargo test`.
+[dev-dependencies]
+librazer = { path = "../librazer", features = ["sim"] }

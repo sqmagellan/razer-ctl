@@ -30,7 +30,11 @@ All four must pass; CI gates on all four. From macOS or Linux, `cargo xwin` subs
 one.
 
 Use `-p librazer`, not a bare `cargo test`: `librazer::device` is gated to Windows and Linux, so the
-whole-workspace form fails to compile `razer-cli` on macOS. On Windows also run
+whole-workspace form fails to compile `razer-tray` on macOS. `cargo test -p razer-cli` runs anywhere:
+its tests drive the real handlers against a simulated EC (`librazer::sim`). With `--features sim`,
+`razer-cli` also builds on macOS and takes `--sim MODEL.json` before or after any subcommand, so every
+command talks to a simulated EC built from that model file instead of the hardware, e.g.
+`cargo run -p razer-cli --features sim -- --sim MODEL.json auto json`. Never in a release. On Windows also run
 `cargo test -p razer-tray`, which is the only way to exercise the tray-only tests locally (CI runs
 them on its Windows job).
 
