@@ -93,11 +93,31 @@ fn log_tooltip_transition(tooltip: &str) {
 /// How long a failed fan RPM read pauses the next ones (see `refresh_fan`).
 const FAN_READ_PAUSE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Resyncs for a perf/fan mode the EC acknowledged and didn't take, before the tray gives
+/// up until the next change. On the resync backoff they come about 2, 4 and 8 s apart:
+/// room for a write that was ignored as the laptop woke (2026-09-24), while a model that
+/// always ignores a mode doesn't keep the tray writing forever.
+const PERF_RETRIES: u8 = 3;
+
+/// Retries of a perf/fan mode the EC acknowledged and didn't take (see
+/// `librazer::error::PerfNotApplied`), counted for one intended state.
+#[derive(Debug, Default)]
+pub struct PerfRetry {
+    target: Option<DeviceState>,
+    misses: u8,
+    /// The last apply's mode wasn't taken. The handle answered, so the resync for it
+    /// needn't reopen the device.
+    pub pending: bool,
+    /// The last apply gave up on it, so the reconcile after it must not re-assert it.
+    pub gave_up: bool,
+}
+
 pub struct ProgramState {
     pub device_state: DeviceState,
     pub observed: DeviceState,
     /// Turns off the zone 2 fan drift check if repairing it stops working.
     pub zone2_guard: librazer::state::Zone2DriftGuard,
+    pub perf_retry: PerfRetry,
     pub ac_state: DeviceState,
     pub battery_state: DeviceState,
     pub event_handlers: HashMap<String, DeviceState>,
@@ -211,6 +231,7 @@ impl ProgramState {
             device_state,
             observed: device_state,
             zone2_guard: Default::default(),
+            perf_retry: PerfRetry::default(),
             ac_state,
             battery_state,
             event_handlers,
@@ -470,8 +491,8 @@ impl ProgramState {
         self.needs_sync = false;
         let applied = self.apply_and_refresh(tray_icon, device);
         // Reconcile whatever the apply did: a write the EC rejected is exactly when the
-        // read-back matters.
-        self.reconcile(tray_icon, device, "sync", true);
+        // read-back matters. Read only, after the apply gave up on an ignored mode.
+        self.reconcile(tray_icon, device, "sync", !self.perf_retry.gave_up);
         if let Err(e) = applied {
             self.needs_sync = true;
             return Err(e);
@@ -766,7 +787,17 @@ impl ProgramState {
             self.refresh_ui(tray_icon);
             return Ok(());
         }
-        let result = self.device_state.apply(device);
+        self.perf_retry.gave_up = false;
+        // The EC can acknowledge a perf/fan mode write and ignore it, so read the mode back,
+        // also after another write failed: an ignored mode must still get its retries. Not
+        // after bus trouble, where the read would fail the same way.
+        let result = match self.device_state.apply(device) {
+            Err(e) if librazer::error::is_retryable(&e) => Err(e),
+            applied => match self.device_state.confirm_modes(device) {
+                Err(e) if librazer::error::is_perf_not_applied(&e) => Err(e),
+                confirmed => applied.and(confirmed),
+            },
+        };
         match &result {
             Ok(()) => self.observed = self.device_state,
             Err(e) => {
@@ -786,10 +817,34 @@ impl ProgramState {
         self.refresh_ui(tray_icon);
         // Only bus trouble is worth a resync. A write the EC rejected will be rejected
         // again, and resyncing on it re-sent the same write every minute forever; the
-        // display already shows what the device really did (read back above).
+        // display already shows what the device really did (read back above). A mode the
+        // EC acknowledged and ignored gets PERF_RETRIES resyncs per intended state, then is
+        // left as read. Bus trouble in between keeps the count.
+        self.perf_retry.pending = false;
         match result {
+            Err(e) if librazer::error::is_perf_not_applied(&e) => {
+                if self.perf_retry.target != Some(self.device_state) {
+                    self.perf_retry.target = Some(self.device_state);
+                    self.perf_retry.misses = 0;
+                }
+                self.perf_retry.misses += 1;
+                if self.perf_retry.misses > PERF_RETRIES {
+                    log::warn!("{e}; giving up after {PERF_RETRIES} retries until the next change");
+                    self.perf_retry = PerfRetry {
+                        gave_up: true,
+                        ..PerfRetry::default()
+                    };
+                    Ok(())
+                } else {
+                    self.perf_retry.pending = true;
+                    Err(e)
+                }
+            }
             Err(e) if librazer::error::is_retryable(&e) => Err(e),
-            _ => Ok(()),
+            _ => {
+                self.perf_retry = PerfRetry::default();
+                Ok(())
+            }
         }
     }
 

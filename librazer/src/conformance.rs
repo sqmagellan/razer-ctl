@@ -314,17 +314,22 @@ fn a_set_point_below_the_floor_reads_back_but_the_fans_hold_the_floor() {
 }
 
 /// 2026-10-19: perf writes acknowledged (status 0x02, args echoed) and ignored. `apply`
-/// must not report success while the EC kept its old mode.
+/// can't tell, as every write is acknowledged; `confirm_modes`, which the tray runs after
+/// it, must not report success while the EC kept its old mode.
 #[test]
-#[ignore = "fixed by fix/perf-write-confirm, which reads the mode back after a write"]
 fn an_acknowledged_but_ignored_perf_write_is_not_success() {
     let sim = blade16();
     sim.inject(Fault::IgnoreWrites {
         from_ms: 0,
         until_ms: u64::MAX,
     });
-    let result = profile(PerfMode::Silent, FanSpeed::Auto, false).apply(&sim);
-    assert!(result.is_err(), "the EC is still Balanced");
+    let state = profile(PerfMode::Silent, FanSpeed::Auto, false);
+    state.apply(&sim).unwrap();
+    let err = state.confirm_modes(&sim).unwrap_err();
+    assert!(
+        crate::error::is_perf_not_applied(&err),
+        "the EC is still Balanced: {err:?}"
+    );
 }
 
 /// 2026-10-20 curve runs: in Custom/Manual the fans run at the larger of the set point

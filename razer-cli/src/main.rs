@@ -338,16 +338,6 @@ fn fan_floor_note_now(
     Some(note)
 }
 
-/// [`fan_floor_note_now`] after `fan rpm` wrote `rpm`. The modes are read only on a laptop
-/// with a listed floor above `rpm`, and a failed read prints nothing: the write succeeded.
-fn fan_floor_note_after_set(device: &Laptop, rpm: u16) -> Option<String> {
-    if !librazer::unsupported::manual_fan_floors(device.info.pid).any(|(_, floor)| floor > rpm) {
-        return None;
-    }
-    let (perf_mode, fan_mode) = command::get_perf_mode(device).ok()?;
-    fan_floor_note_now(device, perf_mode, fan_mode, rpm)
-}
-
 /// `fan` and `info`'s fan lines, each passed to `out` as it is known (stdout in the binary,
 /// a list in tests), so a later failed read doesn't hide what was already printed.
 fn fan_handle(
@@ -368,16 +358,38 @@ fn fan_handle(
                      EC would run at {} RPM and report success",
                     if rpm < min { min } else { max }
                 );
-                command::set_fan_rpm(device, rpm, false)?;
-                if let Some(note) = fan_floor_note_after_set(device, rpm) {
-                    out(note);
+                // Before anything is written, as the mode switch is a write.
+                anyhow::ensure!(
+                    rpm.is_multiple_of(100),
+                    "{rpm} RPM is not a multiple of 100; the EC stores rpm/100"
+                );
+                // The fan is Manual now; the perf mode was read on the way in.
+                let perf = set_fan_rpm_manual(device, rpm)?;
+                match perf.and_then(|perf| fan_floor_note_now(device, perf, FanMode::Manual, rpm)) {
+                    Some(note) => out(note),
+                    // Measured on 0x029F: Balanced holds a set point either side of the
+                    // fans' speed, while Hyperboost runs its own curve when that is faster.
+                    // A mode with a listed floor is already described by its floor note.
+                    None => {
+                        let pid = device.info.pid;
+                        if let Some(perf) = perf.filter(|p| {
+                            *p != PerfMode::Balanced
+                                && !librazer::unsupported::manual_fan_floors(pid)
+                                    .any(|(mode, _)| mode == *p)
+                        }) {
+                            eprintln!(
+                                "note: Balanced is the mode known to hold a set point; {perf:?} \
+                                 may run the fans faster"
+                            );
+                        }
+                    }
                 }
             }
             impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
 
             match matches.subcommand() {
-                Some(("auto", _)) => command::set_fan_mode(device, FanMode::Auto),
-                Some(("manual", _)) => command::set_fan_mode(device, FanMode::Manual),
+                Some(("auto", _)) => command::set_fan_mode_confirmed(device, FanMode::Auto),
+                Some(("manual", _)) => command::set_fan_mode_confirmed(device, FanMode::Manual),
                 _ => Ok(()),
             }
         }
@@ -431,7 +443,7 @@ impl Cli for feature::Fan {
                 .about("Control fan")
                 .subcommand(clap::Command::new("auto").about("Set fan mode to auto"))
                 .subcommand(clap::Command::new("manual").about("Set fan mode to manual"))
-                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm", "Fan RPM, a multiple of 100, within this laptop's fan range (`info` prints it as fan_rpm_range)"})
+                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(u16).range(librazer::state::FAN_RPM_MIN_ANY as i64..=librazer::state::FAN_RPM_MAX_ANY as i64)}, "rpm", "RPM", "Set fan rpm, switching the fan to manual", "Fan RPM, a multiple of 100, within this laptop's fan range (`info` prints it as fan_rpm_range)"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(MaxFanSpeedMode)}, "max", "MAX", "Control Max Fan Speed Mode", "Max Fan Speed Mode"})
                 .arg_required_else_help(true),
         )
@@ -457,7 +469,7 @@ impl Cli for feature::Perf {
     fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
-                impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
+                impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode_confirmed)}
                 impl_unary_handle_cli! {<CpuBoost>(matches, device, "cpu", "CPU", command::set_cpu_boost)}
                 impl_unary_handle_cli! {<GpuBoost>(matches, device, "gpu", "GPU", command::set_gpu_boost)}
                 Ok(())
@@ -760,6 +772,38 @@ fn json_read<T>(
         }
         Err(e) => Err(e),
     }
+}
+
+/// `auto fan rpm`. The set point alone used to leave an Auto fan in Auto, so a user's
+/// sweep could measure the firmware curve instead (issue #10). Switch to Manual first, the
+/// order the tray uses, and say so on stderr, where scripts reading stdout won't see it.
+/// Returns the perf mode it read, or `None` on a laptop without the mode read.
+fn set_fan_rpm_manual(device: &Laptop, rpm: u16) -> Result<Option<PerfMode>> {
+    // A laptop without the mode read gets the old behavior: the set point alone.
+    let (perf, fan) = match command::get_perf_mode(device) {
+        Ok(modes) => modes,
+        Err(e) if librazer::error::is_not_supported(&e) => {
+            return command::set_fan_rpm(device, rpm, false).map(|()| None);
+        }
+        Err(e) => return Err(e),
+    };
+    let switched = fan != FanMode::Manual;
+    if switched {
+        command::set_fan_mode_confirmed(device, FanMode::Manual)?;
+    }
+    if let Err(e) = command::set_fan_rpm(device, rpm, false) {
+        // Don't leave the fan in Manual on a set point nobody asked for.
+        if switched {
+            if let Err(back) = command::set_fan_mode(device, fan) {
+                eprintln!("could not put the fan back to {fan:?}: {back}");
+            }
+        }
+        return Err(e);
+    }
+    if switched {
+        eprintln!("fan mode was {fan:?}; switched to Manual");
+    }
+    Ok(Some(perf))
 }
 
 fn print_json(device: &Laptop) -> Result<()> {
@@ -1561,14 +1605,14 @@ mod tests {
 
         // Custom with the fan on Auto: the set point isn't in use, so no note and no field.
         auto(&laptop, &["perf", "mode", "custom"]).unwrap();
-        assert!(fan_lines(&laptop, &["fan", "rpm", "3000"]).is_empty());
         assert_eq!(fan_lines(&laptop, &["info"])[0], "Fan: Auto");
         let value = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
         assert_eq!(value["fan_mode"], json!("Auto"));
         assert!(value.get("fan_floor_rpm").is_none(), "{value}");
+        // `fan rpm` switches the fan to Manual first, so there the floor applies.
+        assert_eq!(fan_lines(&laptop, &["fan", "rpm", "3000"]), [NOTE]);
 
         // Max Fan drives the fans past any set point, so "runs at 3800" would be wrong.
-        auto(&laptop, &["fan", "manual"]).unwrap();
         auto(&laptop, &["fan", "max", "enable"]).unwrap();
         assert!(fan_lines(&laptop, &["fan", "rpm", "3000"]).is_empty());
         assert_eq!(
@@ -1580,22 +1624,19 @@ mod tests {
         assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
     }
 
-    /// Only a laptop with a listed floor above the set point pays for the mode reads.
+    /// `fan rpm` reads the modes once, to switch to Manual; the floor note reuses that read.
     #[test]
-    fn fan_rpm_reads_the_modes_only_when_a_floor_could_apply() {
-        for (pid, rpm, reads) in [
-            (0x029f, 3000, true),
-            (0x029f, 4500, false),
-            (0x0eee, 3500, false),
-        ] {
+    fn fan_rpm_reads_the_modes_once() {
+        for (pid, rpm) in [(0x029f, 3000), (0x029f, 4500), (0x0eee, 3500)] {
             let laptop = Simulation::new(model(&model_json(pid))).detect();
             auto(&laptop, &["fan", "manual"]).unwrap();
             laptop.drain_exchanges();
             auto(&laptop, &["fan", "rpm", &rpm.to_string()]).unwrap();
             let sent: Vec<u16> = laptop.drain_exchanges().iter().map(|e| e.command).collect();
+            // One get_perf_mode: both zones.
             assert_eq!(
-                sent.contains(&0x0d82),
-                reads,
+                sent.iter().filter(|c| **c == 0x0d82).count(),
+                2,
                 "{pid:#06x} at {rpm}: {sent:x?}"
             );
         }

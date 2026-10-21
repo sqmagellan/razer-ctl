@@ -117,6 +117,35 @@ impl std::error::Error for TransportError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerfZonesDiverged(pub String);
 
+/// The EC answered a perf/fan mode write (`0x0d02`) with success and its args echoed, but
+/// a read-back still reports another mode. Seen on `0x029F` after about 12 hours of
+/// Modern Standby (2026-10-19): Balanced -> Custom and Balanced -> Silent were acknowledged
+/// and ignored. The same writes landed awake and a few minutes into standby, so a later
+/// retry can succeed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfNotApplied {
+    pub wanted: (crate::types::PerfMode, crate::types::FanMode),
+    pub read: (crate::types::PerfMode, crate::types::FanMode),
+}
+
+impl std::fmt::Display for PerfNotApplied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the EC acknowledged {:?}/{:?} but still reports {:?}/{:?}",
+            self.wanted.0, self.wanted.1, self.read.0, self.read.1
+        )
+    }
+}
+
+impl std::error::Error for PerfNotApplied {}
+
+/// Whether a perf/fan mode write was acknowledged and not applied, anywhere in the chain.
+pub fn is_perf_not_applied(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<PerfNotApplied>().is_some())
+}
+
 impl std::fmt::Display for PerfZonesDiverged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "perf zones disagree: {}", self.0)
@@ -128,7 +157,8 @@ impl std::error::Error for PerfZonesDiverged {}
 /// Whether retrying the same exchange later could succeed.
 ///
 /// True for bus and OS trouble (a HID transport error, a busy EC, a response that never
-/// matched, perf zones left diverged). False for definitive answers -- the EC rejected
+/// matched, perf zones left diverged, a mode write the EC acknowledged and ignored; the
+/// tray caps its retries of that last one). False for definitive answers -- the EC rejected
 /// the command (`Failure`) or lacks it (`NotSupported`) -- and for our own validation
 /// errors. The tray resyncs only on retryable errors; resyncing on a rejection re-sent
 /// the same rejected write every minute forever.
@@ -136,6 +166,7 @@ pub fn is_retryable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause.downcast_ref::<TransportError>().is_some()
             || cause.downcast_ref::<PerfZonesDiverged>().is_some()
+            || cause.downcast_ref::<PerfNotApplied>().is_some()
             || matches!(
                 cause.downcast_ref::<crate::packet::ResponseError>(),
                 Some(crate::packet::ResponseError::Busy | crate::packet::ResponseError::Mismatch)
@@ -172,6 +203,7 @@ impl ExitCode {
             }
             if cause.downcast_ref::<TransportError>().is_some()
                 || cause.downcast_ref::<PerfZonesDiverged>().is_some()
+                || cause.downcast_ref::<PerfNotApplied>().is_some()
             {
                 return ExitCode::DeviceError;
             }
