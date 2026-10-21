@@ -326,3 +326,32 @@ fn an_acknowledged_but_ignored_perf_write_is_not_success() {
     let result = profile(PerfMode::Silent, FanSpeed::Auto, false).apply(&sim);
     assert!(result.is_err(), "the EC is still Balanced");
 }
+
+/// 2026-10-20 curve runs: in Custom/Manual the fans run at the larger of the set point
+/// and 3800, whatever the boosts; a 3000 set point reads back as 3000 meanwhile.
+#[test]
+fn custom_manual_runs_at_least_3800() {
+    use crate::types::FanZone;
+    let sim = blade16();
+    profile(CUSTOM, FanSpeed::Manual(3000), false)
+        .apply(&sim)
+        .unwrap();
+    sim.advance(std::time::Duration::from_secs(120));
+    assert_eq!(
+        crate::command::get_fan_rpm(&sim, FanZone::Zone1).unwrap(),
+        3000
+    );
+    assert_eq!(
+        crate::command::get_fan_actual_rpm(&sim, FanZone::Zone1).unwrap(),
+        3800
+    );
+
+    profile(CUSTOM, FanSpeed::Manual(4500), false)
+        .apply(&sim)
+        .unwrap();
+    sim.advance(std::time::Duration::from_secs(120));
+    assert_eq!(
+        crate::command::get_fan_actual_rpm(&sim, FanZone::Zone1).unwrap(),
+        4500
+    );
+}

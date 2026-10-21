@@ -131,6 +131,10 @@ pub struct FanModel {
     /// set point as a floor under its own curve, so one mode says nothing about another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub manual_observed_in: Vec<u8>,
+    /// A higher manual floor in some perf modes (wire value -> RPM): in Custom on 0x029F
+    /// the fans run at the larger of the set point and 3800.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub manual_floor_by_mode: BTreeMap<u8, u16>,
     pub evidence: String,
 }
 
@@ -301,6 +305,7 @@ impl Model {
                 slew_rpm_per_s: 0,
                 hold_rpm: [0; 2],
                 manual_observed_in: Vec::new(),
+                manual_floor_by_mode: BTreeMap::new(),
                 evidence: format!("measured {source}: Auto reading only; manual unknown"),
             },
             state,
@@ -495,11 +500,18 @@ impl Inner {
             return None;
         }
         match fan.manual {
-            ManualFan::Honored => Some(
-                self.state.setpoint_rpm[z]
-                    .max(fan.floor_rpm)
-                    .min(fan.ceiling_rpm.max(fan.floor_rpm)),
-            ),
+            ManualFan::Honored => {
+                let floor = fan
+                    .manual_floor_by_mode
+                    .get(&self.state.perf_mode[z])
+                    .copied()
+                    .unwrap_or(fan.floor_rpm);
+                Some(
+                    self.state.setpoint_rpm[z]
+                        .max(floor)
+                        .min(fan.ceiling_rpm.max(floor)),
+                )
+            }
             ManualFan::Holds => Some(fan.hold_rpm[z]),
             ManualFan::Unknown => None,
         }
@@ -775,6 +787,7 @@ mod tests {
                 slew_rpm_per_s: 30,
                 hold_rpm: [0; 2],
                 manual_observed_in: Vec::new(),
+                manual_floor_by_mode: BTreeMap::new(),
                 evidence: "inferred: test model".into(),
             },
             rules: [
