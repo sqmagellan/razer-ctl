@@ -2856,6 +2856,86 @@ colors = ["#ffffff"]
         );
     }
 
+    // ---- Max Fan on an EC that rejects it (issue #10, Blade 17 2022, PID 0x028b) ----
+
+    /// A Custom/Auto laptop whose EC answers Max Fan (0x070f) with "not supported" and
+    /// echoes every other write. Issue #10 saw Enable rejected; whether Disable is too is
+    /// still open, so this EC rejects both.
+    fn custom_laptop_without_max_fan() -> crate::transport::MockTransport {
+        use crate::packet::{Packet, ResponseError};
+        crate::transport::MockTransport::with_fallible_responder(|req| {
+            let mut p = Packet::new(req.command(), &[]);
+            match req.command() {
+                0x070f => return Err(anyhow::Error::new(ResponseError::NotSupported)),
+                0x0d82 => p.set_args(&[
+                    0,
+                    req.get_args()[1],
+                    crate::types::PerfMode::Custom as u8,
+                    crate::types::FanMode::Auto as u8,
+                ]),
+                _ => return Ok(Packet::new(req.command(), req.get_args())),
+            }
+            Ok(p)
+        })
+    }
+
+    fn custom_intent() -> DeviceState {
+        DeviceState {
+            perf_mode: PerfMode::Custom(CpuBoost::Medium, GpuBoost::High),
+            ..DeviceState::default()
+        }
+    }
+
+    fn max_fan_disables(mock: &crate::transport::MockTransport) -> usize {
+        mock.sent()
+            .iter()
+            .filter(|(c, a)| *c == 0x070f && a[0] == MaxFanSpeedMode::Disable as u8)
+            .count()
+    }
+
+    #[test]
+    fn a_catalogued_model_fails_every_custom_apply_when_max_fan_is_rejected() {
+        let mock = custom_laptop_without_max_fan();
+        let state = custom_intent();
+        assert!(!state.max_fan, "Max Fan off still sends Disable in Custom");
+
+        for _ in 0..2 {
+            let err = state.apply(&mock).unwrap_err();
+            assert!(crate::error::is_not_supported(&err), "{err:?}");
+            let err = state.enforce_to(&mock).unwrap_err();
+            assert!(crate::error::is_not_supported(&err), "{err:?}");
+        }
+        assert_eq!(max_fan_disables(&mock), 4, "asked again every time");
+        assert!(unsupported_on(&mock).is_empty(), "nothing is learned");
+        assert!(sent_command(&mock, 0x0712), "the later writes still land");
+
+        let before = mock.sent_count();
+        let balanced = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            ..state
+        };
+        balanced
+            .apply(&mock)
+            .expect("Max Fan is never sent outside Custom");
+        assert!(!mock.sent()[before..].iter().any(|(c, _)| *c == 0x070f));
+    }
+
+    /// The generic profile doesn't learn Max Fan either: it is not an `Optional` yet
+    /// (feat/max-fan-lacking makes it one). Until that lands, cataloguing 0x028b changes
+    /// nothing here; after it does, a catalogued 0x028b keeps failing while a generic one
+    /// learns.
+    #[test]
+    fn a_learning_model_does_not_learn_max_fan_yet() {
+        let mock = custom_laptop_without_max_fan().learning();
+        let state = custom_intent();
+        for _ in 0..2 {
+            let err = state.apply(&mock).unwrap_err();
+            assert!(crate::error::is_not_supported(&err), "{err:?}");
+        }
+        assert_eq!(max_fan_disables(&mock), 2);
+        assert!(unsupported_on(&mock).is_empty());
+    }
+
     #[test]
     fn a_placeholder_never_replaces_the_intent() {
         let mock = laptop_lacking(&[0x0792, 0x0383]).learning();
