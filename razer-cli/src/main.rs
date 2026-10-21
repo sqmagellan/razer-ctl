@@ -473,6 +473,27 @@ fn enumerate(backend: &Backend, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `LO-HI` for `probe --fan-range`, both multiples of 100 inside the known-chassis bounds.
+fn parse_fan_range(s: &str) -> std::result::Result<(u16, u16), String> {
+    let (lo, hi) = s
+        .split_once('-')
+        .ok_or_else(|| format!("{s:?}: expected LO-HI, e.g. 3500-5000"))?;
+    let parse = |v: &str| v.trim().parse::<u16>().map_err(|e| format!("{v:?}: {e}"));
+    let (lo, hi) = (parse(lo)?, parse(hi)?);
+    let bounds = librazer::state::FAN_RPM_MIN_ANY..=librazer::state::FAN_RPM_MAX_ANY;
+    if lo >= hi || !bounds.contains(&lo) || !bounds.contains(&hi) {
+        return Err(format!(
+            "{lo}-{hi}: needs LO < HI, both within {}-{}",
+            bounds.start(),
+            bounds.end()
+        ));
+    }
+    if lo % 100 != 0 || hi % 100 != 0 {
+        return Err(format!("{lo}-{hi}: both must be multiples of 100"));
+    }
+    Ok((lo, hi))
+}
+
 /// `probe`: a capture of every getter, and with `--writes` the write set (see
 /// `librazer::probe`). The summary goes to stderr so stdout stays clean JSON. `device` must
 /// be recording.
@@ -482,22 +503,60 @@ fn probe(
     out: Option<&String>,
     writes: bool,
     settle_secs: u64,
+    fan_range: Option<(u16, u16)>,
     restore: Option<&String>,
 ) -> Result<()> {
+    let (_, model_number) = backend.enumerate()?;
+    // The tray re-asserts its own settings and would fight a write or a restore. A
+    // simulated EC has no tray.
+    #[cfg(feature = "sim")]
+    let real = matches!(backend, Backend::Hardware);
+    #[cfg(not(feature = "sim"))]
+    let real = true;
+    let tray_closed = || -> Result<()> {
+        let mut sys = System::new_all();
+        sys.refresh_processes();
+        if real
+            && sys
+                .processes()
+                .values()
+                .any(|p| p.name().eq_ignore_ascii_case("razer-tray.exe"))
+        {
+            bail!("close razer-tray first (right-click the tray icon, Exit), then run this again");
+        }
+        Ok(())
+    };
+
     if let Some(path) = restore {
-        let snap: librazer::probe::Snapshot =
-            serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        librazer::probe::restore(device, &snap)?;
+        tray_closed()?;
+        let rec: librazer::probe::Recovery = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        if rec.format != librazer::probe::RECOVERY_FORMAT {
+            bail!(
+                "{path} is not a recovery file this version reads ({:?})",
+                rec.format
+            );
+        }
+        if (rec.pid, rec.model_number.as_str()) != (device.info.pid, model_number.as_str()) {
+            bail!(
+                "{path} was saved on {} ({:#06x}), not this laptop ({}, {:#06x}); nothing written",
+                rec.model_number,
+                rec.pid,
+                model_number,
+                device.info.pid
+            );
+        }
+        librazer::probe::restore(device, &rec.snapshot)?;
+        std::fs::remove_file(path)?;
         eprintln!("restored and verified the settings saved in {path}");
         return Ok(());
     }
-    let (_, model_number) = backend.enumerate()?;
+
     let catalogued =
         librazer::matching::find_descriptor(&model_number, librazer::descriptor::SUPPORTED)
             .is_some();
     let machine = librazer::capture::Machine {
         pid: device.info.pid,
-        model_number,
+        model_number: model_number.clone(),
         profile: device.info.name.to_string(),
         catalogued,
     };
@@ -509,44 +568,74 @@ fn probe(
         Backend::Hardware => tool.to_string(),
     };
     let capture = if writes {
-        // The tray re-asserts its own settings and would fight the write set. A simulated
-        // EC has no tray.
-        #[cfg(feature = "sim")]
-        let check_tray = matches!(backend, Backend::Hardware);
-        #[cfg(not(feature = "sim"))]
-        let check_tray = true;
-        if check_tray {
-            let mut sys = System::new_all();
-            sys.refresh_processes();
-            if sys
-                .processes()
-                .values()
-                .any(|p| p.name().eq_ignore_ascii_case("razer-tray.exe"))
-            {
-                bail!(
-                    "close razer-tray first (right-click the tray icon, Exit), then run this again"
-                );
+        tray_closed()?;
+        // Sweep a catalogued range, or one the user gives. A generic profile's range is a
+        // guess, so without --fan-range only its middle is tried.
+        let sweep = match (fan_range, catalogued) {
+            (Some(range), _) => librazer::probe::sweep_points(range),
+            (None, true) => librazer::probe::sweep_points(device.info.fan_rpm_range),
+            (None, false) => {
+                let (lo, hi) = device.info.fan_rpm_range;
+                vec![(lo / 2 + hi / 2) / 100 * 100]
             }
-        }
+        };
         let snap = librazer::probe::snapshot(device)?;
         let recovery = match out {
             Some(path) => format!("{path}.recovery.json"),
             None => "razer-probe-recovery.json".to_string(),
         };
-        std::fs::write(&recovery, serde_json::to_string_pretty(&snap)? + "\n")?;
+        let envelope = librazer::probe::Recovery {
+            format: librazer::probe::RECOVERY_FORMAT.into(),
+            pid: device.info.pid,
+            model_number,
+            snapshot: snap.clone(),
+        };
+        // Never over an unfinished run's file: that one holds the settings from before.
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&recovery)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+                "{recovery} is left from an unfinished run; put those settings back first: razer-cli probe --restore {recovery}"
+            ),
+            Err(e) => return Err(e.into()),
+        };
+        std::io::Write::write_all(
+            &mut file,
+            (serde_json::to_string_pretty(&envelope)? + "\n").as_bytes(),
+        )?;
+        drop(file);
         eprintln!(
-            "saved the current settings to {recovery}; if this run is interrupted, put them back with: razer-cli probe --restore {recovery}"
+            "saved the current settings to {recovery}; Ctrl-C stops the run and puts them back; if the process dies, run: razer-cli probe --restore {recovery}"
         );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        if let Err(e) =
+            ctrlc::set_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst))
+        {
+            eprintln!("warning: no Ctrl-C handler ({e}); a Ctrl-C will skip the restore");
+        }
         let capture = librazer::probe::run_writes(
             device,
             machine,
             tool,
             &snap,
-            device.info.fan_rpm_range,
+            &sweep,
             std::time::Duration::from_secs(settle_secs),
+            &cancel,
         );
-        if capture.restored.as_deref() == Some("verified") {
+        if capture
+            .restored
+            .as_deref()
+            .is_some_and(|r| r.starts_with("verified"))
+        {
             std::fs::remove_file(&recovery)?;
+        } else {
+            eprintln!(
+                "the restore didn't verify; the settings from before are still in {recovery}"
+            );
         }
         capture
     } else {
@@ -899,7 +988,11 @@ fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
                 .arg(
                     arg!(--settle <SECS> "With --writes: how long to watch the fans settle at each set point")
                         .value_parser(clap::value_parser!(u64))
-                        .default_value("60"),
+                        .default_value("150"),
+                )
+                .arg(
+                    arg!(--"fan-range" <RANGE> "With --writes: the manual fan range to sweep, LO-HI in RPM (default: a catalogued laptop's own range; otherwise only the middle of the generic one)")
+                        .value_parser(parse_fan_range),
                 )
                 .arg(
                     arg!(--restore <FILE> "Put back the settings an interrupted --writes run saved")
@@ -998,6 +1091,7 @@ fn dispatch(
                 submatches.get_one::<String>("out"),
                 submatches.get_flag("writes"),
                 *submatches.get_one::<u64>("settle").unwrap(),
+                submatches.get_one::<(u16, u16)>("fan-range").copied(),
                 submatches.get_one::<String>("restore"),
             )
         }
@@ -1097,6 +1191,7 @@ mod tests {
             &["probe"],
             &["probe", "--out", "capture.json"],
             &["probe", "--writes", "--settle", "90"],
+            &["probe", "--writes", "--fan-range", "3500-5000"],
             &["probe", "--restore", "razer-probe-recovery.json"],
             &["auto", "kbd-lighting", "color", "#ff0000"],
             &[

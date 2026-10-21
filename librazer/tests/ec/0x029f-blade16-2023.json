@@ -8,7 +8,9 @@
     "hw-0815": "maintainer's Blade 16 (2023), hardware run 2026-08-15: manual fan floor sweep (raw 0x0d01) and Get Thermal Fan Info",
     "hw-0922": "maintainer's Blade 16 (2023), hardware run 2026-09-22: Max Fan ramp and charge limit",
     "hw-0923": "maintainer's Blade 16 (2023), hardware run 2026-09-23: EC command probe and the keyboard custom frame",
+    "hw-1002": "maintainer's Blade 16 (2023), hardware run 2026-10-02: manual fan in Balanced and Hyperboost (Hyperboost treats a set point as a floor under its own curve)",
     "hw-1014": "maintainer's Blade 16 (2023), hardware run 2026-10-14: manual set points read back",
+    "hw-1020": "maintainer's Blade 16 (2023), hardware run 2026-10-20 hw-test: in Custom right after Max Fan on/off, a 3000 set point read back but the fans climbed past it to 3800 in 60 s",
     "hw-1019": "maintainer's Blade 16 (2023), hardware run 2026-10-19: perf transitions and Max Fan at four boost pairs. Once that day, writes from Balanced were acknowledged and ignored; not reproduced 2026-10-20 after 7.2 h of Modern Standby (9 of 9 writes read back)"
   },
   "state": {
@@ -52,7 +54,10 @@
       0,
       0
     ],
-    "evidence": "measured hw-0815: manual floor exactly 2000 (set points below it hold 2000, symmetric on both zones); Auto is off (0) or at least ~1800, idle 2000/1800; manual slew ~23-35 RPM/s. hw-0922: Max Fan ramps to 4700 at ~40 RPM/s"
+    "manual_observed_in": [
+      0
+    ],
+    "evidence": "measured hw-0815: manual floor exactly 2000 (set points below it hold 2000, symmetric on both zones); Auto is off (0) or at least ~1800, idle 2000/1800; manual slew ~23-35 RPM/s. hw-1002: honored in Balanced; Hyperboost and (hw-1020) Custom do not hold a set point, so manual is modeled in Balanced only. hw-0922: Max Fan ramps to 4700 at ~40 RPM/s"
   },
   "rules": [
     {

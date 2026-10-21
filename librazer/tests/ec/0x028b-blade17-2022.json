@@ -62,8 +62,28 @@
     },
     {
       "command": "0x0d07",
+      "args": [
+        1,
+        1,
+        1
+      ],
       "support": "works",
-      "evidence": "measured issue-10: GPU High -> Low set and read back"
+      "evidence": "measured issue-10: CPU boost Medium set"
+    },
+    {
+      "command": "0x0d07",
+      "args": [
+        1,
+        2,
+        0
+      ],
+      "support": "works",
+      "evidence": "measured issue-10: GPU boost High -> Low set and read back"
+    },
+    {
+      "command": "0x0d07",
+      "support": "unknown",
+      "evidence": "other boost values not reported"
     },
     {
       "command": "0x0d87",

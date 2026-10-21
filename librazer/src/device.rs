@@ -136,8 +136,8 @@ impl Device {
     ///
     /// For caller-supplied raw commands (`razer-cli ... cmd`): a Failure there may mean the
     /// command ran and reported an error, and nothing establishes that an arbitrary command is
-    /// idempotent, so sending it four more times is not a safe default. Busy (the EC did not
-    /// action it) and bus mismatches are still retried.
+    /// idempotent, so sending it four more times is not a safe default. Only Busy (the EC did
+    /// not action it) is retried; a mismatch or a transport error is final too.
     pub fn send_once(&self, report: Packet) -> Result<Packet> {
         self.exchange(report, false)
     }

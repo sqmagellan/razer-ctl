@@ -126,6 +126,11 @@ pub struct FanModel {
     /// For [`ManualFan::Holds`]: what the fans hold whatever the set point.
     #[serde(default)]
     pub hold_rpm: [u16; 2],
+    /// The perf modes (wire values) `manual` was observed in; empty means all. In any
+    /// other mode an actual-speed read in Manual is a gap: Hyperboost on 0x029F treats a
+    /// set point as a floor under its own curve, so one mode says nothing about another.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_observed_in: Vec<u8>,
     pub evidence: String,
 }
 
@@ -213,10 +218,17 @@ impl Model {
         Ok(model)
     }
 
-    /// A model from a read-only capture. Every rule it can fill is measured from the
-    /// capture; writes have no rule (a read-only probe can't say what they do), and the
-    /// fan dynamics are unknown. Annotate it by hand from issue reports and hardware runs.
-    pub fn from_capture(cap: &Capture, source: &str) -> Model {
+    /// A model from a read-only capture. Each rule is the answer to one request (command
+    /// and args), measured from the exchanges for that request; writes have no rule (a
+    /// read-only probe can't say what they do), and the fan dynamics are unknown. Annotate
+    /// it by hand from issue reports and hardware runs. A `writes` capture is refused:
+    /// an acknowledged write and one that took look the same in an exchange.
+    pub fn from_capture(cap: &Capture, source: &str) -> Result<Model> {
+        anyhow::ensure!(
+            cap.mode == "read-only",
+            "only a read-only capture becomes a model (this one is {:?})",
+            cap.mode
+        );
         let mut state = State {
             perf_mode: [0; 2],
             fan_mode: [0; 2],
@@ -233,11 +245,13 @@ impl Model {
             lights_always_on: 0,
         };
         let mut rules: Vec<Rule> = Vec::new();
-        // Readings after the first write show what the probe set, not the starting state.
-        let mut wrote = false;
         for step in &cap.steps {
-            wrote |= step.command & 0x0080 == 0;
-            let support = match step.exchanges.last().map(|e| &e.outcome) {
+            let own = step
+                .exchanges
+                .iter()
+                .rev()
+                .find(|e| e.command == step.command && e.args == step.args);
+            let support = match own.map(|e| &e.outcome) {
                 Some(Outcome::Response { verdict, .. }) => match verdict {
                     Verdict::Ok => Support::Works,
                     Verdict::NotSupported => Support::NotSupported,
@@ -247,16 +261,16 @@ impl Model {
                 },
                 _ => Support::Unknown,
             };
-            if let (false, StepResult::Ok { args }) = (wrote, &step.result) {
+            if let StepResult::Ok { args } = &step.result {
                 note_reading(&mut state, step.command, &step.args, args);
             }
             let known = rules
                 .iter()
-                .any(|r| r.command == step.command && r.args.is_none());
+                .any(|r| r.command == step.command && r.args.as_ref() == Some(&step.args));
             if !known {
                 rules.push(Rule {
                     command: step.command,
-                    args: None,
+                    args: Some(step.args.clone()),
                     support,
                     evidence: match &step.check {
                         Some(check) => format!("measured {source}: {}; {check}", step.label),
@@ -266,7 +280,7 @@ impl Model {
                 });
             }
         }
-        Model {
+        Ok(Model {
             format: FORMAT.into(),
             name: cap.machine.profile.clone(),
             pid: cap.machine.pid,
@@ -286,12 +300,13 @@ impl Model {
                 max_fan_rpm: 0,
                 slew_rpm_per_s: 0,
                 hold_rpm: [0; 2],
+                manual_observed_in: Vec::new(),
                 evidence: format!("measured {source}: Auto reading only; manual unknown"),
             },
             state,
             rules,
             faults: Vec::new(),
-        }
+        })
     }
 }
 
@@ -476,6 +491,9 @@ impl Inner {
         if self.state.fan_mode[z] != MANUAL {
             return Some(fan.auto_rpm[z]);
         }
+        if !self.manual_observed(z) {
+            return None;
+        }
         match fan.manual {
             ManualFan::Honored => Some(
                 self.state.setpoint_rpm[z]
@@ -485,6 +503,13 @@ impl Inner {
             ManualFan::Holds => Some(fan.hold_rpm[z]),
             ManualFan::Unknown => None,
         }
+    }
+
+    /// Whether the manual-fan behavior was observed in zone `z`'s current perf mode.
+    fn manual_observed(&self, z: usize) -> bool {
+        let modes = &self.model.fan.manual_observed_in;
+        self.model.fan.manual != ManualFan::Unknown
+            && (modes.is_empty() || modes.contains(&self.state.perf_mode[z]))
     }
 
     fn gap(&self, request: &[u8], command: u16, why: impl Into<String>) -> Unmodeled {
@@ -566,20 +591,14 @@ impl Inner {
         if let Some(reply) = rule.reply {
             return Ok((0x02, reply));
         }
-        self.apply(command, &args)
-            .map(|reply| (0x02, reply))
-            .ok_or_else(|| {
-                self.gap(
-                    &args,
-                    command,
-                    "works, but the simulator has no reply for it",
-                )
-            })
+        match self.apply(command, &args) {
+            Ok(reply) => Ok((0x02, reply)),
+            Err(why) => Err(self.gap(&args, command, why)),
+        }
     }
 
-    /// Do what a working command does; the reply args, or `None` for a command the
-    /// simulator doesn't know.
-    fn apply(&mut self, command: u16, args: &[u8]) -> Option<Vec<u8>> {
+    /// Do what a working command does: the reply args, or why the model can't say.
+    fn apply(&mut self, command: u16, args: &[u8]) -> std::result::Result<Vec<u8>, String> {
         let at = |i: usize| args.get(i).copied().unwrap_or(0);
         let z = (at(1) as usize).clamp(1, 2) - 1;
         let s = &mut self.state;
@@ -601,6 +620,12 @@ impl Inner {
             0x0d81 => vec![0, at(1), (s.setpoint_rpm[z] / 100) as u8],
             0x0d88 => {
                 let zone = at(1);
+                if self.state.fan_mode[z] == MANUAL && !self.manual_observed(z) {
+                    return Err(format!(
+                        "manual fan behavior not observed in perf mode {}",
+                        self.state.perf_mode[z]
+                    ));
+                }
                 let bogus = self.faults.iter_mut().any(|f| match f {
                     Fault::LoneZoneZero { zone: fz, reads } if *fz == zone && *reads > 0 => {
                         *reads -= 1;
@@ -623,6 +648,9 @@ impl Inner {
                 vec![0, at(1), level]
             }
             0x070f => {
+                if s.perf_mode[0] != CUSTOM {
+                    return Err("Max Fan outside Custom not observed".into());
+                }
                 s.max_fan = at(0);
                 args.to_vec()
             }
@@ -671,9 +699,9 @@ impl Inner {
             0x0084 => vec![s.lights_always_on, 0],
             // Keyboard custom frame rows and the "show the frame" command echo.
             0x030b | 0x030a => args.to_vec(),
-            _ => return None,
+            _ => return Err("works, but the simulator has no reply for it".into()),
         };
-        Some(reply)
+        Ok(reply)
     }
 }
 
@@ -746,6 +774,7 @@ mod tests {
                 max_fan_rpm: 4700,
                 slew_rpm_per_s: 30,
                 hold_rpm: [0; 2],
+                manual_observed_in: Vec::new(),
                 evidence: "inferred: test model".into(),
             },
             rules: [

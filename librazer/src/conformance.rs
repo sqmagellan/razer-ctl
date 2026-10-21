@@ -7,7 +7,7 @@
 //! A gap is a command a model has no observation for. Each fixture's gaps, with the
 //! rule's note, are the questions still open for that laptop.
 
-use crate::capture::{Machine, StepResult};
+use crate::capture::{Machine, Outcome, Recording, StepResult, Verdict};
 use crate::sim::{self, Fault, Model, SimTransport};
 use crate::state::{DeviceState, FanSpeed, PerfMode};
 use crate::types::{CpuBoost, GpuBoost};
@@ -58,24 +58,43 @@ fn profile(perf_mode: PerfMode, fan_speed: FanSpeed, max_fan: bool) -> DeviceSta
 
 const CUSTOM: PerfMode = PerfMode::Custom(CpuBoost::Medium, GpuBoost::High);
 
+/// Apply `intent`, then check the EC ended where it was asked: `apply` returning Ok only
+/// means every write was answered.
+fn applied(d: &SimTransport, intent: DeviceState) -> anyhow::Result<()> {
+    intent.apply(d)?;
+    let now = DeviceState::read(d)?;
+    anyhow::ensure!(
+        (now.perf_mode, now.fan_speed, now.max_fan)
+            == (intent.perf_mode, intent.fan_speed, intent.max_fan),
+        "applied, but the EC reads {:?}/{:?}/max fan {}",
+        now.perf_mode,
+        now.fan_speed,
+        now.max_fan
+    );
+    Ok(())
+}
+
 type Scenario = fn(&SimTransport) -> anyhow::Result<()>;
 
 const SCENARIOS: &[(&str, Scenario)] = &[
     ("read", |d| DeviceState::read(d).map(|_| ())),
     ("apply balanced", |d| {
-        profile(PerfMode::Balanced, FanSpeed::Auto, false).apply(d)
+        applied(d, profile(PerfMode::Balanced, FanSpeed::Auto, false))
     }),
     ("apply silent", |d| {
-        profile(PerfMode::Silent, FanSpeed::Auto, false).apply(d)
+        applied(d, profile(PerfMode::Silent, FanSpeed::Auto, false))
     }),
     ("apply custom", |d| {
-        profile(CUSTOM, FanSpeed::Auto, false).apply(d)
+        applied(d, profile(CUSTOM, FanSpeed::Auto, false))
     }),
     ("apply custom + max fan", |d| {
-        profile(CUSTOM, FanSpeed::Auto, true).apply(d)
+        applied(d, profile(CUSTOM, FanSpeed::Auto, true))
     }),
     ("apply manual 3000", |d| {
-        profile(PerfMode::Balanced, FanSpeed::Manual(3000), false).apply(d)
+        applied(
+            d,
+            profile(PerfMode::Balanced, FanSpeed::Manual(3000), false),
+        )
     }),
     ("enforce after drift", |d| {
         crate::command::set_perf_mode(d, crate::types::PerfMode::Silent)?;
@@ -89,7 +108,9 @@ const SCENARIOS: &[(&str, Scenario)] = &[
         Ok(())
     }),
     ("fan reads", |d| {
-        crate::state::sample_fan_rpm(d, 3).map(|_| ())
+        let (rpm, trusted) = crate::state::sample_fan_rpm(d, 3)?;
+        anyhow::ensure!(trusted, "no two agreeing reads (last {rpm:?})");
+        Ok(())
     }),
 ];
 
@@ -136,7 +157,31 @@ fn report() -> String {
             } else {
                 format!("  [gaps: {}]", gaps.join(", "))
             };
-            out.push_str(&format!("{scenario}: {}{gaps}\n", outcome(&result)));
+            // Every 0x05 answer, not only the first error: one scenario can hit several.
+            let mut rejected: Vec<String> = sim
+                .drain_exchanges()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.outcome,
+                        Outcome::Response {
+                            verdict: Verdict::NotSupported,
+                            ..
+                        }
+                    )
+                })
+                .map(|e| format!("{:#06x} {:?}", e.command, e.args))
+                .collect();
+            rejected.dedup();
+            let rejected = if rejected.is_empty() {
+                String::new()
+            } else {
+                format!("  [0x05: {}]", rejected.join(", "))
+            };
+            out.push_str(&format!(
+                "{scenario}: {}{rejected}{gaps}\n",
+                outcome(&result)
+            ));
             for g in sim.gaps() {
                 let q = format!("{:#06x} {:?}: {}", g.command, g.args, g.why);
                 if !questions.contains(&q) {
@@ -154,6 +199,12 @@ fn report() -> String {
             catalogued,
         };
         let cap = crate::probe::run(&sim, machine, "conformance");
+        for g in sim.gaps() {
+            let q = format!("{:#06x} {:?}: {}", g.command, g.args, g.why);
+            if !questions.contains(&q) {
+                questions.push(q);
+            }
+        }
         let failed: Vec<&str> = cap
             .steps
             .iter()

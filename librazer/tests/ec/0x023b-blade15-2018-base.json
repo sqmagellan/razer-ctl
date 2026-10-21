@@ -57,8 +57,28 @@
     },
     {
       "command": "0x0d02",
+      "args": [
+        1,
+        1,
+        0
+      ],
       "support": "works",
-      "evidence": "measured issue-2: perf and fan mode sets accepted; perf modes change nothing noticeable"
+      "evidence": "measured issue-2: fan Auto/Manual switching in Balanced works"
+    },
+    {
+      "command": "0x0d02",
+      "args": [
+        1,
+        2,
+        0
+      ],
+      "support": "works",
+      "evidence": "measured issue-2: fan Auto/Manual switching in Balanced works"
+    },
+    {
+      "command": "0x0d02",
+      "support": "unknown",
+      "evidence": "other perf modes: accepted, with no noticeable effect; read-back not reported"
     },
     {
       "command": "0x0d01",

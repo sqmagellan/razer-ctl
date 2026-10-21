@@ -47,6 +47,9 @@
       3200,
       3300
     ],
+    "manual_observed_in": [
+      7
+    ],
     "evidence": "measured issue-1: Auto at 2700/2700 in Hyperboost and down to 0; any manual set point holds 3200/3300 (tried in Hyperboost only); Max Fan in Custom 5200/5300"
   },
   "rules": [

@@ -191,8 +191,16 @@ pub struct Step {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StepResult {
-    Ok { args: Vec<u8> },
-    Error { error: String },
+    Ok {
+        args: Vec<u8>,
+    },
+    Error {
+        error: String,
+    },
+    /// Not run: cancelled, or a prerequisite didn't take.
+    Skipped {
+        reason: String,
+    },
 }
 
 /// `u16` command codes as `"0x0d82"` in JSON, which is how every issue and note writes them.
