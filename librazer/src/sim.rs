@@ -219,7 +219,10 @@ impl Model {
             lights_always_on: 0,
         };
         let mut rules: Vec<Rule> = Vec::new();
+        // Readings after the first write show what the probe set, not the starting state.
+        let mut wrote = false;
         for step in &cap.steps {
+            wrote |= step.command & 0x0080 == 0;
             let support = match step.exchanges.last().map(|e| &e.outcome) {
                 Some(Outcome::Response { verdict, .. }) => match verdict {
                     Verdict::Ok => Support::Works,
@@ -230,7 +233,7 @@ impl Model {
                 },
                 _ => Support::Unknown,
             };
-            if let StepResult::Ok { args } = &step.result {
+            if let (false, StepResult::Ok { args }) = (wrote, &step.result) {
                 note_reading(&mut state, step.command, &step.args, args);
             }
             let known = rules
@@ -241,7 +244,10 @@ impl Model {
                     command: step.command,
                     args: None,
                     support,
-                    evidence: format!("measured {source}: {}", step.label),
+                    evidence: match &step.check {
+                        Some(check) => format!("measured {source}: {}; {check}", step.label),
+                        None => format!("measured {source}: {}", step.label),
+                    },
                     reply: None,
                 });
             }

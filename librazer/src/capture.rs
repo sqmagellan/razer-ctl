@@ -153,9 +153,13 @@ pub struct Capture {
     /// The tool and version that made it, e.g. `razer-cli 0.8.9`.
     pub tool: String,
     pub machine: Machine,
-    /// `read-only`, or the write set's name.
+    /// `read-only`, or `writes` (`razer-cli probe --writes`).
     pub mode: String,
     pub steps: Vec<Step>,
+    /// For `writes`: `verified` once the settings read back as they were before the
+    /// first write, or what failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +181,9 @@ pub struct Step {
     pub command: u16,
     pub args: Vec<u8>,
     pub result: StepResult,
+    /// For a write: what the read-back showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
     /// Every attempt the step took, in order.
     pub exchanges: Vec<Exchange>,
 }

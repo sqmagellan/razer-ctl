@@ -470,10 +470,22 @@ fn enumerate(as_json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `probe`: read-only capture of every getter (see `librazer::probe`). The summary goes to
-/// stderr so stdout stays clean JSON.
-fn probe(out: Option<&String>) -> Result<()> {
+/// `probe`: a capture of every getter, and with `--writes` the write set (see
+/// `librazer::probe`). The summary goes to stderr so stdout stays clean JSON.
+fn probe(
+    out: Option<&String>,
+    writes: bool,
+    settle_secs: u64,
+    restore: Option<&String>,
+) -> Result<()> {
     let device = device::Device::detect()?.recording();
+    if let Some(path) = restore {
+        let snap: librazer::probe::Snapshot =
+            serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        librazer::probe::restore(&device, &snap)?;
+        eprintln!("restored and verified the settings saved in {path}");
+        return Ok(());
+    }
     let (_, model_number) = device::Device::enumerate()?;
     let catalogued =
         librazer::matching::find_descriptor(&model_number, librazer::descriptor::SUPPORTED)
@@ -485,7 +497,41 @@ fn probe(out: Option<&String>) -> Result<()> {
         catalogued,
     };
     let tool = concat!("razer-cli ", env!("CARGO_PKG_VERSION"));
-    let capture = librazer::probe::run(&device, machine, tool);
+    let capture = if writes {
+        // The tray re-asserts its own settings and would fight the write set.
+        let mut sys = System::new_all();
+        sys.refresh_processes();
+        if sys
+            .processes()
+            .values()
+            .any(|p| p.name().eq_ignore_ascii_case("razer-tray.exe"))
+        {
+            bail!("close razer-tray first (right-click the tray icon, Exit), then run this again");
+        }
+        let snap = librazer::probe::snapshot(&device)?;
+        let recovery = match out {
+            Some(path) => format!("{path}.recovery.json"),
+            None => "razer-probe-recovery.json".to_string(),
+        };
+        std::fs::write(&recovery, serde_json::to_string_pretty(&snap)? + "\n")?;
+        eprintln!(
+            "saved the current settings to {recovery}; if this run is interrupted, put them back with: razer-cli probe --restore {recovery}"
+        );
+        let capture = librazer::probe::run_writes(
+            &device,
+            machine,
+            tool,
+            &snap,
+            device.info.fan_rpm_range,
+            std::time::Duration::from_secs(settle_secs),
+        );
+        if capture.restored.as_deref() == Some("verified") {
+            std::fs::remove_file(&recovery)?;
+        }
+        capture
+    } else {
+        librazer::probe::run(&device, machine, tool)
+    };
     eprint!("{}", librazer::probe::summary(&capture));
     let json = serde_json::to_string_pretty(&capture)? + "\n";
     match out {
@@ -826,7 +872,21 @@ fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
         .subcommand(
             clap::Command::new("probe")
                 .about("Read every setting the tools use and record each answer from the EC, for a device-support issue (read-only)")
-                .arg(arg!(-o --out <FILE> "Write the JSON to FILE instead of stdout").required(false)),
+                .arg(arg!(-o --out <FILE> "Write the JSON to FILE instead of stdout").required(false))
+                .arg(
+                    arg!(--writes "Also change perf mode, boosts, Max Fan and the fan for a few minutes, reading each back, then restore them (close the tray first)")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    arg!(--settle <SECS> "With --writes: how long to watch the fans settle at each set point")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("60"),
+                )
+                .arg(
+                    arg!(--restore <FILE> "Put back the settings an interrupted --writes run saved")
+                        .required(false)
+                        .conflicts_with("writes"),
+                ),
         )
         .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"))
 }
@@ -860,7 +920,12 @@ fn real_main() -> Result<()> {
             taskkill()?;
         }
         Some(("probe", submatches)) => {
-            probe(submatches.get_one::<String>("out"))?;
+            probe(
+                submatches.get_one::<String>("out"),
+                submatches.get_flag("writes"),
+                *submatches.get_one::<u64>("settle").unwrap(),
+                submatches.get_one::<String>("restore"),
+            )?;
         }
         Some(("auto", submatches)) => {
             // Set above when the first argument is `auto`; the expect documents that
@@ -953,6 +1018,8 @@ mod tests {
             &["enumerate", "--json"],
             &["probe"],
             &["probe", "--out", "capture.json"],
+            &["probe", "--writes", "--settle", "90"],
+            &["probe", "--restore", "razer-probe-recovery.json"],
             &["auto", "kbd-lighting", "color", "#ff0000"],
             &[
                 "auto",

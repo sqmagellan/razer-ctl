@@ -204,11 +204,10 @@ fn every_rule_says_where_its_evidence_came_from() {
     for (name, json) in FIXTURES {
         let m = model(json);
         for r in &m.rules {
-            let source = r.evidence.strip_prefix("measured ").map(|rest| {
-                rest.split(|c: char| c == ':' || c == ';' || c == ' ')
-                    .next()
-                    .unwrap_or("")
-            });
+            let source = r
+                .evidence
+                .strip_prefix("measured ")
+                .map(|rest| rest.split([':', ';', ' ']).next().unwrap_or(""));
             match source {
                 Some(id) => assert!(
                     m.sources.contains_key(id),
