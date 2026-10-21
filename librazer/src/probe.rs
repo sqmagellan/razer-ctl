@@ -170,54 +170,89 @@ pub fn snapshot(device: &impl HidTransport) -> anyhow::Result<Snapshot> {
     })
 }
 
-/// The fields of `after` that differ from `before`, skipping boosts `before` couldn't read.
-fn differences(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+// Each field is read on its own, so a failed read leaves the other fields known.
+
+fn read_modes(device: &impl HidTransport) -> Option<(u8, u8)> {
+    crate::command::get_perf_mode(device)
+        .ok()
+        .map(|(p, f)| (p as u8, f as u8))
+}
+
+fn read_setpoints(device: &impl HidTransport) -> Option<[u16; 2]> {
+    use crate::types::FanZone;
+    Some([
+        crate::command::get_fan_rpm(device, FanZone::Zone1).ok()?,
+        crate::command::get_fan_rpm(device, FanZone::Zone2).ok()?,
+    ])
+}
+
+fn read_cpu(device: &impl HidTransport) -> Option<u8> {
+    crate::command::get_cpu_boost(device).ok().map(|b| b as u8)
+}
+
+fn read_gpu(device: &impl HidTransport) -> Option<u8> {
+    crate::command::get_gpu_boost(device).ok().map(|b| b as u8)
+}
+
+fn read_max_fan(device: &impl HidTransport) -> Option<u8> {
+    crate::command::get_max_fan_speed_mode(device)
+        .ok()
+        .map(|m| m as u8)
+}
+
+/// Every snapshotted field that can't be read now or differs from `snap`. Fields the
+/// snapshot couldn't read (a boost outside Custom) aren't checked.
+fn verify(device: &impl HidTransport, snap: &Snapshot) -> Vec<String> {
     let mut out = Vec::new();
-    let mut check = |name: &str, was: String, now: String| {
-        if was != now {
-            out.push(format!("{name} was {was}, now {now}"));
-        }
+    let mut check = |name: &str, want: String, got: Option<String>| match got {
+        None => out.push(format!("{name} couldn't be read back")),
+        Some(got) if got != want => out.push(format!("{name} was {want}, now {got}")),
+        Some(_) => {}
     };
+    let modes = read_modes(device);
     check(
         "perf mode",
-        before.perf_mode.to_string(),
-        after.perf_mode.to_string(),
+        snap.perf_mode.to_string(),
+        modes.map(|m| m.0.to_string()),
     );
     check(
         "fan mode",
-        before.fan_mode.to_string(),
-        after.fan_mode.to_string(),
+        snap.fan_mode.to_string(),
+        modes.map(|m| m.1.to_string()),
     );
     check(
         "set points",
-        format!("{:?}", before.setpoint_rpm),
-        format!("{:?}", after.setpoint_rpm),
+        format!("{:?}", snap.setpoint_rpm),
+        read_setpoints(device).map(|s| format!("{s:?}")),
     );
-    if before.cpu_boost.is_some() {
+    if let Some(cpu) = snap.cpu_boost {
         check(
             "CPU boost",
-            format!("{:?}", before.cpu_boost),
-            format!("{:?}", after.cpu_boost),
+            cpu.to_string(),
+            read_cpu(device).map(|v| v.to_string()),
         );
     }
-    if before.gpu_boost.is_some() {
+    if let Some(gpu) = snap.gpu_boost {
         check(
             "GPU boost",
-            format!("{:?}", before.gpu_boost),
-            format!("{:?}", after.gpu_boost),
+            gpu.to_string(),
+            read_gpu(device).map(|v| v.to_string()),
         );
     }
-    check(
-        "Max Fan",
-        format!("{:?}", before.max_fan),
-        format!("{:?}", after.max_fan),
-    );
+    if let Some(max) = snap.max_fan {
+        check(
+            "Max Fan",
+            max.to_string(),
+            read_max_fan(device).map(|v| v.to_string()),
+        );
+    }
     out
 }
 
 /// Put back what differs from `snap`, in dependency order, past any failed write, then
-/// verify every snapshotted field. The error lists every write that failed and every
-/// field still different.
+/// verify every snapshotted field. Each field is read on its own, so one failed read only
+/// makes that field's write unconditional. The error lists every write that failed and
+/// every field still different or unreadable.
 pub fn restore(device: &impl HidTransport, snap: &Snapshot) -> anyhow::Result<()> {
     use crate::command;
     use crate::types::{CpuBoost, FanMode, GpuBoost, MaxFanSpeedMode, PerfMode};
@@ -229,25 +264,25 @@ pub fn restore(device: &impl HidTransport, snap: &Snapshot) -> anyhow::Result<()
             problems.push(format!("{what}: {e:#}"));
         }
     };
-    let now = || snapshot(device).ok();
+    // `None` from a read counts as moved: the write is cheaper than a wrong guess.
+    let moved = |want: u8, got: Option<u8>| got != Some(want);
 
-    // Boosts live in Custom, so they go back first, from Custom.
-    let boosts_moved = match (snap.cpu_boost, snap.gpu_boost) {
-        (Some(c), Some(g)) => {
-            now().is_none_or(|n| n.cpu_boost != Some(c) || n.gpu_boost != Some(g))
-        }
-        _ => false,
-    };
+    // Boosts live in Custom, so each known one goes back first, from Custom.
+    let cpu = snap.cpu_boost.filter(|&c| moved(c, read_cpu(device)));
+    let gpu = snap.gpu_boost.filter(|&g| moved(g, read_gpu(device)));
+    let boosts_moved = cpu.is_some() || gpu.is_some();
     if boosts_moved {
         note(
             "enter Custom",
             command::set_perf_mode(device, PerfMode::Custom),
         );
-        if let (Some(c), Some(g)) = (snap.cpu_boost, snap.gpu_boost) {
+        if let Some(c) = cpu {
             note(
                 "CPU boost",
                 CpuBoost::try_from(c).and_then(|b| command::set_cpu_boost(device, b)),
             );
+        }
+        if let Some(g) = gpu {
             note(
                 "GPU boost",
                 GpuBoost::try_from(g).and_then(|b| command::set_gpu_boost(device, b)),
@@ -255,11 +290,11 @@ pub fn restore(device: &impl HidTransport, snap: &Snapshot) -> anyhow::Result<()
         }
     }
     // A perf write resets the fan to Auto on both zones.
-    if boosts_moved || now().is_none_or(|n| n.perf_mode != snap.perf_mode) {
+    if boosts_moved || moved(snap.perf_mode, read_modes(device).map(|m| m.0)) {
         note("perf mode", command::set_perf_mode(device, perf));
     }
     // Set points are written in Manual, where what they do is measured, then the fan mode.
-    let setpoints_moved = now().is_none_or(|n| n.setpoint_rpm != snap.setpoint_rpm);
+    let setpoints_moved = read_setpoints(device) != Some(snap.setpoint_rpm);
     if setpoints_moved {
         note(
             "fan Manual for the set points",
@@ -275,12 +310,12 @@ pub fn restore(device: &impl HidTransport, snap: &Snapshot) -> anyhow::Result<()
             );
         }
     }
-    if setpoints_moved || now().is_none_or(|n| n.fan_mode != snap.fan_mode) {
+    if setpoints_moved || moved(snap.fan_mode, read_modes(device).map(|m| m.1)) {
         note("fan mode", command::set_fan_mode(device, fan));
     }
     // Max Fan exists only in Custom; leaving Custom already cleared it.
     if let Some(max) = snap.max_fan {
-        if now().is_none_or(|n| n.max_fan != Some(max)) {
+        if moved(max, read_max_fan(device)) {
             note(
                 "Max Fan",
                 MaxFanSpeedMode::try_from(max)
@@ -289,10 +324,7 @@ pub fn restore(device: &impl HidTransport, snap: &Snapshot) -> anyhow::Result<()
         }
     }
 
-    match snapshot(device) {
-        Ok(after) => problems.extend(differences(snap, &after)),
-        Err(e) => problems.push(format!("reading the result: {e:#}")),
-    }
+    problems.extend(verify(device, snap));
     if problems.is_empty() {
         Ok(())
     } else {
@@ -764,6 +796,53 @@ mod tests {
         assert_eq!(end.perf_mode, [4, 4], "the perf mode was still put back");
         assert_eq!(end.fan_mode, [1, 1], "and the fan");
         assert_eq!(end.setpoint_rpm, [3000, 3000]);
+    }
+
+    fn rule(command: u16, args: Option<Vec<u8>>, support: crate::sim::Support) -> crate::sim::Rule {
+        crate::sim::Rule {
+            command,
+            args,
+            support,
+            evidence: "inferred: test".into(),
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn a_half_known_boost_snapshot_still_restores_the_known_half() {
+        let mut before = blade16();
+        // The GPU boost can't be read outside Custom on this EC; the CPU boost can.
+        before.rules.insert(
+            0,
+            rule(0x0d87, Some(vec![0, 2]), crate::sim::Support::Failure),
+        );
+        let snap = snapshot(&SimTransport::new(before.clone())).unwrap();
+        assert_eq!((snap.cpu_boost, snap.gpu_boost), (Some(1), None));
+        let mut moved = before.clone();
+        moved.state.cpu_boost = 3;
+        let sim = SimTransport::new(moved);
+        restore(&sim, &snap).unwrap();
+        assert_eq!(sim.state().cpu_boost, 1);
+        assert_eq!(sim.state().perf_mode, [0, 0], "and back out of Custom");
+    }
+
+    #[test]
+    fn an_unreadable_field_does_not_hide_the_others() {
+        let mut before = blade16();
+        before.state.perf_mode = [4, 4];
+        let snap = snapshot(&SimTransport::new(before.clone())).unwrap();
+        let mut moved = before.clone();
+        moved.state.perf_mode = [0, 0];
+        moved.state.setpoint_rpm = [4000, 4000];
+        moved
+            .rules
+            .insert(0, rule(0x078f, None, crate::sim::Support::Failure));
+        let sim = SimTransport::new(moved);
+        let err = format!("{:#}", restore(&sim, &snap).unwrap_err());
+        assert!(err.contains("Max Fan couldn't be read back"), "{err}");
+        assert!(!err.contains("perf mode was"), "{err}");
+        assert_eq!(sim.state().perf_mode, [4, 4]);
+        assert_eq!(sim.state().setpoint_rpm, [0, 0]);
     }
 
     #[test]

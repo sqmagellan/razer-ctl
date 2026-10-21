@@ -626,21 +626,18 @@ fn probe(
             std::time::Duration::from_secs(settle_secs),
             &cancel,
         );
-        if capture
+        let verified = capture
             .restored
             .as_deref()
-            .is_some_and(|r| r.starts_with("verified"))
-        {
+            .is_some_and(|r| r.starts_with("verified"));
+        if verified {
             std::fs::remove_file(&recovery)?;
-        } else {
-            eprintln!(
-                "the restore didn't verify; the settings from before are still in {recovery}"
-            );
         }
-        capture
+        (capture, (!verified).then_some(recovery))
     } else {
-        librazer::probe::run(device, machine, tool)
+        (librazer::probe::run(device, machine, tool), None)
     };
+    let (capture, unrestored) = capture;
     eprint!("{}", librazer::probe::summary(&capture));
     let json = serde_json::to_string_pretty(&capture)? + "\n";
     match out {
@@ -649,6 +646,12 @@ fn probe(
             eprintln!("wrote {path}");
         }
         None => print!("{json}"),
+    }
+    // The capture is saved either way; a restore that didn't verify is still a failure.
+    if let Some(recovery) = unrestored {
+        bail!(
+            "the settings were not all put back; they are still in {recovery}: run razer-cli probe --restore {recovery}"
+        );
     }
     Ok(())
 }
