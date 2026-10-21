@@ -1,0 +1,194 @@
+{
+  "format": "razer-ctl-ec-model/1",
+  "name": "Razer Blade 16 (2023)",
+  "pid": "0x029f",
+  "sources": {
+    "hw-0620": "maintainer's Blade 16 (2023), hardware run 2026-06-19/20: logo zone, keyboard brightness and Fn-key changes, lights-always-on flag",
+    "hw-0710": "maintainer's Blade 16 (2023), hardware run 2026-07-10: keyboard effects",
+    "hw-0815": "maintainer's Blade 16 (2023), hardware run 2026-08-15: manual fan floor sweep (raw 0x0d01) and Get Thermal Fan Info",
+    "hw-0922": "maintainer's Blade 16 (2023), hardware run 2026-09-22: Max Fan ramp and charge limit",
+    "hw-0923": "maintainer's Blade 16 (2023), hardware run 2026-09-23: EC command probe and the keyboard custom frame",
+    "hw-1014": "maintainer's Blade 16 (2023), hardware run 2026-10-14: manual set points read back",
+    "hw-1019": "maintainer's Blade 16 (2023), hardware run 2026-10-19: perf transitions and Max Fan at four boost pairs. Once that day, writes from Balanced were acknowledged and ignored; not reproduced 2026-10-20 after 7.2 h of Modern Standby (9 of 9 writes read back)"
+  },
+  "state": {
+    "perf_mode": [
+      0,
+      0
+    ],
+    "fan_mode": [
+      0,
+      0
+    ],
+    "setpoint_rpm": [
+      0,
+      0
+    ],
+    "actual_rpm": [
+      2000,
+      1800
+    ],
+    "cpu_boost": 1,
+    "gpu_boost": 2,
+    "max_fan": 0,
+    "logo_power": 1,
+    "logo_mode": 0,
+    "kbd_brightness": 200,
+    "kbd_effect": 3,
+    "battery_care": 208,
+    "lights_always_on": 0
+  },
+  "fan": {
+    "auto_rpm": [
+      2000,
+      1800
+    ],
+    "manual": "honored",
+    "floor_rpm": 2000,
+    "ceiling_rpm": 5000,
+    "max_fan_rpm": 4700,
+    "slew_rpm_per_s": 30,
+    "hold_rpm": [
+      0,
+      0
+    ],
+    "evidence": "measured hw-0815: manual floor exactly 2000 (set points below it hold 2000, symmetric on both zones); Auto is off (0) or at least ~1800, idle 2000/1800; manual slew ~23-35 RPM/s. hw-0922: Max Fan ramps to 4700 at ~40 RPM/s"
+  },
+  "rules": [
+    {
+      "command": "0x0d02",
+      "support": "works",
+      "evidence": "measured hw-1019: 10 of 10 perf transitions read back while awake"
+    },
+    {
+      "command": "0x0d82",
+      "support": "works",
+      "evidence": "measured hw-1019"
+    },
+    {
+      "command": "0x0d01",
+      "support": "works",
+      "evidence": "measured hw-0815: 3000 and 2000 honored exactly; below 2000 the fans hold 2000"
+    },
+    {
+      "command": "0x0d81",
+      "support": "works",
+      "evidence": "measured hw-1014: 3000 and 4000 read back on both zones; hw-0815: a set point below the floor also reads back as written"
+    },
+    {
+      "command": "0x0d88",
+      "support": "works",
+      "evidence": "measured hw-0815: 100 RPM steps; about 3 in 10 sparse reads carry one bogus zone"
+    },
+    {
+      "command": "0x0d07",
+      "support": "works",
+      "evidence": "measured hw-1019: CPU medium/boost, GPU low/high"
+    },
+    {
+      "command": "0x0d87",
+      "support": "works",
+      "evidence": "measured hw-1019"
+    },
+    {
+      "command": "0x070f",
+      "support": "works",
+      "evidence": "measured hw-0922: Enable ramps both fans 2100 to 4700 in Custom; hw-1019: Enable and Disable read back at four boost pairs"
+    },
+    {
+      "command": "0x078f",
+      "support": "works",
+      "evidence": "measured hw-1019"
+    },
+    {
+      "command": "0x0712",
+      "support": "works",
+      "evidence": "measured hw-0922: charge limit 70 set"
+    },
+    {
+      "command": "0x0792",
+      "support": "works",
+      "evidence": "measured hw-0922"
+    },
+    {
+      "command": "0x0300",
+      "support": "works",
+      "evidence": "measured hw-0620: the logo is its own light zone"
+    },
+    {
+      "command": "0x0380",
+      "support": "works",
+      "evidence": "measured hw-0620"
+    },
+    {
+      "command": "0x0302",
+      "support": "works",
+      "evidence": "measured hw-0620"
+    },
+    {
+      "command": "0x0382",
+      "support": "works",
+      "evidence": "measured hw-0620"
+    },
+    {
+      "command": "0x0303",
+      "support": "works",
+      "evidence": "measured hw-0620"
+    },
+    {
+      "command": "0x0383",
+      "support": "works",
+      "evidence": "measured hw-0620: Fn-key brightness changes read back"
+    },
+    {
+      "command": "0x0f02",
+      "support": "works",
+      "evidence": "measured hw-0710"
+    },
+    {
+      "command": "0x0f82",
+      "support": "works",
+      "evidence": "measured hw-0710; it keeps reporting the stored effect while a custom frame shows (hw-0923)"
+    },
+    {
+      "command": "0x0004",
+      "support": "works",
+      "evidence": "measured hw-0620: lights-always-on firmware flag"
+    },
+    {
+      "command": "0x0084",
+      "support": "works",
+      "evidence": "measured hw-0620"
+    },
+    {
+      "command": "0x030b",
+      "support": "works",
+      "evidence": "measured hw-0923: custom frame rows in Normal mode"
+    },
+    {
+      "command": "0x030a",
+      "support": "works",
+      "evidence": "measured hw-0923"
+    },
+    {
+      "command": "0x0086",
+      "support": "not_supported",
+      "evidence": "measured hw-0815: Get Thermal Fan Info"
+    },
+    {
+      "command": "0x0088",
+      "support": "not_supported",
+      "evidence": "measured hw-0923: Gaming Mode"
+    },
+    {
+      "command": "0x0f98",
+      "support": "not_supported",
+      "evidence": "measured hw-0923: boot animation"
+    },
+    {
+      "command": "0x078c",
+      "support": "mismatch",
+      "evidence": "measured hw-0923: USB-C adapter wattage, mismatch 5 of 5"
+    }
+  ]
+}

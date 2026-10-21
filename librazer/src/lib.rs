@@ -20,6 +20,10 @@ pub mod retry;
 // The simulated EC: for tests, and for `--features sim` builds of the binaries.
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
+
+#[cfg(test)]
+mod conformance;
+
 pub mod state;
 pub mod transport;
 pub mod types;

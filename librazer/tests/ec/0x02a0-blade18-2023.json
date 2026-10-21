@@ -1,0 +1,158 @@
+{
+  "format": "razer-ctl-ec-model/1",
+  "name": "Razer Blade 18 (2023)",
+  "pid": "0x02a0",
+  "sources": {
+    "issue-1": "github.com/sqmagellan/razer-ctl/issues/1, the reporter's report 2026-09-30 (a retest in Balanced was asked for and not answered)"
+  },
+  "state": {
+    "perf_mode": [
+      7,
+      7
+    ],
+    "fan_mode": [
+      0,
+      0
+    ],
+    "setpoint_rpm": [
+      0,
+      0
+    ],
+    "actual_rpm": [
+      2700,
+      2700
+    ],
+    "cpu_boost": 0,
+    "gpu_boost": 0,
+    "max_fan": 0,
+    "logo_power": 0,
+    "logo_mode": 0,
+    "kbd_brightness": 0,
+    "kbd_effect": 4,
+    "battery_care": 208,
+    "lights_always_on": 0
+  },
+  "fan": {
+    "auto_rpm": [
+      2700,
+      2700
+    ],
+    "manual": "holds",
+    "floor_rpm": 0,
+    "ceiling_rpm": 0,
+    "max_fan_rpm": 5200,
+    "slew_rpm_per_s": 30,
+    "hold_rpm": [
+      3200,
+      3300
+    ],
+    "evidence": "measured issue-1: Auto at 2700/2700 in Hyperboost and down to 0; any manual set point holds 3200/3300 (tried in Hyperboost only); Max Fan in Custom 5200/5300"
+  },
+  "rules": [
+    {
+      "command": "0x0d02",
+      "support": "works",
+      "evidence": "measured issue-1: perf modes change fan noise or behavior"
+    },
+    {
+      "command": "0x0d82",
+      "support": "works",
+      "evidence": "measured issue-1: reads Hyperboost/Auto"
+    },
+    {
+      "command": "0x0d01",
+      "support": "works",
+      "evidence": "measured issue-1: set points accepted; the fans hold 3200/3300 whatever the set point"
+    },
+    {
+      "command": "0x0d81",
+      "support": "unknown",
+      "evidence": "not reported"
+    },
+    {
+      "command": "0x0d88",
+      "support": "works",
+      "evidence": "measured issue-1: 2700/2700"
+    },
+    {
+      "command": "0x0d07",
+      "support": "unknown",
+      "evidence": "not reported"
+    },
+    {
+      "command": "0x0d87",
+      "support": "unknown",
+      "evidence": "not reported"
+    },
+    {
+      "command": "0x070f",
+      "support": "works",
+      "evidence": "measured issue-1: Max Fan in Custom drives the fans to 5200/5300"
+    },
+    {
+      "command": "0x078f",
+      "support": "works",
+      "evidence": "measured issue-1: reads false"
+    },
+    {
+      "command": "0x0712",
+      "support": "works",
+      "evidence": "measured issue-1: charge limit works"
+    },
+    {
+      "command": "0x0792",
+      "support": "works",
+      "evidence": "measured issue-1: reads 80"
+    },
+    {
+      "command": "0x0300",
+      "support": "works",
+      "evidence": "measured issue-1: logo lighting works"
+    },
+    {
+      "command": "0x0380",
+      "support": "works",
+      "evidence": "measured issue-1: logo reads Off"
+    },
+    {
+      "command": "0x0302",
+      "support": "works",
+      "evidence": "measured issue-1: logo lighting works"
+    },
+    {
+      "command": "0x0382",
+      "support": "works",
+      "evidence": "measured issue-1"
+    },
+    {
+      "command": "0x0303",
+      "support": "works",
+      "evidence": "measured issue-1: keyboard brightness works"
+    },
+    {
+      "command": "0x0383",
+      "support": "works",
+      "evidence": "measured issue-1: reads 0"
+    },
+    {
+      "command": "0x0f02",
+      "support": "works",
+      "evidence": "measured issue-1: keyboard effects work"
+    },
+    {
+      "command": "0x0f82",
+      "support": "works",
+      "evidence": "measured issue-1: reads Wave"
+    },
+    {
+      "command": "0x0084",
+      "support": "works",
+      "evidence": "measured issue-1: auto json succeeded, and it reads this"
+    },
+    {
+      "command": "0x0004",
+      "support": "unknown",
+      "evidence": "not reported"
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "format": "razer-ctl-ec-model/1",
+  "name": "Razer Blade 15 (2018) Base",
+  "pid": "0x023b",
+  "sources": {
+    "issue-2": "github.com/sqmagellan/razer-ctl/issues/2, the reporter's runs 2026-10-13 to 2026-10-16"
+  },
+  "state": {
+    "perf_mode": [
+      0,
+      0
+    ],
+    "fan_mode": [
+      0,
+      0
+    ],
+    "setpoint_rpm": [
+      0,
+      0
+    ],
+    "actual_rpm": [
+      0,
+      0
+    ],
+    "cpu_boost": 0,
+    "gpu_boost": 0,
+    "max_fan": 0,
+    "logo_power": 1,
+    "logo_mode": 0,
+    "kbd_brightness": 255,
+    "kbd_effect": 3,
+    "battery_care": 80,
+    "lights_always_on": 0
+  },
+  "fan": {
+    "auto_rpm": [
+      0,
+      0
+    ],
+    "manual": "honored",
+    "floor_rpm": 3500,
+    "ceiling_rpm": 5700,
+    "max_fan_rpm": 0,
+    "slew_rpm_per_s": 30,
+    "hold_rpm": [
+      0,
+      0
+    ],
+    "evidence": "inferred from issue-2: no speed read on this EC (0x0d88 answers 0x05); the fan audibly changes between 5000 and 5700; Synapse offers 3500-5700 in Balanced"
+  },
+  "rules": [
+    {
+      "command": "0x0d82",
+      "support": "works",
+      "evidence": "measured issue-2: Balanced/Auto on both zones; the same answer with Synapse set to Gaming"
+    },
+    {
+      "command": "0x0d02",
+      "support": "works",
+      "evidence": "measured issue-2: perf and fan mode sets accepted; perf modes change nothing noticeable"
+    },
+    {
+      "command": "0x0d01",
+      "support": "works",
+      "evidence": "measured issue-2: set points accepted; audible change between 5000 and 5700"
+    },
+    {
+      "command": "0x0d81",
+      "support": "works",
+      "evidence": "measured issue-2: 5000 and 5700 read back"
+    },
+    {
+      "command": "0x0d88",
+      "support": "not_supported",
+      "evidence": "measured issue-2: 0x05 on both zones"
+    },
+    {
+      "command": "0x0380",
+      "support": "works",
+      "evidence": "measured issue-2: logo reads Static"
+    },
+    {
+      "command": "0x0382",
+      "support": "works",
+      "evidence": "measured issue-2: logo reads Static"
+    },
+    {
+      "command": "0x0300",
+      "support": "ignored",
+      "evidence": "measured issue-2: logo writes change nothing"
+    },
+    {
+      "command": "0x0302",
+      "support": "ignored",
+      "evidence": "measured issue-2: logo writes change nothing"
+    },
+    {
+      "command": "0x0383",
+      "support": "works",
+      "evidence": "measured issue-2: brightness reads 255"
+    },
+    {
+      "command": "0x0303",
+      "support": "works",
+      "evidence": "measured issue-2: keyboard brightness works"
+    },
+    {
+      "command": "0x0f82",
+      "support": "works",
+      "evidence": "measured issue-2: effect reads Spectrum"
+    },
+    {
+      "command": "0x0f02",
+      "support": "works",
+      "evidence": "measured issue-2: keyboard effects work"
+    },
+    {
+      "command": "0x0084",
+      "support": "works",
+      "evidence": "measured issue-2: lights-always-on reads Disable"
+    },
+    {
+      "command": "0x0004",
+      "support": "unknown",
+      "evidence": "not observed"
+    },
+    {
+      "command": "0x0792",
+      "support": "not_supported",
+      "evidence": "measured issue-2: no charge limit on this model"
+    },
+    {
+      "command": "0x0712",
+      "support": "unknown",
+      "evidence": "not observed; the read answers 0x05"
+    },
+    {
+      "command": "0x0d87",
+      "support": "unknown",
+      "evidence": "not observed"
+    },
+    {
+      "command": "0x0d07",
+      "support": "unknown",
+      "evidence": "not observed"
+    },
+    {
+      "command": "0x078f",
+      "support": "unknown",
+      "evidence": "not observed"
+    },
+    {
+      "command": "0x070f",
+      "support": "unknown",
+      "evidence": "not observed"
+    }
+  ]
+}
