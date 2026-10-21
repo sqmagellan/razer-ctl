@@ -55,6 +55,9 @@ jobs:
           sudo apt-get install --no-install-recommends -y libudev-dev
       - name: Run librazer tests
         run: cargo test --locked -p librazer --verbose
+      # The CLI against the simulated EC models in librazer/tests/ec (no hardware).
+      - name: Run razer-cli tests on the simulator
+        run: cargo test --locked -p razer-cli --features sim --verbose
 
   lint:
     runs-on: ubuntu-latest

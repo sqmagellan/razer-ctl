@@ -44,6 +44,10 @@ pub struct Model {
     pub name: String,
     #[serde(with = "capture::hex_u16")]
     pub pid: u16,
+    /// The BIOS model number (SKU) the evidence came from, when known. Profile selection
+    /// matches it the way `Device::detect` does; without it, only the PID is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_number: Option<String>,
     /// Where the evidence came from, by id: an issue, a capture file, a hardware run.
     pub sources: BTreeMap<String, String>,
     /// The state the EC starts in.
@@ -182,6 +186,16 @@ impl std::fmt::Display for Unmodeled {
 
 impl std::error::Error for Unmodeled {}
 
+/// The catalogued descriptor a laptop with this model would get: by SKU when the model
+/// names one (as `Device::detect` matches), else the first entry with its PID.
+pub fn catalogued(model: &Model) -> Option<&'static crate::descriptor::Descriptor> {
+    use crate::descriptor::SUPPORTED;
+    match &model.model_number {
+        Some(sku) => crate::matching::find_descriptor(sku, SUPPORTED),
+        None => SUPPORTED.iter().find(|d| d.pid == model.pid),
+    }
+}
+
 /// Whether `err` is a coverage gap rather than an EC answer.
 pub fn unmodeled(err: &anyhow::Error) -> Option<&Unmodeled> {
     err.chain()
@@ -256,6 +270,7 @@ impl Model {
             format: FORMAT.into(),
             name: cap.machine.profile.clone(),
             pid: cap.machine.pid,
+            model_number: Some(cap.machine.model_number.clone()),
             sources: BTreeMap::from([(
                 source.to_string(),
                 format!(
@@ -706,6 +721,7 @@ mod tests {
             format: FORMAT.into(),
             name: "test".into(),
             pid: 0xfffe,
+            model_number: None,
             sources: BTreeMap::new(),
             state: State {
                 perf_mode: [0; 2],

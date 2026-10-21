@@ -382,14 +382,14 @@ pub fn summary(cap: &Capture) -> String {
         cap.machine.profile
     );
     for s in &cap.steps {
-        let tries = s.exchanges.len();
+        let exchanges = s.exchanges.len();
         let result = match &s.result {
             StepResult::Ok { args } if args.is_empty() => "ok".to_string(),
             StepResult::Ok { args } => format!("ok {args:?}"),
             StepResult::Error { error } => format!("error: {error}"),
         };
-        let retried = if tries > 1 {
-            format!(" ({tries} tries)")
+        let retried = if exchanges > 1 {
+            format!(" ({exchanges} exchanges)")
         } else {
             String::new()
         };

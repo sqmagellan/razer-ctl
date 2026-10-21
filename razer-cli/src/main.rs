@@ -1,5 +1,7 @@
+mod laptop;
+
+use laptop::{Backend, Laptop};
 use librazer::command;
-use librazer::device;
 use librazer::feature;
 use librazer::types::{
     BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
@@ -11,6 +13,7 @@ use librazer::keyboard::{self, KeyboardColor, Rgb};
 
 use anyhow::{bail, Result};
 use clap::{arg, Command};
+use std::ffi::OsString;
 use std::process::Command as procCommand;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
 
@@ -18,7 +21,7 @@ trait Cli: feature::Feature {
     fn cmd(&self) -> Option<Command> {
         None
     }
-    fn handle(&self, _device: &device::Device, _matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, _device: &Laptop, _matches: &clap::ArgMatches) -> Result<()> {
         Ok(())
     }
 }
@@ -68,7 +71,7 @@ macro_rules! impl_unary_cli {
                         .arg_required_else_help(true),
                 )
             }
-            fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+            fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
                 match matches.subcommand() {
                     Some((ident, matches)) if ident == self.name() => {
                         let arg = matches.get_one::<$arg_type>("ARG").unwrap();
@@ -114,7 +117,7 @@ impl Cli for feature::BatteryCare {
         )
     }
 
-    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, sub_matches)) if ident == self.name() => match sub_matches.subcommand() {
                 Some(("set", set_matches)) => {
@@ -193,7 +196,7 @@ impl Cli for feature::KbdLighting {
         )
     }
 
-    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, sub)) if ident == self.name() => match sub.subcommand() {
                 Some(("color", m)) => {
@@ -284,7 +287,7 @@ impl Cli for CustomCommand {
                 .arg_required_else_help(true),
         )
     }
-    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
                 let cmd = *matches.get_one::<u16>("COMMAND").unwrap();
@@ -325,7 +328,7 @@ impl Cli for feature::Fan {
         )
     }
 
-    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
                 // The parser takes any value some Blade can run; this laptop's own range is
@@ -401,7 +404,7 @@ impl Cli for feature::Perf {
         )
     }
 
-    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
                 impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
@@ -442,8 +445,8 @@ impl Cli for feature::Perf {
     }
 }
 
-fn enumerate(as_json: bool) -> Result<()> {
-    let (pid_list, model_number_prefix) = device::Device::enumerate()?;
+fn enumerate(backend: &Backend, as_json: bool) -> Result<()> {
+    let (pid_list, model_number_prefix) = backend.enumerate()?;
     let catalogued = librazer::descriptor::SUPPORTED
         .iter()
         .any(|supported| model_number_prefix == supported.model_number_prefix);
@@ -471,22 +474,24 @@ fn enumerate(as_json: bool) -> Result<()> {
 }
 
 /// `probe`: a capture of every getter, and with `--writes` the write set (see
-/// `librazer::probe`). The summary goes to stderr so stdout stays clean JSON.
+/// `librazer::probe`). The summary goes to stderr so stdout stays clean JSON. `device` must
+/// be recording.
 fn probe(
+    backend: &Backend,
+    device: &Laptop,
     out: Option<&String>,
     writes: bool,
     settle_secs: u64,
     restore: Option<&String>,
 ) -> Result<()> {
-    let device = device::Device::detect()?.recording();
     if let Some(path) = restore {
         let snap: librazer::probe::Snapshot =
             serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        librazer::probe::restore(&device, &snap)?;
+        librazer::probe::restore(device, &snap)?;
         eprintln!("restored and verified the settings saved in {path}");
         return Ok(());
     }
-    let (_, model_number) = device::Device::enumerate()?;
+    let (_, model_number) = backend.enumerate()?;
     let catalogued =
         librazer::matching::find_descriptor(&model_number, librazer::descriptor::SUPPORTED)
             .is_some();
@@ -497,18 +502,33 @@ fn probe(
         catalogued,
     };
     let tool = concat!("razer-cli ", env!("CARGO_PKG_VERSION"));
+    // A simulated capture says so, so it can't pass for a real machine's in an issue.
+    #[cfg(feature = "sim")]
+    let tool = &match backend {
+        Backend::Sim(sim) => format!("{tool} (simulated EC: {})", sim.name()),
+        Backend::Hardware => tool.to_string(),
+    };
     let capture = if writes {
-        // The tray re-asserts its own settings and would fight the write set.
-        let mut sys = System::new_all();
-        sys.refresh_processes();
-        if sys
-            .processes()
-            .values()
-            .any(|p| p.name().eq_ignore_ascii_case("razer-tray.exe"))
-        {
-            bail!("close razer-tray first (right-click the tray icon, Exit), then run this again");
+        // The tray re-asserts its own settings and would fight the write set. A simulated
+        // EC has no tray.
+        #[cfg(feature = "sim")]
+        let check_tray = matches!(backend, Backend::Hardware);
+        #[cfg(not(feature = "sim"))]
+        let check_tray = true;
+        if check_tray {
+            let mut sys = System::new_all();
+            sys.refresh_processes();
+            if sys
+                .processes()
+                .values()
+                .any(|p| p.name().eq_ignore_ascii_case("razer-tray.exe"))
+            {
+                bail!(
+                    "close razer-tray first (right-click the tray icon, Exit), then run this again"
+                );
+            }
         }
-        let snap = librazer::probe::snapshot(&device)?;
+        let snap = librazer::probe::snapshot(device)?;
         let recovery = match out {
             Some(path) => format!("{path}.recovery.json"),
             None => "razer-probe-recovery.json".to_string(),
@@ -518,7 +538,7 @@ fn probe(
             "saved the current settings to {recovery}; if this run is interrupted, put them back with: razer-cli probe --restore {recovery}"
         );
         let capture = librazer::probe::run_writes(
-            &device,
+            device,
             machine,
             tool,
             &snap,
@@ -530,7 +550,7 @@ fn probe(
         }
         capture
     } else {
-        librazer::probe::run(&device, machine, tool)
+        librazer::probe::run(device, machine, tool)
     };
     eprint!("{}", librazer::probe::summary(&capture));
     let json = serde_json::to_string_pretty(&capture)? + "\n";
@@ -594,7 +614,12 @@ fn json_read<T>(
     }
 }
 
-fn print_json(device: &device::Device) -> Result<()> {
+fn print_json(device: &Laptop) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&json_status(device)?)?);
+    Ok(())
+}
+
+fn json_status(device: &Laptop) -> Result<JsonStatus> {
     use librazer::state::brightness_to_percent;
 
     // Each read stands alone, in the order `DeviceState::read` uses, so one the EC lacks
@@ -668,7 +693,7 @@ fn print_json(device: &device::Device) -> Result<()> {
         None => None,
     };
 
-    let status = JsonStatus {
+    Ok(JsonStatus {
         name: device.info.name,
         pid: format!("{:#06x}", device.info.pid),
         perf_mode: modes.map(|(perf, _)| format!("{perf:?}")),
@@ -684,10 +709,7 @@ fn print_json(device: &device::Device) -> Result<()> {
         battery_care_percent: battery_care.map(|care| care.to_percent()),
         max_fan,
         unsupported,
-    };
-
-    println!("{}", serde_json::to_string_pretty(&status)?);
-    Ok(())
+    })
 }
 
 fn taskkill() -> Result<()> {
@@ -754,11 +776,7 @@ fn update_cmd(cmd: Command, features: &[Box<dyn Cli>]) -> Command {
         .fold(cmd, |cmd, f| cmd.subcommand(f))
 }
 
-fn handle(
-    device: &device::Device,
-    matches: &clap::ArgMatches,
-    features: &Vec<Box<dyn Cli>>,
-) -> Result<()> {
+fn handle(device: &Laptop, matches: &clap::ArgMatches, features: &Vec<Box<dyn Cli>>) -> Result<()> {
     if let Some(("info", _)) = matches.subcommand() {
         println!("Device: {:?}", device.info);
         return print_info(device, matches, features);
@@ -778,7 +796,7 @@ fn handle(
 /// supported" and the rest still print. Stopping at the first one hid every feature after
 /// it (issue #2). Any other failure is printed too and fails the command at the end.
 fn print_info(
-    device: &device::Device,
+    device: &Laptop,
     matches: &clap::ArgMatches,
     features: &Vec<Box<dyn Cli>>,
 ) -> Result<()> {
@@ -811,7 +829,8 @@ fn gen_cli_features(feature_list: &[&str]) -> Vec<Box<dyn Cli>> {
 /// (5, worth retrying). 2 belongs to clap's usage errors and is not ours to assign.
 /// See `librazer::error::ExitCode` for the contract.
 fn main() -> std::process::ExitCode {
-    match real_main() {
+    env_logger::init();
+    match real_main(std::env::args_os().collect()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             let code = librazer::error::ExitCode::classify(&e);
@@ -845,7 +864,7 @@ fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
             .subcommand(json_cmd)
             .subcommand_required(true);
 
-    clap::command!()
+    let cli = clap::command!()
         .color(clap::ColorChoice::Always)
         // Documented here as well as in the README, because a script author reaching for
         // `--help` shouldn't have to go find a web page to learn what a failure means.
@@ -888,20 +907,54 @@ fn build_cli(cli_features: &[Box<dyn Cli>]) -> Command {
                         .conflicts_with("writes"),
                 ),
         )
-        .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"))
+        .subcommand(clap::Command::new("taskkill").about("Terminate all processes using dGPU"));
+    sim_option(cli)
 }
 
-fn real_main() -> Result<()> {
-    env_logger::init();
+/// `--sim MODEL`, in `--features sim` builds only. Global, so it can follow a subcommand.
+#[cfg(feature = "sim")]
+fn sim_option(cli: Command) -> Command {
+    cli.arg(
+        arg!(--sim <MODEL> "Talk to a simulated EC built from MODEL, an EC model JSON file, instead of the hardware")
+            .required(false)
+            .global(true),
+    )
+}
+
+#[cfg(not(feature = "sim"))]
+fn sim_option(cli: Command) -> Command {
+    cli
+}
+
+/// What `manual --pid` talks to: every feature offered, nothing known about the model.
+fn manual_descriptor(pid: u16) -> librazer::descriptor::Descriptor {
+    librazer::descriptor::Descriptor {
+        model_number_prefix: "Unknown",
+        name: "Unknown",
+        pid,
+        features: feature::ALL_FEATURES,
+        init_cmds: &[],
+        // Same bounds the generic auto profile would use for this PID: the
+        // chassis's own range when the table knows it, else the flat default.
+        fan_rpm_range: librazer::descriptor::fan_range_for_pid(pid)
+            .unwrap_or(librazer::matching::FALLBACK_FAN_RPM_RANGE),
+    }
+}
+
+fn real_main(args: Vec<OsString>) -> Result<()> {
+    #[cfg(feature = "sim")]
+    let backend = Backend::from_args(&args)?;
+    #[cfg(not(feature = "sim"))]
+    let backend = Backend::Hardware;
 
     // TODO: find a better way to detect auto mode in advance
-    let is_auto_mode = std::env::args_os().nth(1) == Some("auto".into());
-    let device = match is_auto_mode {
-        true => Some(device::Device::detect()?),
+    let is_auto_mode = laptop::subcommand(&args) == Some("auto".as_ref());
+    let mut laptop = match is_auto_mode {
+        true => Some(backend.detect()?),
         _ => None,
     };
-    let feature_list = match device {
-        Some(ref device) => device.info.features,
+    let feature_list = match laptop {
+        Some(ref laptop) => laptop.info.features,
         _ => feature::ALL_FEATURES,
     };
 
@@ -910,45 +963,56 @@ fn real_main() -> Result<()> {
 
     let cmd = build_cli(&cli_features);
 
-    let matches = cmd.get_matches();
+    let matches = cmd.get_matches_from(args);
 
+    let result = dispatch(&backend, &mut laptop, &matches, &cli_features);
+    #[cfg(feature = "sim")]
+    for line in gap_report(laptop.as_ref()) {
+        eprintln!("{line}");
+    }
+    result
+}
+
+/// Run the parsed command. `laptop` holds the one `auto` detected, and receives the one
+/// `probe` or `manual` opens, so the caller can still look at it afterwards.
+fn dispatch(
+    backend: &Backend,
+    laptop: &mut Option<Laptop>,
+    matches: &clap::ArgMatches,
+    cli_features: &Vec<Box<dyn Cli>>,
+) -> Result<()> {
     match matches.subcommand() {
-        Some(("enumerate", submatches)) => {
-            enumerate(submatches.get_flag("json"))?;
-        }
+        Some(("enumerate", submatches)) => enumerate(backend, submatches.get_flag("json")),
         Some(("taskkill", _)) => {
-            taskkill()?;
+            #[cfg(feature = "sim")]
+            if let Backend::Sim(_) = backend {
+                bail!("taskkill ends this machine's real GPU processes; it has no simulated form");
+            }
+            taskkill()
         }
         Some(("probe", submatches)) => {
+            let device = laptop.insert(backend.detect()?.recording());
             probe(
+                backend,
+                device,
                 submatches.get_one::<String>("out"),
                 submatches.get_flag("writes"),
                 *submatches.get_one::<u64>("settle").unwrap(),
                 submatches.get_one::<String>("restore"),
-            )?;
+            )
         }
         Some(("auto", submatches)) => {
             // Set above when the first argument is `auto`; the expect documents that
             // coupling rather than leaving a bare unwrap for a future reader to audit.
-            let device = device
+            let device = laptop
                 .as_ref()
                 .expect("auto mode detects the device before parsing arguments");
-            handle(device, submatches, &cli_features)?;
+            handle(device, submatches, cli_features)
         }
         Some(("manual", submatches)) => {
             let pid = *submatches.get_one::<u16>("pid").unwrap();
-            let device = device::Device::new(librazer::descriptor::Descriptor {
-                model_number_prefix: "Unknown",
-                name: "Unknown",
-                pid,
-                features: feature::ALL_FEATURES,
-                init_cmds: &[],
-                // Same bounds the generic auto profile would use for this PID: the
-                // chassis's own range when the table knows it, else the flat default.
-                fan_rpm_range: librazer::descriptor::fan_range_for_pid(pid)
-                    .unwrap_or(librazer::matching::FALLBACK_FAN_RPM_RANGE),
-            })?;
-            handle(&device, submatches, &cli_features)?;
+            let device = laptop.insert(backend.open(manual_descriptor(pid))?);
+            handle(device, submatches, cli_features)
         }
         // clap enforces `subcommand_required`, so neither of these should be reachable --
         // but they used to be `unimplemented!()`/`unreachable!()`, i.e. a panic with a
@@ -956,9 +1020,23 @@ fn real_main() -> Result<()> {
         // nothing and degrades politely.
         Some((cmd, _)) => anyhow::bail!("unhandled subcommand: {cmd}"),
         None => anyhow::bail!("no subcommand given (try --help)"),
-    };
+    }
+}
 
-    Ok(())
+/// A simulated EC's coverage gaps, one line each, for the end of stderr. `json` tolerates a
+/// failed keyboard effect read, and `info` prints a failed feature and goes on, so a gap
+/// there would otherwise pass unnoticed.
+#[cfg(feature = "sim")]
+fn gap_report(laptop: Option<&Laptop>) -> Vec<String> {
+    let mut seen = Vec::new();
+    for gap in laptop.map(Laptop::gaps).unwrap_or_default() {
+        if !seen.contains(&gap) {
+            seen.push(gap);
+        }
+    }
+    seen.iter()
+        .map(|gap| format!("razer-cli: simulation gap: {gap}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1080,5 +1158,396 @@ mod tests {
             "#000000",
             "#000000"
         ]));
+    }
+
+    #[cfg(not(feature = "sim"))]
+    #[test]
+    fn there_is_no_sim_option_without_the_feature() {
+        assert!(!parses(&["--sim", "model.json", "auto", "json"]));
+    }
+
+    // ---- the real handlers against a simulated EC ----
+
+    use laptop::Simulation;
+    use librazer::capture::Recording;
+    use librazer::error::ExitCode;
+    use librazer::sim::Model;
+    use librazer::transport::HidTransport;
+    use serde_json::{json, Value};
+
+    /// Every command the CLI sends works; Balanced, fans on Auto at 2000/1900.
+    fn model_json(pid: u16) -> Value {
+        let rules: Vec<Value> = [
+            0x0d02u16, 0x0d82, 0x0d01, 0x0d81, 0x0d88, 0x0d07, 0x0d87, 0x070f, 0x078f, 0x0712,
+            0x0792, 0x0300, 0x0380, 0x0302, 0x0382, 0x0303, 0x0383, 0x0f02, 0x0f82, 0x0004,
+            0x0084, 0x030b, 0x030a,
+        ]
+        .iter()
+        .map(|c| json!({"command": format!("{c:#06x}"), "support": "works", "evidence": "inferred: CLI test model"}))
+        .collect();
+        json!({
+            "format": librazer::sim::FORMAT,
+            "name": "CLI test",
+            "pid": format!("{pid:#06x}"),
+            "sources": {},
+            "state": {
+                "perf_mode": [0, 0], "fan_mode": [0, 0], "setpoint_rpm": [0, 0],
+                "actual_rpm": [2000, 1900], "cpu_boost": 1, "gpu_boost": 2, "max_fan": 0,
+                "logo_power": 1, "logo_mode": 0, "kbd_brightness": 128, "kbd_effect": 3,
+                "battery_care": 0x80 | 80, "lights_always_on": 0
+            },
+            "fan": {
+                "auto_rpm": [2000, 1900], "manual": "honored", "floor_rpm": 2000,
+                "ceiling_rpm": 5000, "max_fan_rpm": 4700, "slew_rpm_per_s": 30,
+                "evidence": "inferred: CLI test model"
+            },
+            "rules": rules
+        })
+    }
+
+    fn model(value: &Value) -> Model {
+        Model::from_json(&value.to_string()).unwrap()
+    }
+
+    /// Put `rule` ahead of the rest (first match wins), or drop `command`'s rules.
+    fn with_rule(mut value: Value, rule: Value) -> Value {
+        value["rules"].as_array_mut().unwrap().insert(0, rule);
+        value
+    }
+
+    fn without_rule(mut value: Value, command: &str) -> Value {
+        value["rules"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r["command"] != command);
+        value
+    }
+
+    /// `razer-cli auto ARGS` through the real handlers, as `real_main` runs them.
+    fn auto(laptop: &Laptop, args: &[&str]) -> Result<()> {
+        let mut features = gen_cli_features(laptop.info.features);
+        features.push(Box::new(CustomCommand));
+        let matches = build_cli(&features)
+            .try_get_matches_from(["razer-cli", "auto"].iter().chain(args))
+            .unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        handle(laptop, sub, &features)
+    }
+
+    #[test]
+    fn auto_json_reports_the_simulated_state() {
+        let laptop = Simulation::new(model(&model_json(0x029f))).detect();
+        let status = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
+        assert_eq!(
+            status,
+            json!({
+                "name": "Razer Blade 16 (2023) Black",
+                "pid": "0x029f",
+                "perf_mode": "Balanced",
+                "cpu_boost": null,
+                "gpu_boost": null,
+                "fan_mode": "Auto",
+                "fan_setpoint_rpm": null,
+                "fan_actual_rpm": [2000, 1900],
+                "fan_actual_trusted": true,
+                "keyboard_brightness_percent": librazer::state::brightness_to_percent(128),
+                "logo_mode": "Static",
+                "keyboard_effect": "Spectrum",
+                "battery_care_percent": 80,
+                "max_fan": false,
+            })
+        );
+        assert!(laptop.gaps().is_empty());
+    }
+
+    #[test]
+    fn auto_info_reads_every_catalogued_feature() {
+        let laptop = Simulation::new(model(&model_json(0x029f))).detect();
+        auto(&laptop, &["info"]).unwrap();
+        assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
+    }
+
+    #[test]
+    fn a_perf_mode_set_reads_back() {
+        let laptop = Simulation::new(model(&model_json(0x029f))).detect();
+        auto(&laptop, &["perf", "mode", "silent"]).unwrap();
+        assert_eq!(
+            json_status(&laptop).unwrap().perf_mode.as_deref(),
+            Some("Silent")
+        );
+
+        auto(&laptop, &["perf", "mode", "custom"]).unwrap();
+        auto(&laptop, &["perf", "cpu", "boost"]).unwrap();
+        auto(&laptop, &["fan", "max", "enable"]).unwrap();
+        let status = json_status(&laptop).unwrap();
+        assert_eq!(status.cpu_boost.as_deref(), Some("Boost"));
+        assert_eq!(status.max_fan, Some(true));
+    }
+
+    #[test]
+    fn a_fan_set_point_outside_the_catalogued_range_never_reaches_the_ec() {
+        let laptop = Simulation::new(model(&model_json(0x029f))).detect();
+        auto(&laptop, &["fan", "manual"]).unwrap();
+        laptop.drain_exchanges();
+        // 2000-5000 on 0x029F; 5500 parses (some Blade runs it) but this one would clamp.
+        assert!(auto(&laptop, &["fan", "rpm", "5500"]).is_err());
+        assert!(laptop.drain_exchanges().is_empty());
+        auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
+        assert_eq!(json_status(&laptop).unwrap().fan_setpoint_rpm, Some(3000));
+    }
+
+    #[test]
+    fn max_fan_answering_not_supported_exits_4_on_catalogued_and_generic_models() {
+        let lacking = json!({
+            "command": "0x070f", "support": "not_supported",
+            "evidence": "inferred: the Max Fan question in issue #10"
+        });
+        for pid in [0x029f, 0x0eee] {
+            let laptop =
+                Simulation::new(model(&with_rule(model_json(pid), lacking.clone()))).detect();
+            auto(&laptop, &["perf", "mode", "custom"]).unwrap();
+            laptop.drain_exchanges();
+            let err = auto(&laptop, &["fan", "max", "enable"]).unwrap_err();
+            assert_eq!(ExitCode::classify(&err) as u8, 4, "{pid:#06x}: {err:#}");
+            let tries = laptop
+                .drain_exchanges()
+                .iter()
+                .filter(|e| e.command == 0x070f)
+                .count();
+            assert_eq!(tries, 1, "{pid:#06x}: a 0x05 is final");
+        }
+    }
+
+    #[test]
+    fn an_unmodeled_command_is_an_error_that_names_the_gap() {
+        let laptop = Simulation::new(model(&without_rule(model_json(0x029f), "0x0f02"))).detect();
+        let err = auto(&laptop, &["kbd-lighting", "effect", "wave"]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no observation for 0x0f02"),
+            "{err:#}"
+        );
+        assert!(librazer::sim::unmodeled(&err).is_some());
+        assert_eq!(ExitCode::classify(&err), ExitCode::Generic);
+        assert_eq!(laptop.gaps().len(), 1);
+    }
+
+    #[test]
+    fn json_tolerates_a_missing_effect_read_but_the_gap_is_kept() {
+        let laptop = Simulation::new(model(&without_rule(model_json(0x029f), "0x0f82"))).detect();
+        assert_eq!(json_status(&laptop).unwrap().keyboard_effect, None);
+        let gaps = laptop.gaps();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].command, 0x0f82);
+    }
+
+    #[test]
+    fn an_uncatalogued_pid_gets_the_generic_profile_and_learns() {
+        let lacking = json!({
+            "command": "0x0792", "support": "not_supported",
+            "evidence": "inferred: an EC without a charge limit"
+        });
+        let laptop = Simulation::new(model(&with_rule(model_json(0x0eee), lacking))).detect();
+        assert_eq!(laptop.info.name, "Unrecognized Razer laptop (untested)");
+        assert_eq!(laptop.info.features, feature::ALL_FEATURES);
+        let status = json_status(&laptop).unwrap();
+        assert_eq!(status.battery_care_percent, None);
+        assert_eq!(status.unsupported, vec!["battery_care_percent"]);
+        librazer::state::DeviceState::read(&laptop).unwrap();
+        assert!(librazer::state::unsupported_on(&laptop)
+            .contains(librazer::unsupported::Optional::BatteryCare));
+    }
+
+    #[test]
+    fn manual_opens_only_the_models_pid() {
+        let sim = Simulation::new(model(&model_json(0x029f)));
+        let laptop = sim.open(manual_descriptor(0x029f)).unwrap();
+        assert_eq!(laptop.info.name, "Unknown");
+        assert!(laptop.unsupported().is_none(), "manual doesn't learn");
+        let err = sim.open(manual_descriptor(0x0123)).err().unwrap();
+        assert_eq!(ExitCode::classify(&err), ExitCode::NoDevice);
+        assert_eq!(sim.enumerate(), (vec![0x029f], "RZ09-0483T".to_string()));
+    }
+
+    // ---- `--sim MODEL` on the command line ----
+
+    #[cfg(feature = "sim")]
+    mod sim_option {
+        use super::*;
+
+        /// The model as a file, removed when dropped.
+        struct ModelFile(std::path::PathBuf);
+
+        impl ModelFile {
+            fn new(name: &str, value: &Value) -> ModelFile {
+                let path = std::env::temp_dir()
+                    .join(format!("razer-cli-test-{}-{name}.json", std::process::id()));
+                std::fs::write(&path, value.to_string()).unwrap();
+                ModelFile(path)
+            }
+
+            fn path(&self) -> &str {
+                self.0.to_str().unwrap()
+            }
+        }
+
+        impl Drop for ModelFile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        fn run(args: &[&str]) -> Result<()> {
+            real_main(
+                std::iter::once("razer-cli")
+                    .chain(args.iter().copied())
+                    .map(OsString::from)
+                    .collect(),
+            )
+        }
+
+        fn os(args: &[&str]) -> Vec<OsString> {
+            args.iter().map(OsString::from).collect()
+        }
+
+        #[test]
+        fn it_is_read_before_or_after_the_subcommand() {
+            for args in [
+                &["razer-cli", "--sim", "no-such.json", "auto", "json"][..],
+                &["razer-cli", "--sim=no-such.json", "auto", "json"],
+                &["razer-cli", "auto", "json", "--sim", "no-such.json"],
+            ] {
+                assert!(parses(&args[1..]), "{args:?} should parse");
+                let args = os(args);
+                assert_eq!(laptop::subcommand(&args), Some("auto".as_ref()));
+                let err = laptop::Backend::from_args(&args).err().unwrap();
+                assert!(format!("{err:#}").contains("no-such.json"), "{err:#}");
+            }
+            let args = os(&[
+                "razer-cli",
+                "auto",
+                "cmd",
+                "0x0d82",
+                "--",
+                "--sim",
+                "m.json",
+            ]);
+            assert!(matches!(
+                laptop::Backend::from_args(&args),
+                Ok(laptop::Backend::Hardware)
+            ));
+        }
+
+        #[test]
+        fn a_sim_option_without_a_usable_value_never_falls_back_to_hardware() {
+            for args in [
+                &["razer-cli", "auto", "json", "--sim"][..],
+                &["razer-cli", "--sim=", "auto", "json"],
+            ] {
+                let err = laptop::Backend::from_args(&os(args)).err().unwrap();
+                assert!(
+                    format!("{err:#}").contains("--sim needs a model file"),
+                    "{err:#}"
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                let mut args = os(&["razer-cli", "auto", "json", "--sim"]);
+                args.push(OsString::from_vec(vec![0x6d, 0xff, 0x2e]));
+                let err = laptop::Backend::from_args(&args).err().unwrap();
+                assert!(format!("{err:#}").contains("not UTF-8"), "{err:#}");
+            }
+        }
+
+        #[test]
+        fn gaps_are_reported_once_each() {
+            let laptop =
+                Simulation::new(model(&without_rule(model_json(0x029f), "0x0f82"))).detect();
+            json_status(&laptop).unwrap();
+            json_status(&laptop).unwrap();
+            let report = gap_report(Some(&laptop));
+            assert_eq!(report.len(), 1, "{report:?}");
+            assert!(
+                report[0].contains("has no observation for 0x0f82"),
+                "{report:?}"
+            );
+            assert!(gap_report(None).is_empty());
+        }
+
+        #[test]
+        fn every_kind_of_subcommand_runs_against_the_model() {
+            let file = ModelFile::new("all", &model_json(0x029f));
+            let m = file.path();
+            for args in [
+                &["--sim", m, "auto", "json"][..],
+                &["--sim", m, "auto", "info"],
+                &["--sim", m, "auto", "perf", "mode", "performance"],
+                &["--sim", m, "auto", "fan", "rpm", "3000"],
+                &["--sim", m, "auto", "battery-care", "set", "60"],
+                &["--sim", m, "auto", "lid-logo", "breathing"],
+                &["--sim", m, "auto", "kbd-backlight", "200"],
+                &["--sim", m, "auto", "kbd-lighting", "color", "#ff0000"],
+                &["--sim", m, "manual", "--pid", "0x029f", "json"],
+                &["--sim", m, "enumerate", "--json"],
+            ] {
+                run(args).unwrap_or_else(|e| panic!("{args:?}: {e:#}"));
+            }
+            let err = run(&["--sim", m, "manual", "--pid", "0x0123", "json"]).unwrap_err();
+            assert_eq!(ExitCode::classify(&err), ExitCode::NoDevice);
+            assert!(run(&["--sim", m, "taskkill"]).is_err());
+        }
+
+        #[test]
+        fn max_fan_not_supported_exits_4() {
+            let mut value = with_rule(
+                model_json(0x029f),
+                json!({"command": "0x070f", "support": "not_supported", "evidence": "inferred: test"}),
+            );
+            value["state"]["perf_mode"] = json!([4, 4]);
+            let file = ModelFile::new("maxfan", &value);
+            let err = run(&["--sim", file.path(), "auto", "fan", "max", "enable"]).unwrap_err();
+            assert_eq!(ExitCode::classify(&err) as u8, 4, "{err:#}");
+        }
+
+        #[test]
+        fn a_simulated_probe_says_it_is_simulated() {
+            let file = ModelFile::new("probe", &model_json(0x029f));
+            let out = std::env::temp_dir().join(format!(
+                "razer-cli-test-{}-capture.json",
+                std::process::id()
+            ));
+            run(&[
+                "--sim",
+                file.path(),
+                "probe",
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .unwrap();
+            let capture: Value =
+                serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+            let _ = std::fs::remove_file(&out);
+            assert!(
+                capture["tool"]
+                    .as_str()
+                    .unwrap()
+                    .contains("(simulated EC: CLI test)"),
+                "{}",
+                capture["tool"]
+            );
+            assert_eq!(capture["machine"]["pid"], "0x029f");
+            assert_eq!(capture["machine"]["catalogued"], true);
+            let steps = capture["steps"].as_array().unwrap();
+            assert_eq!(
+                steps.len(),
+                librazer::probe::READS.len() + 2 * librazer::probe::FAN_ACTUAL_ROUNDS
+            );
+        }
+
+        #[test]
+        fn a_missing_model_file_fails_before_anything_runs() {
+            let err = run(&["--sim", "/nonexistent/razer-model.json", "auto", "json"]).unwrap_err();
+            assert!(format!("{err:#}").contains("reading EC model"), "{err:#}");
+        }
     }
 }

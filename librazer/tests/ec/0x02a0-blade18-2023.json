@@ -2,6 +2,7 @@
   "format": "razer-ctl-ec-model/1",
   "name": "Razer Blade 18 (2023)",
   "pid": "0x02a0",
+  "model_number": "RZ09-0484U",
   "sources": {
     "issue-1": "github.com/sqmagellan/razer-ctl/issues/1, the reporter's report 2026-09-30 (a retest in Balanced was asked for and not answered)"
   },

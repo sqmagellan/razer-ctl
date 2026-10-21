@@ -8,7 +8,6 @@
 //! rule's note, are the questions still open for that laptop.
 
 use crate::capture::{Machine, StepResult};
-use crate::descriptor::SUPPORTED;
 use crate::sim::{self, Fault, Model, SimTransport};
 use crate::state::{DeviceState, FanSpeed, PerfMode};
 use crate::types::{CpuBoost, GpuBoost};
@@ -36,10 +35,10 @@ fn model(json: &str) -> Model {
     Model::from_json(json).expect("fixture parses")
 }
 
-/// A catalogued PID gets its own profile and never learns; any other uses the generic
+/// A catalogued laptop gets its own profile and never learns; any other uses the generic
 /// profile, which learns what the EC lacks (as `Device::detect` does).
 fn transport(m: &Model) -> SimTransport {
-    let catalogued = SUPPORTED.iter().any(|d| d.pid == m.pid);
+    let catalogued = sim::catalogued(m).is_some();
     let sim = SimTransport::new(m.clone());
     if catalogued {
         sim
@@ -107,7 +106,7 @@ fn report() -> String {
     let mut out = String::new();
     for (name, json) in FIXTURES {
         let m = model(json);
-        let catalogued = SUPPORTED.iter().any(|d| d.pid == m.pid);
+        let catalogued = sim::catalogued(&m).is_some();
         out.push_str(&format!(
             "## {name} ({}, {})\n",
             m.name,
