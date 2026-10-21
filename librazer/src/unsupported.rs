@@ -111,7 +111,8 @@ pub const MANUAL_FLOOR_BY_PERF: &[(u16, PerfMode, u16)] = &[
     // boost pair tried and with or without a Max Fan toggle first. A 3000 set point reads
     // back as 3000 while the fans hold 3800/3800; 4500 is followed. Balanced honors 2000 to
     // 5000. Hyperboost lifts the fans too, but along its own curve, so it has no fixed row.
-    // Measured on an RZ09-0483U; the Black edition (RZ09-0483T) shares the PID and the row.
+    // Measured on an RZ09-0483U; the Black edition (RZ09-0483T) shares the PID, so it gets
+    // the row too, untested.
     (0x029f, PerfMode::Custom, 3800),
 ];
 

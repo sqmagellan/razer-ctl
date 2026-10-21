@@ -253,7 +253,7 @@ pub fn build(
                 ..*dstate
             },
         );
-        let runs_at = librazer::unsupported::manual_fan_runs_at(pid, dstate.perf_mode.wire(), rpm);
+        let runs_at = preset_runs_at(pid, dstate, rpm);
         let label = fan_preset_label(rpm, fan_rpm_range, runs_at);
         CheckMenuItem::with_id(
             event_id,
@@ -637,6 +637,16 @@ fn about() -> tray_icon::menu::AboutMetadata {
     }
 }
 
+/// What the fans run at instead of a manual preset of `rpm` in `dstate`'s perf mode on the
+/// laptop with `pid`, when a measured floor lifts them. `None` while Max Fan is on: it drives
+/// the fans past any set point.
+fn preset_runs_at(pid: u16, dstate: &DeviceState, rpm: u16) -> Option<u16> {
+    if dstate.max_fan {
+        return None;
+    }
+    librazer::unsupported::manual_fan_runs_at(pid, dstate.perf_mode.wire(), rpm)
+}
+
 /// A manual fan preset's label. The chassis range's ends are marked (below min the EC holds
 /// the fan at min, above max it clamps). A preset the current perf mode runs faster, as
 /// Custom does below 3800 on the Blade 16 (2023), says what the fans run at instead: the EC
@@ -658,14 +668,22 @@ fn fan_preset_label(rpm: u16, (min, max): (u16, u16), runs_at: Option<u16>) -> S
 mod tests {
     use super::*;
     use librazer::types::{CpuBoost, GpuBoost};
-    use librazer::unsupported::manual_fan_runs_at;
 
     const BLADE16: u16 = 0x029f;
     const RANGE: (u16, u16) = (2000, 5000);
     const CUSTOM: PerfMode = PerfMode::Custom(CpuBoost::Medium, GpuBoost::High);
 
-    fn label(pid: u16, perf: PerfMode, rpm: u16) -> String {
-        fan_preset_label(rpm, RANGE, manual_fan_runs_at(pid, perf.wire(), rpm))
+    fn label_with(pid: u16, perf_mode: PerfMode, max_fan: bool, rpm: u16) -> String {
+        let dstate = DeviceState {
+            perf_mode,
+            max_fan,
+            ..DeviceState::default()
+        };
+        fan_preset_label(rpm, RANGE, preset_runs_at(pid, &dstate, rpm))
+    }
+
+    fn label(pid: u16, perf_mode: PerfMode, rpm: u16) -> String {
+        label_with(pid, perf_mode, false, rpm)
     }
 
     #[test]
@@ -677,6 +695,16 @@ mod tests {
         // Every boost pair: the runs found the same floor whatever the boosts.
         let other = PerfMode::Custom(CpuBoost::Low, GpuBoost::Low);
         assert_eq!(label(BLADE16, other, 2400), "2400 RPM (runs at 3800)");
+    }
+
+    #[test]
+    fn max_fan_on_drops_the_floor_label() {
+        assert_eq!(label_with(BLADE16, CUSTOM, true, 2400), "2400 RPM");
+        assert_eq!(label_with(BLADE16, CUSTOM, true, 2000), "2000 RPM (min)");
+        assert_eq!(
+            label_with(BLADE16, CUSTOM, false, 2400),
+            "2400 RPM (runs at 3800)"
+        );
     }
 
     #[test]

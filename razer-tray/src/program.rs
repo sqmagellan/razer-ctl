@@ -649,7 +649,13 @@ impl ProgramState {
             FanSpeed::Auto => "Fan Auto".to_string(),
             FanSpeed::Manual(0) => "Fan Manual".to_string(),
             FanSpeed::Manual(rpm) => {
-                match librazer::unsupported::manual_fan_runs_at(self.pid, s.perf_mode.wire(), rpm) {
+                // Max Fan drives the fans past any set point; "(max)" below says so.
+                let mode_floor = (!s.max_fan)
+                    .then(|| {
+                        librazer::unsupported::manual_fan_runs_at(self.pid, s.perf_mode.wire(), rpm)
+                    })
+                    .flatten();
+                match mode_floor {
                     Some(mode_floor) => format!("Fan {mode_floor} floor"),
                     None if rpm < floor => format!("Fan {floor} floor"),
                     None => format!("Fan {rpm} set"),
@@ -1092,7 +1098,11 @@ mod tests {
         state.observed.perf_mode = PerfMode::Balanced;
         state.observed.fan_speed = FanSpeed::Manual(3000);
         assert!(state.tooltip().unwrap().contains("Fan 3000 set"));
+        // Max Fan overrides the set point; the tooltip keeps "set" and adds "(max)".
         state.observed.perf_mode = custom;
+        state.observed.max_fan = true;
+        assert!(state.tooltip().unwrap().contains("Fan 3000 set (max)"));
+        state.observed.max_fan = false;
         state.pid = 0x02a0;
         assert!(state.tooltip().unwrap().contains("Fan 3000 set"));
     }

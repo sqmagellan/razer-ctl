@@ -47,19 +47,6 @@ macro_rules! impl_unary_handle_cli {
     };
 }
 
-macro_rules! impl_unary_handle_with_arg_cli {
-    (<$arg_type:ty>($matches:ident, $device:ident, $name:literal, $arg_name:literal, $arg2:literal, $setter:path)) => {
-        match $matches.subcommand() {
-            Some(($name, matches)) => $setter(
-                $device,
-                *matches.get_one::<$arg_type>($arg_name).unwrap(),
-                $arg2,
-            )?,
-            _ => (),
-        }
-    };
-}
-
 macro_rules! impl_unary_cli {
     (<$feature_type:ty><$arg_type:ty>($desc:literal,$arg_desc:literal,$setter:path,$getter:path)) => {
         impl Cli for $feature_type {
@@ -327,15 +314,114 @@ fn fan_floor_note(pid: u16, perf_mode: PerfMode, rpm: u16) -> Option<String> {
     ))
 }
 
-/// [`fan_floor_note`] after `fan rpm` wrote `rpm`. The perf mode is read only on a laptop
-/// with a listed floor above `rpm`, and a failed read prints nothing: the write succeeded.
-fn fan_floor_note_after_set(device: &Laptop, rpm: u16) -> Option<String> {
-    let pid = device.info.pid;
-    if !librazer::unsupported::manual_fan_floors(pid).any(|(_, floor)| floor > rpm) {
+/// [`fan_floor_note`] for the state just read: only in Manual, and not while Max Fan (a
+/// Custom-only toggle) drives the fans past any set point. A failed Max Fan read keeps the
+/// note, which is still true of the set point.
+fn fan_floor_note_now(
+    device: &Laptop,
+    perf_mode: PerfMode,
+    fan_mode: FanMode,
+    rpm: u16,
+) -> Option<String> {
+    if fan_mode != FanMode::Manual {
         return None;
     }
-    let (perf_mode, _) = command::get_perf_mode(device).ok()?;
-    fan_floor_note(pid, perf_mode, rpm)
+    let note = fan_floor_note(device.info.pid, perf_mode, rpm)?;
+    if perf_mode == PerfMode::Custom
+        && matches!(
+            command::get_max_fan_speed_mode(device),
+            Ok(MaxFanSpeedMode::Enable)
+        )
+    {
+        return None;
+    }
+    Some(note)
+}
+
+/// [`fan_floor_note_now`] after `fan rpm` wrote `rpm`. The modes are read only on a laptop
+/// with a listed floor above `rpm`, and a failed read prints nothing: the write succeeded.
+fn fan_floor_note_after_set(device: &Laptop, rpm: u16) -> Option<String> {
+    if !librazer::unsupported::manual_fan_floors(device.info.pid).any(|(_, floor)| floor > rpm) {
+        return None;
+    }
+    let (perf_mode, fan_mode) = command::get_perf_mode(device).ok()?;
+    fan_floor_note_now(device, perf_mode, fan_mode, rpm)
+}
+
+/// `fan` and `info`'s fan lines, each passed to `out` as it is known (stdout in the binary,
+/// a list in tests), so a later failed read doesn't hide what was already printed.
+fn fan_handle(
+    device: &Laptop,
+    matches: &clap::ArgMatches,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    match matches.subcommand() {
+        Some(("fan", matches)) => {
+            // The parser takes any value some Blade can run; this laptop's own range is
+            // narrower. Outside it the EC holds its floor or ceiling and reports success.
+            if let Some(("rpm", m)) = matches.subcommand() {
+                let rpm = *m.get_one::<u16>("RPM").unwrap();
+                let (min, max) = device.info.fan_rpm_range;
+                anyhow::ensure!(
+                    (min..=max).contains(&rpm),
+                    "{rpm} RPM is outside this laptop's fan range ({min}..={max} RPM); the \
+                     EC would run at {} RPM and report success",
+                    if rpm < min { min } else { max }
+                );
+                command::set_fan_rpm(device, rpm, false)?;
+                if let Some(note) = fan_floor_note_after_set(device, rpm) {
+                    out(note);
+                }
+            }
+            impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
+
+            match matches.subcommand() {
+                Some(("auto", _)) => command::set_fan_mode(device, FanMode::Auto),
+                Some(("manual", _)) => command::set_fan_mode(device, FanMode::Manual),
+                _ => Ok(()),
+            }
+        }
+        Some(("info", _)) => {
+            match command::get_perf_mode(device) {
+                Ok((_, fan_mode @ FanMode::Auto)) => out(format!("Fan: {:?}", fan_mode)),
+                Ok((perf_mode, fan_mode @ FanMode::Manual)) => {
+                    // The set-point register reads back whatever was written, even a
+                    // value the EC is ignoring, so it is labeled as a set point, never
+                    // as the speed.
+                    match command::get_fan_rpm(device, FanZone::Zone1) {
+                        Ok(0) => out(format!("Fan: {:?} (no set point yet)", fan_mode)),
+                        Ok(rpm) => {
+                            out(format!("Fan: {:?}, set point {} RPM", fan_mode, rpm));
+                            if let Some(note) = fan_floor_note_now(device, perf_mode, fan_mode, rpm)
+                            {
+                                out(note);
+                            }
+                        }
+                        Err(e) => out(format!("Fan: {:?}, set point unreadable: {}", fan_mode, e)),
+                    }
+                }
+                Err(e) => out(format!("{}", e)),
+            };
+            // Both zones, through the same trust rule the tray uses. Some ECs have
+            // no speed read at all (issue #2): fan control still works there, so
+            // only the actual-speed line says so.
+            let (fan, trusted) = match librazer::state::sample_fan_rpm(device, 3) {
+                Err(e) if librazer::error::is_not_supported(&e) => {
+                    out("Fan actual: not supported".to_string());
+                    return Ok(());
+                }
+                r => r?,
+            };
+            out(format!(
+                "Fan actual: {}/{} RPM{}",
+                fan.fan1,
+                fan.fan2,
+                if trusted { "" } else { " (unconfirmed read)" }
+            ));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 impl Cli for feature::Fan {
@@ -352,79 +438,7 @@ impl Cli for feature::Fan {
     }
 
     fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
-        match matches.subcommand() {
-            Some((ident, matches)) if ident == self.name() => {
-                // The parser takes any value some Blade can run; this laptop's own range is
-                // narrower. Outside it the EC holds its floor or ceiling and reports success.
-                if let Some(("rpm", m)) = matches.subcommand() {
-                    let rpm = *m.get_one::<u16>("RPM").unwrap();
-                    let (min, max) = device.info.fan_rpm_range;
-                    anyhow::ensure!(
-                        (min..=max).contains(&rpm),
-                        "{rpm} RPM is outside this laptop's fan range ({min}..={max} RPM); the \
-                         EC would run at {} RPM and report success",
-                        if rpm < min { min } else { max }
-                    );
-                }
-                impl_unary_handle_with_arg_cli! {<u16>(matches, device, "rpm", "RPM", false, command::set_fan_rpm)}
-                if let Some(("rpm", m)) = matches.subcommand() {
-                    if let Some(note) =
-                        fan_floor_note_after_set(device, *m.get_one::<u16>("RPM").unwrap())
-                    {
-                        println!("{note}");
-                    }
-                }
-                impl_unary_handle_cli! {<MaxFanSpeedMode>(matches, device, "max", "MAX", command::set_max_fan_speed_mode)}
-
-                match matches.subcommand() {
-                    Some(("auto", _)) => command::set_fan_mode(device, FanMode::Auto),
-                    Some(("manual", _)) => command::set_fan_mode(device, FanMode::Manual),
-                    _ => Ok(()),
-                }
-            }
-            Some(("info", _)) => {
-                match command::get_perf_mode(device) {
-                    Ok((_, fan_mode @ FanMode::Auto)) => {
-                        println!("Fan: {:?}", fan_mode)
-                    }
-                    Ok((perf_mode, fan_mode @ FanMode::Manual)) => {
-                        // The set-point register reads back whatever was written, even a
-                        // value the EC is ignoring, so it is labeled as a set point, never
-                        // as the speed.
-                        match command::get_fan_rpm(device, FanZone::Zone1) {
-                            Ok(0) => println!("Fan: {:?} (no set point yet)", fan_mode),
-                            Ok(rpm) => {
-                                println!("Fan: {:?}, set point {} RPM", fan_mode, rpm);
-                                if let Some(note) = fan_floor_note(device.info.pid, perf_mode, rpm)
-                                {
-                                    println!("{note}");
-                                }
-                            }
-                            Err(e) => println!("Fan: {:?}, set point unreadable: {}", fan_mode, e),
-                        }
-                    }
-                    Err(e) => println!("{}", e),
-                };
-                // Both zones, through the same trust rule the tray uses. Some ECs have
-                // no speed read at all (issue #2): fan control still works there, so
-                // only the actual-speed line says so.
-                let (fan, trusted) = match librazer::state::sample_fan_rpm(device, 3) {
-                    Err(e) if librazer::error::is_not_supported(&e) => {
-                        println!("Fan actual: not supported");
-                        return Ok(());
-                    }
-                    r => r?,
-                };
-                println!(
-                    "Fan actual: {}/{} RPM{}",
-                    fan.fan1,
-                    fan.fan2,
-                    if trusted { "" } else { " (unconfirmed read)" }
-                );
-                Ok(())
-            }
-            _ => Ok(()),
-        }
+        fan_handle(device, matches, &mut |line| println!("{line}"))
     }
 }
 
@@ -710,10 +724,10 @@ struct JsonStatus {
     gpu_boost: Option<String>,
     fan_mode: Option<String>,
     fan_setpoint_rpm: Option<u16>,
-    /// In Manual, the lowest speed this laptop runs the fans at in the current perf mode,
-    /// where that was measured above the chassis minimum (Blade 16 2023: 3800 in Custom).
-    /// The fans run at the larger of this and `fan_setpoint_rpm`. Left out otherwise, so
-    /// the output is unchanged wherever no such floor is known.
+    /// In Manual, the current perf mode's measured minimum fan speed on this laptop, where
+    /// one is known above the chassis minimum (Blade 16 2023: 3800 in Custom). With Max Fan
+    /// off the fans settle at the larger of this and `fan_setpoint_rpm`. Left out
+    /// otherwise, so the output is unchanged wherever no such floor is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     fan_floor_rpm: Option<u16>,
     fan_actual_rpm: Option<[u16; 2]>,
@@ -1479,19 +1493,40 @@ mod tests {
         .detect()
     }
 
+    /// `razer-cli auto ARGS` for the `fan` feature (and `info`), returning what it printed.
+    fn fan_lines(laptop: &Laptop, args: &[&str]) -> Vec<String> {
+        let features = gen_cli_features(laptop.info.features);
+        let matches = build_cli(&features)
+            .try_get_matches_from(["razer-cli", "auto"].iter().chain(args))
+            .unwrap();
+        let (_, sub) = matches.subcommand().unwrap();
+        let mut lines = Vec::new();
+        fan_handle(laptop, sub, &mut |l| lines.push(l)).unwrap();
+        lines
+    }
+
+    const NOTE: &str =
+        "In Custom this laptop runs a manual fan at 3800 RPM or more; a 3000 set point runs at 3800.";
+
     /// 2026-10-20 hardware runs: in Custom/Manual a 3000 set point reads back as 3000 while
-    /// the fans hold 3800. `fan rpm` says so, `json` carries the floor, and the speed the
-    /// note names is the one the fans settle at.
+    /// the fans hold 3800. `fan rpm` and `info` say so, `json` carries the floor, and the
+    /// speed the note names is the one the fans settle at.
     #[test]
     fn a_set_point_below_the_custom_floor_gets_a_note_on_the_blade_16_2023() {
         let laptop = blade16_2023();
         auto(&laptop, &["perf", "mode", "custom"]).unwrap();
         auto(&laptop, &["fan", "manual"]).unwrap();
-        auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
-        let note = fan_floor_note_after_set(&laptop, 3000).unwrap();
-        assert!(note.contains("3800 RPM or more"), "{note}");
+        assert_eq!(fan_lines(&laptop, &["fan", "rpm", "3000"]), vec![NOTE]);
 
         laptop.pause(std::time::Duration::from_secs(180));
+        assert_eq!(
+            fan_lines(&laptop, &["info"]),
+            vec![
+                "Fan: Manual, set point 3000 RPM".to_string(),
+                NOTE.to_string(),
+                "Fan actual: 3800/3800 RPM".to_string(),
+            ]
+        );
         let status = json_status(&laptop).unwrap();
         assert_eq!(status.fan_setpoint_rpm, Some(3000));
         assert_eq!(status.fan_floor_rpm, Some(3800));
@@ -1499,37 +1534,55 @@ mod tests {
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["fan_floor_rpm"], json!(3800));
 
-        // At or above the floor the set point is followed and nothing is printed.
-        auto(&laptop, &["fan", "rpm", "4500"]).unwrap();
-        assert_eq!(fan_floor_note_after_set(&laptop, 4500), None);
+        // At or above the floor the set point is followed and nothing is added.
+        assert!(fan_lines(&laptop, &["fan", "rpm", "4500"]).is_empty());
         laptop.pause(std::time::Duration::from_secs(180));
+        assert_eq!(
+            fan_lines(&laptop, &["info"]),
+            vec![
+                "Fan: Manual, set point 4500 RPM",
+                "Fan actual: 4500/4500 RPM"
+            ]
+        );
         let status = json_status(&laptop).unwrap();
-        assert_eq!(status.fan_actual_rpm, Some([4500, 4500]));
         assert_eq!(status.fan_floor_rpm, Some(3800), "still Custom/Manual");
         assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
     }
 
     #[test]
-    fn balanced_and_auto_have_no_floor_note_or_field() {
+    fn balanced_auto_and_max_fan_get_no_floor_note() {
         let laptop = blade16_2023();
+        // Balanced follows 3000.
         auto(&laptop, &["fan", "manual"]).unwrap();
-        auto(&laptop, &["fan", "rpm", "3000"]).unwrap();
-        assert_eq!(fan_floor_note_after_set(&laptop, 3000), None);
+        assert!(fan_lines(&laptop, &["fan", "rpm", "3000"]).is_empty());
         let value = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
         assert_eq!(value["perf_mode"], json!("Balanced"));
         assert!(value.get("fan_floor_rpm").is_none(), "{value}");
 
-        // Custom with the fan on Auto: no manual speed to lift, so no field.
+        // Custom with the fan on Auto: the set point isn't in use, so no note and no field.
         auto(&laptop, &["perf", "mode", "custom"]).unwrap();
+        assert!(fan_lines(&laptop, &["fan", "rpm", "3000"]).is_empty());
+        assert_eq!(fan_lines(&laptop, &["info"])[0], "Fan: Auto");
         let value = serde_json::to_value(json_status(&laptop).unwrap()).unwrap();
         assert_eq!(value["fan_mode"], json!("Auto"));
         assert!(value.get("fan_floor_rpm").is_none(), "{value}");
+
+        // Max Fan drives the fans past any set point, so "runs at 3800" would be wrong.
+        auto(&laptop, &["fan", "manual"]).unwrap();
+        auto(&laptop, &["fan", "max", "enable"]).unwrap();
+        assert!(fan_lines(&laptop, &["fan", "rpm", "3000"]).is_empty());
+        assert_eq!(
+            fan_lines(&laptop, &["info"])[..1],
+            ["Fan: Manual, set point 3000 RPM"]
+        );
+        auto(&laptop, &["fan", "max", "disable"]).unwrap();
+        assert_eq!(fan_lines(&laptop, &["info"])[1], NOTE);
         assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
     }
 
-    /// Only a laptop with a listed floor above the set point pays for the perf-mode read.
+    /// Only a laptop with a listed floor above the set point pays for the mode reads.
     #[test]
-    fn fan_rpm_reads_the_perf_mode_only_when_a_floor_could_apply() {
+    fn fan_rpm_reads_the_modes_only_when_a_floor_could_apply() {
         for (pid, rpm, reads) in [
             (0x029f, 3000, true),
             (0x029f, 4500, false),
@@ -1546,20 +1599,6 @@ mod tests {
                 "{pid:#06x} at {rpm}: {sent:x?}"
             );
         }
-    }
-
-    #[test]
-    fn auto_info_runs_with_the_floor_note_in_custom() {
-        let laptop = blade16_2023();
-        for args in [
-            &["perf", "mode", "custom"][..],
-            &["fan", "manual"],
-            &["fan", "rpm", "3000"],
-            &["info"],
-        ] {
-            auto(&laptop, args).unwrap();
-        }
-        assert!(laptop.gaps().is_empty(), "{:?}", laptop.gaps());
     }
 
     #[test]
