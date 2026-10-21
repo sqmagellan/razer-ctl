@@ -243,25 +243,27 @@ pub fn set_fan_mode(device: &impl HidTransport, mode: FanMode) -> Result<()> {
 }
 
 /// How long [`confirm_perf_mode`] waits before its one re-read.
-const CONFIRM_REREAD_DELAY: std::time::Duration = if cfg!(test) {
-    std::time::Duration::ZERO
-} else {
-    std::time::Duration::from_millis(200)
-};
+const CONFIRM_REREAD_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Read the perf/fan mode back and fail with [`crate::error::PerfNotApplied`] unless it is
 /// `perf_mode`/`fan_mode`. A write's own answer proves nothing: `0x029F` answered `0x0d02`
 /// with success and its args echoed for writes it ignored (hours into Modern Standby,
 /// 2026-10-19). One re-read after a short pause covers a mode that lands a moment late.
+/// A laptop that can't read the mode back can't confirm a write, so there the write
+/// stands, as it did before this check existed.
 pub fn confirm_perf_mode(
     device: &impl HidTransport,
     perf_mode: PerfMode,
     fan_mode: FanMode,
 ) -> Result<()> {
     let wanted = (perf_mode, fan_mode);
-    let mut read = get_perf_mode(device)?;
+    let mut read = match get_perf_mode(device) {
+        Ok(read) => read,
+        Err(e) if crate::error::is_not_supported(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
     if read != wanted {
-        std::thread::sleep(CONFIRM_REREAD_DELAY);
+        device.pause(CONFIRM_REREAD_DELAY);
         read = get_perf_mode(device)?;
     }
     if read == wanted {
@@ -664,6 +666,24 @@ mod tests {
             BatteryCare::from_percent(60).unwrap()
         );
         assert_eq!(on.sent_count(), 1);
+    }
+
+    #[test]
+    fn a_perf_write_stands_on_a_laptop_that_cant_read_the_mode() {
+        let mock = MockTransport::with_fallible_responder(|req| {
+            if req.command() == 0x0d82 {
+                Err(anyhow::Error::new(
+                    crate::packet::ResponseError::NotSupported,
+                ))
+            } else {
+                Ok(crate::packet::Packet::new(req.command(), req.get_args()))
+            }
+        });
+        set_perf_mode_confirmed(&mock, PerfMode::Silent).unwrap();
+        assert!(
+            mock.sent().iter().any(|(c, _)| *c == 0x0d02),
+            "the write was sent"
+        );
     }
 
     #[test]
@@ -1098,9 +1118,12 @@ mod tests {
                 0x0d82 => Err(anyhow::Error::new(answer)),
                 _ => Ok(Packet::new(req.command(), req.get_args())),
             });
-            let err = confirm_perf_mode(&mock, PerfMode::Balanced, FanMode::Auto).unwrap_err();
+            let err = get_perf_mode(&mock).unwrap_err();
             assert_eq!(crate::error::is_retryable(&err), retryable, "{answer:?}");
             assert_eq!(crate::error::ExitCode::classify(&err), code, "{answer:?}");
+            // Confirming passes a Busy up; a laptop with no mode read keeps its write.
+            let confirmed = confirm_perf_mode(&mock, PerfMode::Balanced, FanMode::Auto);
+            assert_eq!(confirmed.is_ok(), !retryable, "{answer:?}");
         }
     }
 }

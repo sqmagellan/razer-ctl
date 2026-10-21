@@ -788,15 +788,16 @@ fn set_fan_rpm_manual(device: &Laptop, rpm: u16) -> Result<Option<PerfMode>> {
         Err(e) => return Err(e),
     };
     let switched = fan != FanMode::Manual;
+    // A switch whose read-back failed may still have taken: put the fan back either way.
     if switched {
-        command::set_fan_mode_confirmed(device, FanMode::Manual)?;
+        if let Err(e) = command::set_fan_mode_confirmed(device, FanMode::Manual) {
+            put_fan_back(device, fan);
+            return Err(e);
+        }
     }
     if let Err(e) = command::set_fan_rpm(device, rpm, false) {
-        // Don't leave the fan in Manual on a set point nobody asked for.
         if switched {
-            if let Err(back) = command::set_fan_mode(device, fan) {
-                eprintln!("could not put the fan back to {fan:?}: {back}");
-            }
+            put_fan_back(device, fan);
         }
         return Err(e);
     }
@@ -804,6 +805,13 @@ fn set_fan_rpm_manual(device: &Laptop, rpm: u16) -> Result<Option<PerfMode>> {
         eprintln!("fan mode was {fan:?}; switched to Manual");
     }
     Ok(Some(perf))
+}
+
+/// After a failed `fan rpm`: don't leave the fan in Manual on a set point nobody asked for.
+fn put_fan_back(device: &Laptop, fan: FanMode) {
+    if let Err(back) = command::set_fan_mode_confirmed(device, fan) {
+        eprintln!("could not put the fan back to {fan:?}: {back}");
+    }
 }
 
 fn print_json(device: &Laptop) -> Result<()> {

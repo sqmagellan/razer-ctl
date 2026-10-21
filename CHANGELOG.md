@@ -12,8 +12,8 @@ unless a user report is cited.
   It writes nothing. `probe --writes` (tray closed) also changes perf mode, boosts, Max Fan and the
   fan for a few minutes, reads each one back, then puts everything back and checks it. It saves the
   settings to a recovery file first; Ctrl-C restores them, and `probe --restore FILE` replays one.
-- **`auto fan rpm` switches the fan to Manual.** It used to write only the set point, so a fan on
-  Auto stayed on the firmware curve and a fan sweep measured that curve instead
+- **`auto fan rpm` switches the fan to Manual** on a laptop that can read its fan mode. It used to
+  write only the set point, so a fan on Auto stayed on the firmware curve and a fan sweep measured that curve instead
   ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). The value must be a multiple of 100
   within the laptop's fan range; stderr says when the mode changed.
 - **Blade 16 (2023) Custom floor.** In Custom with a manual fan, this EC runs the fans at the set
