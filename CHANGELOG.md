@@ -4,6 +4,31 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
+## Unreleased
+
+**New**
+- **`razer-cli probe`** reads every setting on both fan zones and saves what the EC answered,
+  including the raw status byte, retries and timing, as one JSON file to attach to a model report.
+  It writes nothing. `probe --writes` (tray closed) also changes perf mode, boosts, Max Fan and the
+  fan for a few minutes, reads each one back, then puts everything back and checks it. It saves the
+  settings to a recovery file first; Ctrl-C restores them, and `probe --restore FILE` replays one.
+- **`auto fan rpm` switches the fan to Manual.** It used to write only the set point, so a fan on
+  Auto stayed on the firmware curve and a fan sweep measured that curve instead
+  ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). The value must be a multiple of 100
+  within the laptop's fan range; stderr says when the mode changed.
+- **Blade 16 (2023) Custom floor.** In Custom with a manual fan, this EC runs the fans at the set
+  point or 3800 RPM, whichever is higher. A lower set point is stored and reads back, but isn't
+  used. `auto fan rpm` and `auto info` say so, `auto json` has a new `fan_floor_rpm` field, and the
+  tray's fan presets read "2000 RPM (runs at 3800)". The fan on Auto has no such limit: under a
+  CPU and GPU load it reached 4100 RPM in Balanced and 4600 in Performance and Custom.
+
+**Reliability**
+- **A perf mode write the EC acknowledges and ignores is caught.** It happened once on 2026-10-19.
+  The tray reads the perf and fan mode back after applying and retries up to 3 times;
+  `auto perf mode` and `auto fan auto|manual` fail instead of reporting success.
+- **Tests run against simulated ECs** built from four laptops' reports and hardware runs. A
+  command the reports don't cover answers "unmodeled" instead of agreeing with the code.
+
 ## 0.9.6: laptops that lack a feature, a first run that reads the laptop, Blade 18 profile (2026-10-15)
 Tested on `0x029F` (2026-10-15): `auto json` matches 0.9.5 byte for byte; fan set points above 5000
 run at 5000; the tray ran 11 minutes on the existing config, a missing config and a broken one.
