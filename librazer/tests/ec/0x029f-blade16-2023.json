@@ -2,6 +2,7 @@
   "format": "razer-ctl-ec-model/1",
   "name": "Razer Blade 16 (2023)",
   "pid": "0x029f",
+  "model_number": "RZ09-0483U",
   "sources": {
     "hw-0620": "maintainer's Blade 16 (2023), hardware run 2026-06-19/20: logo zone, keyboard brightness and Fn-key changes, lights-always-on flag",
     "hw-0710": "maintainer's Blade 16 (2023), hardware run 2026-07-10: keyboard effects",
@@ -10,6 +11,7 @@
     "hw-0923": "maintainer's Blade 16 (2023), hardware run 2026-09-23: EC command probe and the keyboard custom frame",
     "hw-1002": "maintainer's Blade 16 (2023), hardware run 2026-10-02: manual fan in Balanced and Hyperboost (Hyperboost treats a set point as a floor under its own curve)",
     "hw-1014": "maintainer's Blade 16 (2023), hardware run 2026-10-14: manual set points read back",
+    "hw-1020w": "maintainer's Blade 16 (2023), hardware run 2026-10-20 probe --writes (model RZ09-0483U): every write read back; in Balanced/Manual the set points 5000, 3500 and 2000 each held, up at ~33 RPM/s and down at ~30; the restore verified",
     "hw-1020": "maintainer's Blade 16 (2023), hardware run 2026-10-20 hw-test: in Custom right after Max Fan on/off, a 3000 set point read back but the fans climbed past it to 3800 in 60 s",
     "hw-1019": "maintainer's Blade 16 (2023), hardware run 2026-10-19: perf transitions and Max Fan at four boost pairs. Once that day, writes from Balanced were acknowledged and ignored; not reproduced 2026-10-20 after 7.2 h of Modern Standby (9 of 9 writes read back)"
   },
@@ -57,7 +59,7 @@
     "manual_observed_in": [
       0
     ],
-    "evidence": "measured hw-0815: manual floor exactly 2000 (set points below it hold 2000, symmetric on both zones); Auto is off (0) or at least ~1800, idle 2000/1800; manual slew ~23-35 RPM/s. hw-1002: honored in Balanced; Hyperboost and (hw-1020) Custom do not hold a set point, so manual is modeled in Balanced only. hw-0922: Max Fan ramps to 4700 at ~40 RPM/s"
+    "evidence": "measured hw-0815: manual floor exactly 2000 (set points below it hold 2000, symmetric on both zones); Auto is off (0) or at least ~1800, idle 2000/1800; manual slew ~23-35 RPM/s. hw-1002 and hw-1020w: honored in Balanced (2000, 3500 and 5000 held); Hyperboost and (hw-1020) Custom do not hold a set point, so manual is modeled in Balanced only. hw-0922: Max Fan ramps to 4700 at ~40 RPM/s"
   },
   "rules": [
     {
