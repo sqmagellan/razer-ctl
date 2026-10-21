@@ -26,6 +26,9 @@ unless a user report is cited.
 - **A perf mode write the EC acknowledges and ignores is caught.** It happened once on 2026-10-19.
   The tray reads the perf and fan mode back after applying and retries up to 3 times;
   `auto perf mode` and `auto fan auto|manual` fail instead of reporting success.
+- **The tray shows the GPU again on drivers that print a decimal temperature.** `nvidia-smi`
+  answered "57.54" where a whole number was expected, so every poll failed and the tooltip left the
+  GPU out.
 - **Tests run against simulated ECs** built from four laptops' reports and hardware runs. A
   command the reports don't cover answers "unmodeled" instead of agreeing with the code.
 
