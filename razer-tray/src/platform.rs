@@ -457,6 +457,23 @@ fn nvidia_gpu_asleep() -> Option<bool> {
 /// "couldn't communicate with the NVIDIA driver" for several seconds. Quitting on the
 /// first sample turned a transient startup condition into a permanently empty tooltip
 /// for the whole session.
+/// The first line of `nvidia-smi --query-gpu=temperature.gpu,power.draw
+/// --format=csv,noheader,nounits`: "54, 28.33" is 54 C and 28.33 W. Drivers that print the
+/// temperature with decimals ("57.54, 36.76") failed a whole-number parse on every poll, so
+/// the tooltip never showed the GPU (`0x029F`, 2026-10-21). Rounded to whole degrees; a
+/// power field that isn't a number ("[N/A]") leaves only the temperature.
+#[cfg(any(target_os = "windows", test))]
+fn parse_gpu_telemetry(stdout: &str) -> Option<(u32, Option<f32>)> {
+    let mut fields = stdout.lines().next()?.split(',').map(str::trim);
+    let temp = fields
+        .next()?
+        .parse::<f32>()
+        .ok()
+        .filter(|t| t.is_finite() && *t >= 0.0)?;
+    let watts = fields.next().and_then(|w| w.parse::<f32>().ok());
+    Some((temp.round() as u32, watts))
+}
+
 #[cfg(target_os = "windows")]
 pub fn spawn_gpu_telemetry_monitor() {
     use std::os::windows::process::CommandExt;
@@ -497,15 +514,7 @@ pub fn spawn_gpu_telemetry_monitor() {
             .output();
 
         let parsed = match &output {
-            Ok(o) if o.status.success() => {
-                // "54, 28.33" -- nounits keeps it to bare numbers.
-                let text = String::from_utf8_lossy(&o.stdout);
-                let first = text.lines().next().unwrap_or_default().to_string();
-                let mut fields = first.split(',').map(str::trim);
-                let temp = fields.next().and_then(|t| t.parse::<u32>().ok());
-                let watts = fields.next().and_then(|w| w.parse::<f32>().ok());
-                temp.map(|t| (t, watts))
-            }
+            Ok(o) if o.status.success() => parse_gpu_telemetry(&String::from_utf8_lossy(&o.stdout)),
             _ => None,
         };
 
@@ -1205,7 +1214,18 @@ pub fn set_hotkey_spec(spec: Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hotkey;
+    use super::{parse_gpu_telemetry, parse_hotkey};
+
+    #[test]
+    fn gpu_telemetry_parses_whole_and_decimal_temperatures() {
+        assert_eq!(parse_gpu_telemetry("54, 28.33\n"), Some((54, Some(28.33))));
+        // The 0x029F driver, 2026-10-21.
+        assert_eq!(parse_gpu_telemetry("57.54, 36.76"), Some((58, Some(36.76))));
+        assert_eq!(parse_gpu_telemetry("34.2, [N/A]"), Some((34, None)));
+        assert_eq!(parse_gpu_telemetry("[N/A], 12.5"), None);
+        assert_eq!(parse_gpu_telemetry(""), None);
+        assert_eq!(parse_gpu_telemetry("-1, 3"), None);
+    }
 
     #[test]
     fn hotkeys_parse_and_bare_keys_are_refused() {
