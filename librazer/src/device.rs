@@ -64,6 +64,24 @@ impl Device {
         self
     }
 
+    /// A catalogued model's [`crate::unsupported::KNOWN_LACKING`] entries, skipped from the
+    /// start; it learns nothing else, so any other 0x05 stays an error. No entry, no record.
+    pub fn with_known_lacking(mut self) -> Self {
+        let known = crate::unsupported::known_lacking(self.info.pid);
+        if known.is_empty() {
+            return self;
+        }
+        for feature in known.iter() {
+            log::info!(
+                "PID {:#06x} is known to lack {}; it is left alone",
+                self.info.pid,
+                feature.name()
+            );
+        }
+        self.unsupported = Some(UnsupportedLog::fixed(known));
+        self
+    }
+
     pub fn info(&self) -> &Descriptor {
         &self.info
     }
@@ -285,7 +303,7 @@ impl Device {
         let (pid_list, model_number_prefix) = Device::enumerate()?;
 
         if let Some(supported) = crate::matching::find_descriptor(&model_number_prefix, SUPPORTED) {
-            return Device::new(supported.clone());
+            return Ok(Device::new(supported.clone())?.with_known_lacking());
         }
 
         // Unknown SKU. The Razer laptop command set is shared across the line -- the

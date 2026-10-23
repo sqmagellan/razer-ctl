@@ -724,6 +724,30 @@ mod tests {
         }
     }
 
+    /// Issue #10: the catalogued Blade 17 2022 answers 0x05 to Max Fan "on". It is skipped
+    /// from the start, so a Custom apply with Max Fan on never sends it; any other 0x05 on
+    /// a catalogued model is still an error.
+    #[test]
+    fn the_catalogued_blade_17_2022_never_sends_max_fan() {
+        use crate::state::{unsupported_on, DeviceState};
+        use crate::types::{CpuBoost, GpuBoost};
+        let m = Model::from_json(include_str!("../tests/ec/0x028b-blade17-2022.json")).unwrap();
+        let sim = SimTransport::new(m).with_known_lacking();
+        assert!(unsupported_on(&sim).contains(crate::unsupported::Optional::MaxFan));
+        let mut want = DeviceState::read(&sim).unwrap();
+        want.perf_mode = crate::state::PerfMode::Custom(CpuBoost::Medium, GpuBoost::Low);
+        want.max_fan = true;
+        let _ = want.apply(&sim);
+        let sent = sim.drain_exchanges();
+        assert!(sent.iter().any(|e| e.command == 0x0d02), "the apply ran");
+        assert!(!sent.iter().any(|e| e.command == 0x070f));
+        // The 0x029F has no entry: no record at all, as before.
+        assert!(SimTransport::new(blade16())
+            .with_known_lacking()
+            .unsupported()
+            .is_none());
+    }
+
     #[test]
     fn a_writes_capture_does_not_become_a_model() {
         let m = blade16();

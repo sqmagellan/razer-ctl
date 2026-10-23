@@ -45,12 +45,12 @@ open:
   0x078f [0]: not observed
   0x0d85 [0, 0, 0]: no rule for this command
 
-## 0x028b-blade17-2022 (Razer Blade 17 (2022), generic, learns)
+## 0x028b-blade17-2022 (Razer Blade 17 (2022), catalogued)
 read: ok
 apply balanced: gap  [gaps: 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
 apply silent: gap  [gaps: 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
-apply custom: gap  [gaps: 0x0d07 [1, 2, 2], 0x070f [0], 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
-apply custom + max fan: gap  [0x05: 0x070f [2]]  [gaps: 0x0d07 [1, 2, 2], 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
+apply custom: gap  [gaps: 0x0d07 [1, 2, 2], 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
+apply custom + max fan: gap  [gaps: 0x0d07 [1, 2, 2], 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
 apply manual 3000: gap  [gaps: 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
 enforce after drift: gap  [gaps: 0x0300 [1, 4, 0], 0x0712 [208]]
 fan reads: ok
@@ -60,7 +60,6 @@ open:
   0x0303 [1, 5, 0]: read only; not write-tested
   0x0712 [208]: read only; not write-tested
   0x0d07 [1, 2, 2]: other boost values not reported
-  0x070f [0]: Disable in Custom: asked on #10, not answered yet
   0x0d81 [0, 1, 0]: not reported
   0x0d81 [0, 2, 0]: not reported
   0x0d85 [0, 0, 0]: no rule for this command

@@ -35,13 +35,13 @@ fn model(json: &str) -> Model {
     Model::from_json(json).expect("fixture parses")
 }
 
-/// A catalogued laptop gets its own profile and never learns; any other uses the generic
-/// profile, which learns what the EC lacks (as `Device::detect` does).
+/// A catalogued laptop gets its own profile and only its `KNOWN_LACKING` entries; any other
+/// uses the generic profile, which learns what the EC lacks (as `Device::detect` does).
 fn transport(m: &Model) -> SimTransport {
     let catalogued = sim::catalogued(m).is_some();
     let sim = SimTransport::new(m.clone());
     if catalogued {
-        sim
+        sim.with_known_lacking()
     } else {
         sim.learning()
     }

@@ -1061,7 +1061,7 @@ fn read_optional<T>(
         return Ok(placeholder);
     }
     match read() {
-        Err(e) if crate::error::is_not_supported(&e) => {
+        Err(e) if log.learns() && crate::error::is_not_supported(&e) => {
             note_unsupported(log, feature);
             Ok(placeholder)
         }

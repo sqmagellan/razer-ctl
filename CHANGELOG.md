@@ -1,12 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report
-  ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). Perf modes and CPU/GPU boost sets
-  verified by readback; manual fan RPM is not honored exactly (max actual seen 4300) and Max Fan
-  answers not supported (0x05). Not tested by the maintainer.
-
 Release history for this fork: the README has current behavior, this file how it got there.
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
@@ -14,6 +7,14 @@ unless a user report is cited.
 ## Unreleased
 
 **New**
+- **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report
+  and its reporter's pull request ([#10](https://github.com/sqmagellan/razer-ctl/issues/10),
+  [#11](https://github.com/sqmagellan/razer-ctl/pull/11)). Perf modes and CPU/GPU boost read back;
+  manual fan RPM is not followed exactly (the most seen was 4300). Max Fan answers "not
+  supported" (0x05), so the tray grays it out and never sends it. Not tested here.
+- **A laptop can lack Max Fan.** On a model not in the supported list, a "not supported" answer
+  to Max Fan is recorded like a missing logo: the item is grayed out and "(max)" leaves the
+  tooltip. It used to stay offered, and a Custom apply with it on failed every time.
 - **`razer-cli probe`** reads every setting on both fan zones and saves what the EC answered,
   including the raw status byte, retries and timing, as one JSON file to attach to a model report.
   It writes nothing. `probe --writes` (tray closed) also changes perf mode, boosts, Max Fan and the

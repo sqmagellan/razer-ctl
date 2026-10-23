@@ -94,6 +94,8 @@ impl Unsupported {
 pub const KNOWN_LACKING: &[(u16, &[Optional])] = &[
     // Blade 15 2018 Base, issue #2: the logo reads back but writes change nothing.
     (0x023b, &[Optional::Logo]),
+    // Blade 17 2022, issue #10 (catalogued, PR #11): Max Fan "on" in Custom answers 0x05.
+    (0x028b, &[Optional::MaxFan]),
     // Blade 15 Base 2020 (RZ09-0328): its EC echoes every class 0x07 read and write without
     // acting on it, so a charge limit only looks set. A user's report in
     // jdsgnrinfo/blade-control's model table (MIT), 2026-10; not seen here.
@@ -150,22 +152,49 @@ pub fn manual_fan_runs_at(pid: u16, perf: PerfMode, rpm: u16) -> Option<u16> {
 }
 
 /// The record a device keeps while it runs. Atomic so a `Device` stays `Sync`.
-#[derive(Debug, Default)]
-pub struct UnsupportedLog(AtomicU8);
+#[derive(Debug)]
+pub struct UnsupportedLog {
+    bits: AtomicU8,
+    learns: bool,
+}
+
+/// The generic profile's record: nothing known yet, learns from a 0x05.
+impl Default for UnsupportedLog {
+    fn default() -> Self {
+        Self::starting_with(Unsupported::default())
+    }
+}
 
 impl UnsupportedLog {
-    /// A record that starts with `known` already marked.
+    /// A record that starts with `known` already marked and learns from a 0x05.
     pub fn starting_with(known: Unsupported) -> Self {
-        Self(AtomicU8::new(known.0))
+        Self {
+            bits: AtomicU8::new(known.0),
+            learns: true,
+        }
+    }
+
+    /// A record of `known` that learns nothing more: a catalogued model's [`KNOWN_LACKING`]
+    /// entries are skipped from the start, and any other 0x05 stays an error.
+    pub fn fixed(known: Unsupported) -> Self {
+        Self {
+            bits: AtomicU8::new(known.0),
+            learns: false,
+        }
+    }
+
+    /// Whether a 0x05 is recorded (the generic profile) rather than returned.
+    pub fn learns(&self) -> bool {
+        self.learns
     }
 
     pub fn get(&self) -> Unsupported {
-        Unsupported(self.0.load(Ordering::Relaxed))
+        Unsupported(self.bits.load(Ordering::Relaxed))
     }
 
     /// Record `feature`; true the first time, so the caller logs it once.
     pub fn mark(&self, feature: Optional) -> bool {
-        self.0.fetch_or(feature.bit(), Ordering::Relaxed) & feature.bit() == 0
+        self.bits.fetch_or(feature.bit(), Ordering::Relaxed) & feature.bit() == 0
     }
 }
 
@@ -241,6 +270,17 @@ mod tests {
                 "{pid:#06x} {perf:?} listed twice"
             );
         }
+    }
+
+    #[test]
+    fn a_fixed_record_skips_what_it_knows_and_learns_nothing() {
+        let known = known_lacking(0x028b);
+        assert!(known.contains(Optional::MaxFan));
+        let fixed = UnsupportedLog::fixed(known);
+        assert!(!fixed.learns());
+        assert!(fixed.get().contains(Optional::MaxFan));
+        assert!(UnsupportedLog::default().learns());
+        assert!(UnsupportedLog::starting_with(known).learns());
     }
 
     #[test]

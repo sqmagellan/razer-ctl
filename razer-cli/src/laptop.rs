@@ -307,7 +307,7 @@ impl Simulation {
     pub fn detect(&self) -> Laptop {
         let ec = librazer::sim::SimTransport::new(self.model.clone());
         let ec = match self.catalogued {
-            Some(_) => ec,
+            Some(_) => ec.with_known_lacking(),
             None => ec.learning(),
         };
         Laptop::sim(self.descriptor(), ec)

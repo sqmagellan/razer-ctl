@@ -402,6 +402,16 @@ impl SimTransport {
         self
     }
 
+    /// A catalogued model's `KNOWN_LACKING` entries, learning nothing else
+    /// (`Device::with_known_lacking`).
+    pub fn with_known_lacking(mut self) -> SimTransport {
+        let known = crate::unsupported::known_lacking(self.lock().model.pid);
+        if !known.is_empty() {
+            self.unsupported = Some(UnsupportedLog::fixed(known));
+        }
+        self
+    }
+
     pub fn inject(&self, fault: Fault) {
         self.lock().faults.push(fault);
     }
