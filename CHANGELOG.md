@@ -45,7 +45,10 @@ unless a user report is cited.
   the figure Task Manager shows): 0.2 ms instead of 40–80 ms, and its raw reading matched
   `nvidia-smi` to 0.1 °C. `nvidia-smi` still gives the watts, every 30 s or when the temperature
   moves 3 °C, and the temperature too wherever Windows doesn't report it. Neither is asked while
-  the GPU sleeps (untested here: this Blade runs its GPU in dGPU-only mode).
+  the GPU sleeps. Measured on `0x029F` in Optimus mode (2026-10-23), 45 s windows three times
+  each: the GPU slept 55% of the time idle, 54% with EC temperature reads 4 times a second, 56%
+  with D3DKMT queries 4 times a second and 54% with the new tray running, against 48% with
+  `nvidia-smi` every 2 s. So the new reads don't keep it awake; `nvidia-smi` does.
 - **Perf modes other firmware reports read as ours.** 1 (the 2018–2020 Blades' Gaming) reads as
   Performance and 3 (the 2025 firmware's Battery Saver) as Battery. `0x029F` stores and reads back
   both, and a read of either used to fail. The tray never sends them.
