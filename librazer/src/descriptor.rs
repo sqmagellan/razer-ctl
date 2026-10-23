@@ -276,6 +276,7 @@ pub const FAN_RANGE_BY_PID: &[(u16, (u16, u16))] = &[
     (0x02b8, (2200, 5000)), // Blade 18 2024
     (0x02c5, (2200, 5600)), // Blade 14 2025 -- highest ceiling
     (0x02c7, (2200, 5000)), // Blade 18 2025
+    (0x02e0, (2200, 5000)), // Blade 16 2026 -- PID via jdsgnrinfo/blade-control; range is the 2023+ default, not transcribed
     (0x02e1, (2200, 5000)), // Blade 18 2026
 ];
 

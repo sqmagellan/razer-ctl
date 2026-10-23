@@ -42,6 +42,7 @@ pub const READS: &[Read] = &[
     read("keyboard brightness", 0x0383, &[1, 5, 0]),
     read("keyboard effect", 0x0f82, &[1, 5, 0]),
     read("lights always on", 0x0084, &[0, 0]),
+    read("EC temperatures", 0x0d85, &[0, 0, 0]),
 ];
 
 /// Actual fan speed is read in rounds: one round can't tell a lone-zone bogus read
@@ -690,6 +691,16 @@ mod tests {
             .rules
             .iter()
             .all(|r| r.support == crate::sim::Support::Works && r.args.is_some()));
+    }
+
+    #[test]
+    fn a_rebuilt_model_replays_the_captured_ec_temperatures() {
+        let m = blade16();
+        let sim = SimTransport::new(m.clone());
+        let cap = run(&sim, machine(&m), "test");
+        let rebuilt = Model::from_capture(&cap, "cap").unwrap();
+        let t = crate::command::get_ec_temperatures(&SimTransport::new(rebuilt)).unwrap();
+        assert_eq!((t.cpu_c, t.gpu_c), (Some(62), Some(48)));
     }
 
     #[test]

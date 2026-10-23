@@ -7,7 +7,7 @@ apply custom + max fan: ok
 apply manual 3000: ok
 enforce after drift: ok
 fan reads: ok
-probe: 19 of 19 reads answered
+probe: 20 of 20 reads answered
 
 ## 0x02a0-blade18-2023 (Razer Blade 18 (2023), catalogued)
 read: ok
@@ -18,13 +18,14 @@ apply custom + max fan: gap  [gaps: 0x0d07 [1, 1, 1]]
 apply manual 3000: gap  [gaps: 0x0d81 [0, 1, 0]]
 enforce after drift: ok
 fan reads: ok
-probe: 15 of 19 reads answered (no answer: fan set point, zone 1, fan set point, zone 2, CPU boost, GPU boost)
+probe: 15 of 20 reads answered (no answer: fan set point, zone 1, fan set point, zone 2, CPU boost, GPU boost, EC temperatures)
 open:
   0x0d07 [1, 1, 1]: not reported
   0x0d81 [0, 1, 0]: not reported
   0x0d81 [0, 2, 0]: not reported
   0x0d87 [0, 1, 0]: not reported
   0x0d87 [0, 2, 0]: not reported
+  0x0d85 [0, 0, 0]: no rule for this command
 
 ## 0x023b-blade15-2018-base (Razer Blade 15 (2018) Base, generic, learns)
 read: ok  [0x05: 0x0792 [0]]
@@ -35,13 +36,14 @@ apply custom + max fan: gap  [0x05: 0x0792 [0]]  [gaps: 0x0d02 [1, 1, 4, 0]]
 apply manual 3000: ok  [0x05: 0x0792 [0]]
 enforce after drift: gap  [0x05: 0x0792 [0]]  [gaps: 0x0d02 [1, 1, 5, 0]]
 fan reads: not supported (0x05)  [0x05: 0x0792 [0], 0x0d88 [0, 1, 0]]
-probe: 9 of 19 reads answered (no answer: CPU boost, GPU boost, Max Fan, charge limit, fan actual, zone 1, round 1, fan actual, zone 2, round 1, fan actual, zone 1, round 2, fan actual, zone 2, round 2, fan actual, zone 1, round 3, fan actual, zone 2, round 3)
+probe: 9 of 20 reads answered (no answer: CPU boost, GPU boost, Max Fan, charge limit, EC temperatures, fan actual, zone 1, round 1, fan actual, zone 2, round 1, fan actual, zone 1, round 2, fan actual, zone 2, round 2, fan actual, zone 1, round 3, fan actual, zone 2, round 3)
 open:
   0x0d02 [1, 1, 5, 0]: other perf modes: accepted, with no noticeable effect; read-back not reported
   0x0d02 [1, 1, 4, 0]: other perf modes: accepted, with no noticeable effect; read-back not reported
   0x0d87 [0, 1, 0]: not observed
   0x0d87 [0, 2, 0]: not observed
   0x078f [0]: not observed
+  0x0d85 [0, 0, 0]: no rule for this command
 
 ## 0x028b-blade17-2022 (Razer Blade 17 (2022), generic, learns)
 read: ok
@@ -52,7 +54,7 @@ apply custom + max fan: gap  [0x05: 0x070f [2]]  [gaps: 0x0d07 [1, 2, 2], 0x0300
 apply manual 3000: gap  [gaps: 0x0300 [1, 4, 0], 0x0303 [1, 5, 0], 0x0712 [208]]
 enforce after drift: gap  [gaps: 0x0300 [1, 4, 0], 0x0712 [208]]
 fan reads: ok
-probe: 17 of 19 reads answered (no answer: fan set point, zone 1, fan set point, zone 2)
+probe: 17 of 20 reads answered (no answer: fan set point, zone 1, fan set point, zone 2, EC temperatures)
 open:
   0x0300 [1, 4, 0]: read only; not write-tested
   0x0303 [1, 5, 0]: read only; not write-tested
@@ -61,4 +63,5 @@ open:
   0x070f [0]: Disable in Custom: asked on #10, not answered yet
   0x0d81 [0, 1, 0]: not reported
   0x0d81 [0, 2, 0]: not reported
+  0x0d85 [0, 0, 0]: no rule for this command
 

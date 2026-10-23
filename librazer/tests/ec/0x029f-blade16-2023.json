@@ -14,7 +14,8 @@
     "hw-1020w": "maintainer's Blade 16 (2023), hardware run 2026-10-20 probe --writes (model RZ09-0483U): every write read back; in Balanced/Manual the set points 5000, 3500 and 2000 each held, up at ~33 RPM/s and down at ~30; the restore verified",
     "hw-1020": "maintainer's Blade 16 (2023), hardware run 2026-10-20 hw-test: in Custom right after Max Fan on/off, a 3000 set point read back but the fans climbed past it to 3800 in 60 s",
     "hw-1020c": "maintainer's Blade 16 (2023), hardware run 2026-10-20 curve runs A-I: in Custom/Manual the fans run at max(set point, 3800): 4500 held, 3000 plateaued at 3800 with any boost pair, with or without a Max Fan toggle or a stale register; a 90 s CPU load raised neither Custom/Manual nor Balanced/Manual",
-    "hw-1019": "maintainer's Blade 16 (2023), hardware run 2026-10-19: perf transitions and Max Fan at four boost pairs. Once that day, writes from Balanced were acknowledged and ignored; not reproduced 2026-10-20 after 7.2 h of Modern Standby (9 of 9 writes read back)"
+    "hw-1019": "maintainer's Blade 16 (2023), hardware run 2026-10-19: perf transitions and Max Fan at four boost pairs. Once that day, writes from Balanced were acknowledged and ignored; not reproduced 2026-10-20 after 7.2 h of Modern Standby (9 of 9 writes read back)",
+    "hw-1022": "maintainer's Blade 16 (2023), hardware run 2026-10-22: EC temperatures 0x0d85 read with the tray running (reply [2, cpu, gpu]; GPU within 1-2 C of nvidia-smi; CPU side 60-67 at idle)"
   },
   "state": {
     "perf_mode": [
@@ -201,6 +202,16 @@
       "command": "0x078c",
       "support": "mismatch",
       "evidence": "measured hw-0923: USB-C adapter wattage, mismatch 5 of 5"
+    },
+    {
+      "command": "0x0d85",
+      "support": "works",
+      "evidence": "measured hw-1022: reply [2, 62, 48]; status 0x02 with remaining_packets wire [0x00, 0x03]",
+      "reply": [
+        2,
+        62,
+        48
+      ]
     }
   ]
 }

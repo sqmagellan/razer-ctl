@@ -240,10 +240,15 @@ impl TryFrom<u8> for PerfMode {
     fn try_from(perf_mode: u8) -> Result<Self, Self::Error> {
         match perf_mode {
             0 => Ok(Self::Balanced),
-            2 => Ok(Self::Performance),
+            // 1 is the 2018-2020 Blades' high-performance mode (Synapse's "Gaming"); a
+            // user's Blade 15 Base 2020 (`0x0255`) runs and reads it back, per
+            // jdsgnrinfo/blade-control's model table. Read only: we never send 1.
+            1 | 2 => Ok(Self::Performance),
+            // 3 is the 2025+ firmware's Battery Saver, per the same source (one report,
+            // Blade 14 2025). Read as our battery mode so the read doesn't fail; never sent.
+            3 | 6 => Ok(Self::Battery),
             4 => Ok(Self::Custom),
             5 => Ok(Self::Silent),
-            6 => Ok(Self::Battery),
             7 => Ok(Self::Hyperboost),
             _ => bail!("Failed to convert {} to PerformanceMode", perf_mode),
         }
@@ -319,6 +324,42 @@ impl TryFrom<u8> for MaxFanSpeedMode {
             0x02 => Ok(MaxFanSpeedMode::Enable),
             0x00 => Ok(MaxFanSpeedMode::Disable),
             _ => bail!("Failed to convert {} to MaxFanSpeedMode", value),
+        }
+    }
+}
+
+/// The two temperatures the EC reports through `0x0d85`, in whole degrees Celsius.
+///
+/// Found by a read-only scan of a Blade 16 (2023) in jdsgnrinfo/blade-control (MIT); in
+/// neither OpenRazer nor razer-laptop-control. The reply args are `[2, cpu, gpu]`. Checked
+/// here on `0x029F` (2026-10-22): `gpu` follows `nvidia-smi` within 1-2 °C, whole degrees,
+/// a little behind it. `cpu` is the EC's own CPU-side sensor, not the die: it read 60-67
+/// at idle, and nothing yet shows how far it lags or undershoots the die under load. A
+/// sensor byte that isn't believable (0 and 255 are what a missing sensor reads as) is
+/// `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcTemperatures {
+    pub cpu_c: Option<u8>,
+    pub gpu_c: Option<u8>,
+}
+
+impl EcTemperatures {
+    /// The count byte the only layout seen so far starts with.
+    const SENSORS: u8 = 2;
+
+    /// Decode the reply args. Any other leading count is a layout nobody has seen, so it
+    /// is an error rather than a guess at which byte is which.
+    pub fn from_args(args: &[u8]) -> Result<Self> {
+        let believable = |c: u8| (1..=125).contains(&c).then_some(c);
+        match args {
+            [Self::SENSORS, cpu, gpu, ..] => Ok(Self {
+                cpu_c: believable(*cpu),
+                gpu_c: believable(*gpu),
+            }),
+            _ => bail!(
+                "unexpected EC temperature reply {:?}; expected [2, cpu, gpu]",
+                &args[..args.len().min(3)]
+            ),
         }
     }
 }
@@ -466,7 +507,44 @@ mod tests {
     }
 
     #[test]
+    fn ec_temperatures_decode_the_seen_layout() {
+        // 0x029F, 2026-10-22: [2, cpu, gpu] with the rest zero.
+        assert_eq!(
+            EcTemperatures::from_args(&[2, 62, 48, 0, 0]).unwrap(),
+            EcTemperatures {
+                cpu_c: Some(62),
+                gpu_c: Some(48)
+            }
+        );
+    }
+
+    #[test]
+    fn ec_temperatures_drop_unbelievable_bytes() {
+        let t = EcTemperatures::from_args(&[2, 0, 255]).unwrap();
+        assert_eq!((t.cpu_c, t.gpu_c), (None, None));
+        let t = EcTemperatures::from_args(&[2, 126, 1]).unwrap();
+        assert_eq!((t.cpu_c, t.gpu_c), (None, Some(1)));
+    }
+
+    #[test]
+    fn ec_temperatures_refuse_an_unseen_layout() {
+        assert!(EcTemperatures::from_args(&[3, 50, 50, 50]).is_err());
+        assert!(EcTemperatures::from_args(&[0, 0, 0]).is_err());
+        assert!(EcTemperatures::from_args(&[2, 50]).is_err());
+    }
+
+    #[test]
+    fn other_firmwares_perf_modes_read_as_ours() {
+        assert_eq!(PerfMode::try_from(1).unwrap(), PerfMode::Performance);
+        assert_eq!(PerfMode::try_from(3).unwrap(), PerfMode::Battery);
+        // What we send is unchanged.
+        assert_eq!(PerfMode::Performance as u8, 2);
+        assert_eq!(PerfMode::Battery as u8, 6);
+    }
+
+    #[test]
     fn unknown_wire_values_are_rejected() {
+        assert!(PerfMode::try_from(8).is_err());
         assert!(PerfMode::try_from(99).is_err());
         assert!(CpuBoost::try_from(99).is_err());
         assert!(GpuBoost::try_from(99).is_err());

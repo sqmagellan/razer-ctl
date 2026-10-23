@@ -280,7 +280,12 @@ impl Model {
                         Some(check) => format!("measured {source}: {}; {check}", step.label),
                         None => format!("measured {source}: {}", step.label),
                     },
-                    reply: None,
+                    reply: match &step.result {
+                        StepResult::Ok { args } if READINGS.contains(&step.command) => {
+                            Some(args.clone())
+                        }
+                        _ => None,
+                    },
                 });
             }
         }
@@ -314,6 +319,10 @@ impl Model {
         })
     }
 }
+
+/// Getters whose reply is a sensor reading rather than state a write could change (EC
+/// temperatures, `0x0d85`). A model built from a capture replays the captured reply.
+const READINGS: &[u16] = &[0x0d85];
 
 /// Fold a getter's reply into the starting state.
 fn note_reading(state: &mut State, command: u16, req: &[u8], reply: &[u8]) {

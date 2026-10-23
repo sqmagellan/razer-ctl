@@ -236,11 +236,13 @@ impl Packet {
             return Err(ResponseError::Mismatch);
         }
 
-        // 0x0792 (battery health optimizer) and 0x078f (max fan speed mode) legitimately
-        // answer with a different remaining_packets than they were asked with.
+        // 0x0792 (battery health optimizer), 0x078f (max fan speed mode) and 0x0d85 (EC
+        // temperatures) legitimately answer with a different remaining_packets than they
+        // were asked with. 0x0d85 answers wire bytes [0x00, 0x03] there on `0x029F`.
         let remaining_ok = self.remaining_packets == report.remaining_packets
             || (self.command_class, self.command_id) == (0x07, 0x92)
-            || (self.command_class, self.command_id) == (0x07, 0x8f);
+            || (self.command_class, self.command_id) == (0x07, 0x8f)
+            || (self.command_class, self.command_id) == (0x0d, 0x85);
         if !remaining_ok {
             return Err(ResponseError::Mismatch);
         }
@@ -517,6 +519,21 @@ mod tests {
         let mut resp = Packet::new(req.command(), &req.get_args()[..req.data_len()]);
         resp.set_status_for_test(status);
         resp
+    }
+
+    #[test]
+    fn ec_temperature_reply_may_carry_its_own_remaining_packets() {
+        // 0x029F answers 0x0d85 with wire bytes [0x00, 0x03] in remaining_packets.
+        let req = Packet::new(0x0d85, &[0, 0, 0]);
+        let mut resp = response_to(&req, 0x02);
+        resp.remaining_packets = u16::from_le_bytes([0x00, 0x03]);
+        assert_eq!(resp.classify_response(&req), Ok(()));
+
+        // Other getters still have to match.
+        let req = Packet::new(0x0d82, &[0, 1, 0, 0]);
+        let mut resp = response_to(&req, 0x02);
+        resp.remaining_packets = u16::from_le_bytes([0x00, 0x03]);
+        assert_eq!(resp.classify_response(&req), Err(ResponseError::Mismatch));
     }
 
     #[test]

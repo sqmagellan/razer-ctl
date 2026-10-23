@@ -87,6 +87,10 @@ impl Unsupported {
 pub const KNOWN_LACKING: &[(u16, &[Optional])] = &[
     // Blade 15 2018 Base, issue #2: the logo reads back but writes change nothing.
     (0x023b, &[Optional::Logo]),
+    // Blade 15 Base 2020 (RZ09-0328): its EC echoes every class 0x07 read and write without
+    // acting on it, so a charge limit only looks set. A user's report in
+    // jdsgnrinfo/blade-control's model table (MIT), 2026-10; not seen here.
+    (0x0255, &[Optional::BatteryCare]),
 ];
 
 /// What [`KNOWN_LACKING`] says the model with `pid` lacks; empty for any other PID.

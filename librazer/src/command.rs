@@ -19,8 +19,8 @@
 use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
-    BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn,
-    LogoMode, MaxFanSpeedMode, PerfMode,
+    BatteryCare, Cluster, CpuBoost, EcTemperatures, FanMode, FanZone, GpuBoost, KeyboardEffect,
+    LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -218,6 +218,13 @@ pub fn get_fan_actual_rpm(device: &impl HidTransport, fan_zone: FanZone) -> Resu
     let response = device.send(Packet::new(0x0d88, &[0, fan_zone as u8, 0]))?;
     ensure!(response.get_args()[1] == fan_zone as u8);
     Ok(response.get_args()[2] as u16 * 100)
+}
+
+/// The CPU-side and GPU temperatures the EC reports (`0x0d85`); see [`EcTemperatures`].
+/// Read-only. A model without the command answers "not supported" (0x05).
+pub fn get_ec_temperatures(device: &impl HidTransport) -> Result<EcTemperatures> {
+    let response = device.send(Packet::new(0x0d85, &[0, 0, 0]))?;
+    EcTemperatures::from_args(response.get_args())
 }
 
 pub fn send_command(device: &impl HidTransport, command: u16, args: &[u8]) -> Result<Packet> {

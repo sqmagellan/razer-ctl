@@ -417,23 +417,44 @@ fn fan_handle(
             // Both zones, through the same trust rule the tray uses. Some ECs have
             // no speed read at all (issue #2): fan control still works there, so
             // only the actual-speed line says so.
-            let (fan, trusted) = match librazer::state::sample_fan_rpm(device, 3) {
+            match librazer::state::sample_fan_rpm(device, 3) {
                 Err(e) if librazer::error::is_not_supported(&e) => {
                     out("Fan actual: not supported".to_string());
-                    return Ok(());
                 }
-                r => r?,
-            };
-            out(format!(
-                "Fan actual: {}/{} RPM{}",
-                fan.fan1,
-                fan.fan2,
-                if trusted { "" } else { " (unconfirmed read)" }
-            ));
+                r => {
+                    let (fan, trusted) = r?;
+                    out(format!(
+                        "Fan actual: {}/{} RPM{}",
+                        fan.fan1,
+                        fan.fan2,
+                        if trusted { "" } else { " (unconfirmed read)" }
+                    ));
+                }
+            }
+            // What the EC reads, next to the fan it drives. Checked on one model only, so
+            // a failure here says so and leaves the command's result alone.
+            match command::get_ec_temperatures(device) {
+                Ok(t) => out(ec_temperatures_line(t)),
+                Err(e) if librazer::error::is_not_supported(&e) => {
+                    out("EC temperatures: not supported".to_string())
+                }
+                Err(e) => out(format!("EC temperatures: unreadable: {e}")),
+            }
             Ok(())
         }
         _ => Ok(()),
     }
+}
+
+/// `EC temperatures: CPU side 62°C, GPU 48°C`; a sensor that gave nothing believable is
+/// "none".
+fn ec_temperatures_line(t: librazer::types::EcTemperatures) -> String {
+    let show = |c: Option<u8>| c.map_or("none".to_string(), |c| format!("{c}°C"));
+    format!(
+        "EC temperatures: CPU side {}, GPU {}",
+        show(t.cpu_c),
+        show(t.gpu_c)
+    )
 }
 
 impl Cli for feature::Fan {
@@ -753,6 +774,11 @@ struct JsonStatus {
     keyboard_effect: Option<String>,
     battery_care_percent: Option<u8>,
     max_fan: Option<bool>,
+    /// The EC's CPU-side sensor (`0x0d85`), whole °C. Not the CPU die: it reads lower and
+    /// later than a die sensor would. `null` when the EC doesn't report it.
+    ec_cpu_temp_c: Option<u8>,
+    /// The dGPU temperature as the EC reads it (`0x0d85`), whole °C.
+    ec_gpu_temp_c: Option<u8>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unsupported: Vec<&'static str>,
 }
@@ -899,6 +925,18 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         None => None,
     };
 
+    // Checked on one model only: a reply layout this build doesn't know, or a bus error,
+    // is `null` rather than a failed command. A model without the command lists both.
+    let ec_temps = match command::get_ec_temperatures(device) {
+        Ok(t) => Some(t),
+        Err(e) if librazer::error::is_not_supported(&e) => {
+            unsupported.push("ec_cpu_temp_c");
+            unsupported.push("ec_gpu_temp_c");
+            None
+        }
+        Err(_) => None,
+    };
+
     Ok(JsonStatus {
         name: device.info.name,
         pid: format!("{:#06x}", device.info.pid),
@@ -915,6 +953,8 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         keyboard_effect: keyboard_effect.map(|e| format!("{e:?}")),
         battery_care_percent: battery_care.map(|care| care.to_percent()),
         max_fan,
+        ec_cpu_temp_c: ec_temps.and_then(|t| t.cpu_c),
+        ec_gpu_temp_c: ec_temps.and_then(|t| t.gpu_c),
         unsupported,
     })
 }
@@ -1422,6 +1462,7 @@ mod tests {
         ]
         .iter()
         .map(|c| json!({"command": format!("{c:#06x}"), "support": "works", "evidence": "inferred: CLI test model"}))
+        .chain([json!({"command": "0x0d85", "support": "works", "evidence": "inferred: CLI test model", "reply": [2, 55, 45]})])
         .collect();
         json!({
             "format": librazer::sim::FORMAT,
@@ -1493,9 +1534,30 @@ mod tests {
                 "keyboard_effect": "Spectrum",
                 "battery_care_percent": 80,
                 "max_fan": false,
+                "ec_cpu_temp_c": 55,
+                "ec_gpu_temp_c": 45,
             })
         );
         assert!(laptop.gaps().is_empty());
+    }
+
+    #[test]
+    fn json_lists_ec_temperatures_a_model_lacks() {
+        let lacking =
+            json!({"command": "0x0d85", "support": "not_supported", "evidence": "inferred: test"});
+        let laptop = Simulation::new(model(&with_rule(model_json(0x029f), lacking))).detect();
+        let status = json_status(&laptop).unwrap();
+        assert_eq!((status.ec_cpu_temp_c, status.ec_gpu_temp_c), (None, None));
+        assert_eq!(status.unsupported, vec!["ec_cpu_temp_c", "ec_gpu_temp_c"]);
+    }
+
+    #[test]
+    fn json_survives_an_unseen_ec_temperature_layout() {
+        let odd = json!({"command": "0x0d85", "support": "works", "evidence": "inferred: test", "reply": [3, 50, 50, 50]});
+        let laptop = Simulation::new(model(&with_rule(model_json(0x029f), odd))).detect();
+        let status = json_status(&laptop).unwrap();
+        assert_eq!((status.ec_cpu_temp_c, status.ec_gpu_temp_c), (None, None));
+        assert!(status.unsupported.is_empty());
     }
 
     #[test]
@@ -1577,6 +1639,7 @@ mod tests {
                 "Fan: Manual, set point 3000 RPM".to_string(),
                 NOTE.to_string(),
                 "Fan actual: 3800/3800 RPM".to_string(),
+                "EC temperatures: CPU side 62°C, GPU 48°C".to_string(),
             ]
         );
         let status = json_status(&laptop).unwrap();
@@ -1593,7 +1656,8 @@ mod tests {
             fan_lines(&laptop, &["info"]),
             vec![
                 "Fan: Manual, set point 4500 RPM",
-                "Fan actual: 4500/4500 RPM"
+                "Fan actual: 4500/4500 RPM",
+                "EC temperatures: CPU side 62°C, GPU 48°C",
             ]
         );
         let status = json_status(&laptop).unwrap();
