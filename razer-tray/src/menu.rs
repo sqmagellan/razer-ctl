@@ -181,7 +181,10 @@ pub fn build(
     // Max fan speed: Custom-only (the EC rejects the command in other modes), so it lives
     // in the Custom submenu as a checkbox. Toggling it from a non-Custom mode promotes to
     // Custom, seeding the documented boost defaults exactly like a CPU/GPU boost pick does.
-    let max_fan_now = matches!(dstate.perf_mode, PerfMode::Custom(..)) && dstate.max_fan;
+    // On a laptop without it the item is disabled and unchecked, whatever the profile holds.
+    let has_max_fan = !unsupported.contains(Optional::MaxFan);
+    let max_fan_now =
+        has_max_fan && matches!(dstate.perf_mode, PerfMode::Custom(..)) && dstate.max_fan;
     let max_fan_target = {
         let perf_mode = if matches!(dstate.perf_mode, PerfMode::Custom(..)) {
             dstate.perf_mode
@@ -195,7 +198,13 @@ pub fn build(
         }
     };
     event_handlers.insert("max_fan".to_string(), max_fan_target);
-    let max_fan_item = CheckMenuItem::with_id("max_fan", "Max fan speed", true, max_fan_now, None);
+    let max_fan_item = CheckMenuItem::with_id(
+        "max_fan",
+        label_for("Max fan speed", Optional::MaxFan),
+        has_max_fan,
+        max_fan_now,
+        None,
+    );
     let separator2 = PredefinedMenuItem::separator();
 
     let custom_items: Vec<&dyn IsMenuItem> = std::iter::once(&cpu_header as &dyn IsMenuItem)

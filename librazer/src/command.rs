@@ -238,6 +238,12 @@ pub fn set_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode)
         "Performance mode must be {:?}",
         PerfMode::Custom
     );
+    send_max_fan_speed_mode(device, mode)
+}
+
+/// The Max Fan write alone, for a caller that has read the perf mode itself: so a "not
+/// supported" answer here is about Max Fan, never about the perf read.
+pub fn send_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode) -> Result<()> {
     _send_command(device, 0x070f, &[mode as u8]).map(|_| ())
 }
 

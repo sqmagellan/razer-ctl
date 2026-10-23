@@ -743,7 +743,7 @@ impl ProgramState {
                 }
             }
         };
-        let fan = if s.max_fan {
+        let fan = if s.max_fan && !self.unsupported.contains(Optional::MaxFan) {
             format!("{fan} (max)")
         } else {
             fan
@@ -1141,7 +1141,11 @@ impl ProgramState {
                 }
             );
             if write {
-                match self.device_state.enforce_to(device) {
+                let reasserted = self.device_state.enforce_to(device);
+                // The write can be what finds a setting missing (Max Fan, whose getter may
+                // answer when the setter doesn't), and the read-back below goes by it.
+                self.track_unsupported(device, Some(tray_icon));
+                match reasserted {
                     Err(e) => log::warn!("{reason}: re-assert failed: {e:?}"),
                     Ok(()) => match DeviceState::read(device) {
                         Ok(real) => {
