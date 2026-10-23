@@ -387,7 +387,9 @@ fn nvidia_gpu() -> Option<NvidiaGpu> {
         CM_Locate_DevNodeW, CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_PRESENT,
         CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
     };
-    use windows::Win32::Devices::Properties::{DEVPKEY_Device_PowerData, DEVPROPKEY, DEVPROPTYPE};
+    use windows::Win32::Devices::Properties::{
+        DEVPKEY_Device_PowerData, DEVPROPKEY, DEVPROPTYPE, DEVPROP_TYPE_UINT64,
+    };
 
     /// DEVPKEY_Gpu_Luid (devpkey.h), DEVPROP_TYPE_UINT64.
     const DEVPKEY_GPU_LUID: DEVPROPKEY = DEVPROPKEY {
@@ -455,6 +457,7 @@ fn nvidia_gpu() -> Option<NvidiaGpu> {
                 &mut luid_size,
                 0,
             ) == CR_SUCCESS
+                && kind == DEVPROP_TYPE_UINT64
                 && luid_size == 8)
                 .then(|| u64::from_le_bytes(luid));
             return Some(NvidiaGpu {
@@ -476,7 +479,7 @@ fn kmt_celsius(tenths: u32) -> Option<u32> {
 /// The dGPU temperature from the graphics kernel's adapter performance data
 /// (`D3DKMTQueryAdapterInfo`, `KMTQAITYPE_ADAPTERPERFDATA`), the figure Task Manager shows.
 /// No process and no vendor tool: about 0.2 ms against 40-50 ms for an `nvidia-smi` sample,
-/// and it matched `nvidia-smi` to 0.1 °C (`0x029F`, 2026-10-22). This driver leaves the
+/// and its raw tenths matched `nvidia-smi` to 0.1 °C (`0x029F`, 2026-10-22). This driver leaves the
 /// structure's power and fan fields at 0, so the board power still comes from `nvidia-smi`.
 /// Asked only while the PnP manager says the GPU is awake, like `nvidia-smi`. None when a
 /// call fails or the field is empty.

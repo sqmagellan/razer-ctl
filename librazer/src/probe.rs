@@ -703,6 +703,27 @@ mod tests {
         assert_eq!((t.cpu_c, t.gpu_c), (Some(62), Some(48)));
     }
 
+    /// 0x029F stores and reads back perf modes 1 and 3 (hardware run 2026-10-22), which
+    /// another tool may leave behind. They read as ours, and a canonical write replaces them.
+    #[test]
+    fn a_perf_mode_another_tool_left_reads_and_is_replaced() {
+        use crate::types::PerfMode;
+        for (wire, reads_as) in [(1u8, PerfMode::Performance), (3, PerfMode::Battery)] {
+            let mut m = blade16();
+            m.state.perf_mode = [wire; 2];
+            let sim = SimTransport::new(m);
+            assert_eq!(crate::command::get_perf_mode(&sim).unwrap().0, reads_as);
+            assert!(crate::state::DeviceState::read(&sim).is_ok());
+            crate::command::set_perf_mode_confirmed(&sim, PerfMode::Balanced).unwrap();
+            assert_eq!(
+                crate::command::get_perf_mode(&sim).unwrap().0,
+                PerfMode::Balanced
+            );
+            // Writing the mode it reads as is accepted and confirmed too.
+            crate::command::set_perf_mode_confirmed(&sim, reads_as).unwrap();
+        }
+    }
+
     #[test]
     fn a_writes_capture_does_not_become_a_model() {
         let m = blade16();

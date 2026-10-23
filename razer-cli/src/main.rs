@@ -774,8 +774,8 @@ struct JsonStatus {
     keyboard_effect: Option<String>,
     battery_care_percent: Option<u8>,
     max_fan: Option<bool>,
-    /// The EC's CPU-side sensor (`0x0d85`), whole °C. Not the CPU die: it reads lower and
-    /// later than a die sensor would. `null` when the EC doesn't report it.
+    /// The EC's CPU-side sensor (`0x0d85`), whole °C. Not the CPU die temperature. `null`
+    /// when the EC doesn't report it.
     ec_cpu_temp_c: Option<u8>,
     /// The dGPU temperature as the EC reads it (`0x0d85`), whole °C.
     ec_gpu_temp_c: Option<u8>,

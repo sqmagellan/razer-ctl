@@ -48,7 +48,8 @@ history and the measurements behind it; `README.upstream.md` covers the project 
   the tray never stops it.
 - **Temperatures** in the tooltip: the EC's CPU-side sensor and the dGPU. The CPU figure is a sensor
   near the CPU, read from the EC (`0x0d85`), not the die temperature. The GPU figure comes from
-  Windows, the same reading Task Manager shows; `nvidia-smi` runs only for the GPU's watts.
+  Windows, the same reading Task Manager shows; `nvidia-smi` runs for the GPU's watts, and for
+  the temperature where Windows doesn't report it.
 - **Close apps using the GPU**: ends dGPU processes, skipping system ones.
 - **Start with Windows**: an `HKCU\…\Run` entry.
 - **Status for scripts**: `razer-cli auto json` prints the state, actual fan RPM included, as flat
