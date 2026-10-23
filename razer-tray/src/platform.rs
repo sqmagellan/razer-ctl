@@ -533,6 +533,18 @@ const WATTS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(any(target_os = "windows", test))]
 const WATTS_TEMP_STEP: u32 = 3;
 
+/// Polls in a row the dGPU must be seen awake before `nvidia-smi` may run. In Optimus mode
+/// other programs wake the GPU for a fraction of a second at a time; by the time a process
+/// started on such a wake gets going, the GPU is often back in D3, and it would wake again.
+#[cfg(any(target_os = "windows", test))]
+const SMI_AWAKE_POLLS: u32 = 2;
+
+/// Whether the dGPU has been awake long enough for `nvidia-smi`: see [`SMI_AWAKE_POLLS`].
+#[cfg(any(target_os = "windows", test))]
+fn smi_allowed(awake_polls: u32) -> bool {
+    awake_polls >= SMI_AWAKE_POLLS
+}
+
 /// Whether to run `nvidia-smi` this round. `kmt_temp` is this round's D3DKMT reading;
 /// `last` is the age of the last power sample and the temperature at the time. Without a
 /// D3DKMT reading, `nvidia-smi` is the temperature source too, so it runs every round.
@@ -611,7 +623,8 @@ fn nvidia_smi_sample() -> Result<(u32, Option<f32>), String> {
 /// A powered-down dGPU is left alone: neither source is asked while the PnP manager says
 /// the GPU is in D3, since `nvidia-smi` would wake it, which on battery would cost more
 /// than the reading is worth. The fields drop out of the tooltip until the GPU is awake for
-/// some other reason.
+/// some other reason. `nvidia-smi` also waits until the GPU has been awake for
+/// [`SMI_AWAKE_POLLS`] polls in a row and checks once more just before it starts.
 ///
 /// `nvidia-smi` is tolerated [`GPU_MAX_CONSECUTIVE_FAILURES`] failures in a row before it
 /// is dropped for the session, rather than quitting on the first. The tray starts at login,
@@ -630,11 +643,18 @@ pub fn spawn_gpu_telemetry_monitor() {
     // Age and temperature of the last power sample, for `watts_due`.
     let mut last_watts: Option<(std::time::Instant, u32)> = None;
     let mut was_asleep = false;
+    // Polls in a row with the GPU awake (or its state unreadable), for `smi_allowed`.
+    let mut awake_polls = 0u32;
     std::thread::spawn(move || loop {
         let gpu = nvidia_gpu();
         static FIRST_STATE: std::sync::Once = std::sync::Once::new();
         FIRST_STATE.call_once(|| log::info!("dGPU: {gpu:?}"));
         let asleep = gpu.is_some_and(|g| g.asleep);
+        awake_polls = if asleep {
+            0
+        } else {
+            awake_polls.saturating_add(1)
+        };
         if asleep != was_asleep {
             was_asleep = asleep;
             log::info!(
@@ -668,7 +688,12 @@ pub fn spawn_gpu_telemetry_monitor() {
         }
 
         let last = last_watts.map(|(at, temp)| (at.elapsed(), temp));
-        if !smi_dropped && watts_due(kmt_temp, last) {
+        // An unreadable power state allows the sample, as before; only a fresh D3 blocks it.
+        if !smi_dropped
+            && smi_allowed(awake_polls)
+            && watts_due(kmt_temp, last)
+            && !nvidia_gpu().is_some_and(|g| g.asleep)
+        {
             match nvidia_smi_sample() {
                 Ok((smi_temp, watts)) => {
                     smi_failures = 0;
@@ -1367,7 +1392,9 @@ pub fn set_hotkey_spec(spec: Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{kmt_celsius, parse_gpu_telemetry, parse_hotkey, watts_due, WATTS_EVERY};
+    use super::{
+        kmt_celsius, parse_gpu_telemetry, parse_hotkey, smi_allowed, watts_due, WATTS_EVERY,
+    };
 
     #[test]
     fn gpu_telemetry_parses_whole_and_decimal_temperatures() {
@@ -1400,6 +1427,15 @@ mod tests {
         assert!(!watts_due(Some(52), Some((Duration::from_secs(5), 50))));
         assert!(watts_due(Some(53), Some((Duration::from_secs(5), 50))));
         assert!(watts_due(Some(47), Some((Duration::from_secs(5), 50))));
+    }
+
+    #[test]
+    fn nvidia_smi_waits_for_a_gpu_that_stays_awake() {
+        // Asleep, or awake for one poll only: a brief wake doesn't start a process.
+        assert!(!smi_allowed(0));
+        assert!(!smi_allowed(1));
+        assert!(smi_allowed(2));
+        assert!(smi_allowed(u32::MAX));
     }
 
     #[test]
