@@ -366,18 +366,34 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
     None
 }
 
-/// Whether the NVIDIA dGPU is powered down (D3), from the power state Windows keeps for
-/// the device. Reading it asks the PnP manager, not the GPU, so it can't wake the GPU;
-/// `nvidia-smi` can. None if there is no NVIDIA display adapter or the state can't be read.
+/// The NVIDIA dGPU as the PnP manager sees it. Neither field is read from the GPU itself.
 #[cfg(target_os = "windows")]
-fn nvidia_gpu_asleep() -> Option<bool> {
-    use windows::core::{w, PCWSTR};
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NvidiaGpu {
+    /// Powered down (D3), from the power state Windows keeps for the device.
+    asleep: bool,
+    /// The adapter LUID (`DEVPKEY_Gpu_Luid`), which opens it for [`d3dkmt_temperature`].
+    luid: Option<u64>,
+}
+
+/// The NVIDIA dGPU's power state and adapter LUID, from its device node. Reading them asks
+/// the PnP manager, not the GPU, so it can't wake the GPU; `nvidia-smi` can. None if there
+/// is no NVIDIA display adapter or its power state can't be read.
+#[cfg(target_os = "windows")]
+fn nvidia_gpu() -> Option<NvidiaGpu> {
+    use windows::core::{w, GUID, PCWSTR};
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         CM_Get_DevNode_PropertyW, CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW,
         CM_Locate_DevNodeW, CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_PRESENT,
         CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
     };
-    use windows::Win32::Devices::Properties::{DEVPKEY_Device_PowerData, DEVPROPTYPE};
+    use windows::Win32::Devices::Properties::{DEVPKEY_Device_PowerData, DEVPROPKEY, DEVPROPTYPE};
+
+    /// DEVPKEY_Gpu_Luid (devpkey.h), DEVPROP_TYPE_UINT64.
+    const DEVPKEY_GPU_LUID: DEVPROPKEY = DEVPROPKEY {
+        fmtid: GUID::from_u128(0x60b193cb_5276_4d0f_96fc_f173abad3ec6),
+        pid: 2,
+    };
 
     // The Display adapter setup class.
     let class = w!("{4d36e968-e325-11ce-bfc1-08002be10318}");
@@ -429,34 +445,104 @@ fn nvidia_gpu_asleep() -> Option<bool> {
                 continue;
             }
             let state = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            return Some(state >= 4);
+            let mut luid = [0u8; 8];
+            let mut luid_size = luid.len() as u32;
+            let luid = (CM_Get_DevNode_PropertyW(
+                devinst,
+                &DEVPKEY_GPU_LUID,
+                &mut kind,
+                Some(luid.as_mut_ptr()),
+                &mut luid_size,
+                0,
+            ) == CR_SUCCESS
+                && luid_size == 8)
+                .then(|| u64::from_le_bytes(luid));
+            return Some(NvidiaGpu {
+                asleep: state >= 4,
+                luid,
+            });
         }
         None
     }
 }
 
-/// Poll dGPU temperature and power on a background thread.
-///
-/// Deliberately a *subprocess* (`nvidia-smi`) rather than FFI into `nvml.dll`, even though
-/// the DLL is present in System32 on this machine. Getting an NVML signature subtly wrong
-/// is a crash in the user's tray, and this is decoration -- a slow, safe, obviously-correct
-/// query on its own thread costs nothing on the UI path. FFI is the natural optimization if
-/// the sample rate ever needs to be high.
-///
-/// Fails open and silent: a machine with no NVIDIA tools, or no dGPU, simply never gets a
-/// reading and the tooltip omits those fields.
-///
-/// A powered-down dGPU is left alone: `nvidia-smi` would wake it, which on battery would
-/// cost more than the reading is worth. The fields drop out of the tooltip until the GPU
-/// is awake for some other reason. (Untested on a sleeping GPU: the Blade here runs in
-/// dGPU-only mode, where the GPU never sleeps.)
-///
-/// It tolerates [`GPU_MAX_CONSECUTIVE_FAILURES`] failures before giving up, rather than
-/// quitting on the first. The tray starts at login, and that is exactly when the NVIDIA
-/// driver is least likely to be ready -- a cold-booted or resumed machine can answer
-/// "couldn't communicate with the NVIDIA driver" for several seconds. Quitting on the
-/// first sample turned a transient startup condition into a permanently empty tooltip
-/// for the whole session.
+/// Whole degrees from the tenths D3DKMT reports. 0 is what a driver that doesn't fill the
+/// field leaves there, and anything at or above 150 °C isn't a reading.
+#[cfg(any(target_os = "windows", test))]
+fn kmt_celsius(tenths: u32) -> Option<u32> {
+    (1..1500).contains(&tenths).then(|| (tenths + 5) / 10)
+}
+
+/// The dGPU temperature from the graphics kernel's adapter performance data
+/// (`D3DKMTQueryAdapterInfo`, `KMTQAITYPE_ADAPTERPERFDATA`), the figure Task Manager shows.
+/// No process and no vendor tool: about 0.2 ms against 40-50 ms for an `nvidia-smi` sample,
+/// and it matched `nvidia-smi` to 0.1 °C (`0x029F`, 2026-10-22). This driver leaves the
+/// structure's power and fan fields at 0, so the board power still comes from `nvidia-smi`.
+/// Asked only while the PnP manager says the GPU is awake, like `nvidia-smi`. None when a
+/// call fails or the field is empty.
+#[cfg(target_os = "windows")]
+fn d3dkmt_temperature(luid: u64) -> Option<u32> {
+    use windows::Wdk::Graphics::Direct3D::{
+        D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo,
+        D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID,
+        D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
+    };
+    use windows::Win32::Foundation::LUID;
+
+    let mut open = D3DKMT_OPENADAPTERFROMLUID {
+        AdapterLuid: LUID {
+            LowPart: luid as u32,
+            HighPart: (luid >> 32) as i32,
+        },
+        hAdapter: 0,
+    };
+    let mut perf = D3DKMT_ADAPTER_PERFDATA::default();
+    // SAFETY: the windows crate's own bindings and structures; the query buffer is the
+    // structure the query type names, with its exact size, and outlives the call. The
+    // adapter handle is closed on every path once it was opened.
+    unsafe {
+        // NTSTATUS: negative is an error.
+        if D3DKMTOpenAdapterFromLuid(&mut open).0 < 0 {
+            return None;
+        }
+        let mut query = D3DKMT_QUERYADAPTERINFO {
+            hAdapter: open.hAdapter,
+            Type: KMTQAITYPE_ADAPTERPERFDATA,
+            pPrivateDriverData: &mut perf as *mut D3DKMT_ADAPTER_PERFDATA as *mut core::ffi::c_void,
+            PrivateDriverDataSize: std::mem::size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
+        };
+        let status = D3DKMTQueryAdapterInfo(&mut query);
+        let _ = D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER {
+            hAdapter: open.hAdapter,
+        });
+        if status.0 < 0 {
+            return None;
+        }
+    }
+    kmt_celsius(perf.Temperature)
+}
+
+/// How often the board power is sampled while the temperature comes from D3DKMT: each
+/// sample is an `nvidia-smi` process. Sooner when the temperature moves by
+/// [`WATTS_TEMP_STEP`], because a load change moves both.
+#[cfg(any(target_os = "windows", test))]
+const WATTS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(any(target_os = "windows", test))]
+const WATTS_TEMP_STEP: u32 = 3;
+
+/// Whether to run `nvidia-smi` this round. `kmt_temp` is this round's D3DKMT reading;
+/// `last` is the age of the last power sample and the temperature at the time. Without a
+/// D3DKMT reading, `nvidia-smi` is the temperature source too, so it runs every round.
+#[cfg(any(target_os = "windows", test))]
+fn watts_due(kmt_temp: Option<u32>, last: Option<(std::time::Duration, u32)>) -> bool {
+    match (kmt_temp, last) {
+        (None, _) | (_, None) => true,
+        (Some(now), Some((age, then))) => {
+            age >= WATTS_EVERY || now.abs_diff(then) >= WATTS_TEMP_STEP
+        }
+    }
+}
+
 /// The first line of `nvidia-smi --query-gpu=temperature.gpu,power.draw
 /// --format=csv,noheader,nounits`: "54, 28.33" is 54 C and 28.33 W. Drivers that print the
 /// temperature with decimals ("57.54, 36.76") failed a whole-number parse on every poll, so
@@ -474,20 +560,79 @@ fn parse_gpu_telemetry(stdout: &str) -> Option<(u32, Option<f32>)> {
     Some((temp.round() as u32, watts))
 }
 
+/// One `nvidia-smi` sample: temperature and board power, or why it failed.
+#[cfg(target_os = "windows")]
+fn nvidia_smi_sample() -> Result<(u32, Option<f32>), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = procCommand::new("nvidia-smi")
+        .args([
+            "--query-gpu=temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match &output {
+        Ok(o) if o.status.success() => {
+            if let Some(sample) = parse_gpu_telemetry(&String::from_utf8_lossy(&o.stdout)) {
+                return Ok(sample);
+            }
+        }
+        _ => {}
+    }
+    // The tool's own words -- "no dGPU" and "driver not ready yet" are very different for
+    // someone filing a bug.
+    Err(match &output {
+        Ok(o) => format!(
+            "exit {:?}, stdout {:?}, stderr {:?}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).trim(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => format!("could not run nvidia-smi: {e}"),
+    })
+}
+
+/// Poll dGPU temperature and power on a background thread.
+///
+/// The temperature comes from D3DKMT ([`d3dkmt_temperature`]), a typed call through the
+/// `windows` crate's own bindings, every [`GPU_POLL_INTERVAL`]. The board power comes from
+/// an `nvidia-smi` process, deliberately a subprocess rather than FFI into `nvml.dll`:
+/// getting an NVML signature subtly wrong is a crash in the user's tray, and this is
+/// decoration. Each sample costs 40-80 ms, so it runs only when [`watts_due`] says so. If
+/// D3DKMT gives no temperature, `nvidia-smi` supplies both every round, as before.
+///
+/// Fails open and silent: a machine with no NVIDIA tools, or no dGPU, simply never gets a
+/// reading and the tooltip omits those fields.
+///
+/// A powered-down dGPU is left alone: neither source is asked while the PnP manager says
+/// the GPU is in D3, since `nvidia-smi` would wake it, which on battery would cost more
+/// than the reading is worth. The fields drop out of the tooltip until the GPU is awake for
+/// some other reason. (Untested on a sleeping GPU: the Blade here runs in dGPU-only mode,
+/// where the GPU never sleeps.)
+///
+/// `nvidia-smi` is tolerated [`GPU_MAX_CONSECUTIVE_FAILURES`] failures in a row before it
+/// is dropped for the session, rather than quitting on the first. The tray starts at login,
+/// and that is exactly when the NVIDIA driver is least likely to be ready -- a cold-booted
+/// or resumed machine can answer "couldn't communicate with the NVIDIA driver" for several
+/// seconds. Quitting on the first sample turned a transient startup condition into a
+/// permanently empty tooltip for the whole session. Once it is dropped the monitor keeps
+/// going on D3DKMT alone, and stops only when that fails as many rounds in a row too.
 #[cfg(target_os = "windows")]
 pub fn spawn_gpu_telemetry_monitor() {
-    use std::os::windows::process::CommandExt;
     use std::sync::atomic::Ordering;
 
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let mut failures = 0u32;
+    let mut smi_failures = 0u32;
+    let mut smi_dropped = false;
+    let mut kmt_failures = 0u32;
+    // Age and temperature of the last power sample, for `watts_due`.
+    let mut last_watts: Option<(std::time::Instant, u32)> = None;
     let mut was_asleep = false;
     std::thread::spawn(move || loop {
-        let state = nvidia_gpu_asleep();
+        let gpu = nvidia_gpu();
         static FIRST_STATE: std::sync::Once = std::sync::Once::new();
-        FIRST_STATE.call_once(|| log::info!("dGPU power state: asleep = {state:?}"));
-        let asleep = state == Some(true);
+        FIRST_STATE.call_once(|| log::info!("dGPU: {gpu:?}"));
+        let asleep = gpu.is_some_and(|g| g.asleep);
         if asleep != was_asleep {
             was_asleep = asleep;
             log::info!(
@@ -502,69 +647,75 @@ pub fn spawn_gpu_telemetry_monitor() {
         if asleep {
             GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
             GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            last_watts = None;
             std::thread::sleep(GPU_POLL_INTERVAL);
             continue;
         }
-        let output = procCommand::new("nvidia-smi")
-            .args([
-                "--query-gpu=temperature.gpu,power.draw",
-                "--format=csv,noheader,nounits",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
 
-        let parsed = match &output {
-            Ok(o) if o.status.success() => parse_gpu_telemetry(&String::from_utf8_lossy(&o.stdout)),
-            _ => None,
+        let kmt_temp = gpu.and_then(|g| g.luid).and_then(d3dkmt_temperature);
+        kmt_failures = if kmt_temp.is_some() {
+            0
+        } else {
+            kmt_failures + 1
         };
+        if let Some(temp) = kmt_temp {
+            static FIRST_KMT: std::sync::Once = std::sync::Once::new();
+            FIRST_KMT
+                .call_once(|| log::info!("dGPU temperature from D3DKMT: first sample {temp} C"));
+            GPU_TEMP_C.store(temp, Ordering::Relaxed);
+        }
 
-        match parsed {
-            Some((temp, watts)) => {
-                failures = 0;
-                // Log the first good sample. Without this, "the tooltip shows no GPU
-                // fields" is undiagnosable from a log: success was previously silent, so
-                // an absent reading and a working one looked identical.
-                static FIRST_SAMPLE: std::sync::Once = std::sync::Once::new();
-                FIRST_SAMPLE.call_once(|| {
-                    log::info!("dGPU telemetry: first sample {temp} C, {watts:?} W");
-                });
-                GPU_TEMP_C.store(temp, Ordering::Relaxed);
-                GPU_POWER_CW.store(
-                    watts
-                        .map(|w| (w * 100.0).round() as u32)
-                        .unwrap_or(GPU_UNAVAILABLE),
-                    Ordering::Relaxed,
-                );
-            }
-            None => {
-                failures += 1;
-                // Report why, once, with the tool's own words -- "no dGPU" and "driver
-                // not ready yet" are very different for someone filing a bug.
-                if failures == 1 {
-                    let detail = match &output {
-                        Ok(o) => format!(
-                            "exit {:?}, stdout {:?}, stderr {:?}",
-                            o.status.code(),
-                            String::from_utf8_lossy(&o.stdout).trim(),
-                            String::from_utf8_lossy(&o.stderr).trim()
-                        ),
-                        Err(e) => format!("could not run nvidia-smi: {e}"),
-                    };
-                    log::info!("dGPU telemetry attempt failed ({detail}); will retry");
-                }
-                if failures >= GPU_MAX_CONSECUTIVE_FAILURES {
-                    // Give up rather than respawning a doomed process forever. Values go
-                    // to the unavailable sentinel, so the tooltip just omits the fields.
-                    log::info!(
-                        "dGPU telemetry unavailable after {failures} attempts; not polling further"
+        let last = last_watts.map(|(at, temp)| (at.elapsed(), temp));
+        if !smi_dropped && watts_due(kmt_temp, last) {
+            match nvidia_smi_sample() {
+                Ok((smi_temp, watts)) => {
+                    smi_failures = 0;
+                    // Log the first good sample. Without this, "the tooltip shows no GPU
+                    // fields" is undiagnosable from a log: success was previously silent,
+                    // so an absent reading and a working one looked identical.
+                    static FIRST_SAMPLE: std::sync::Once = std::sync::Once::new();
+                    FIRST_SAMPLE.call_once(|| {
+                        log::info!(
+                            "dGPU telemetry: first nvidia-smi sample {smi_temp} C, {watts:?} W"
+                        );
+                    });
+                    let temp = kmt_temp.unwrap_or(smi_temp);
+                    GPU_TEMP_C.store(temp, Ordering::Relaxed);
+                    GPU_POWER_CW.store(
+                        watts
+                            .map(|w| (w * 100.0).round() as u32)
+                            .unwrap_or(GPU_UNAVAILABLE),
+                        Ordering::Relaxed,
                     );
-                    GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
-                    GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
-                    return;
+                    last_watts = Some((std::time::Instant::now(), temp));
                 }
-                // Leave any previous reading in place: a transient failure shouldn't blank
-                // a field that was working a few seconds ago.
+                Err(detail) => {
+                    smi_failures += 1;
+                    if smi_failures == 1 {
+                        log::info!("dGPU nvidia-smi sample failed ({detail}); will retry");
+                    }
+                    if smi_failures >= GPU_MAX_CONSECUTIVE_FAILURES {
+                        // Stop respawning a doomed process. The power drops out of the
+                        // tooltip; the temperature stays if D3DKMT has it.
+                        log::info!(
+                            "dGPU nvidia-smi unavailable after {smi_failures} attempts; not running it again"
+                        );
+                        smi_dropped = true;
+                        GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+                    }
+                    // Leave any previous reading in place: a transient failure shouldn't
+                    // blank a field that was working a few seconds ago.
+                }
             }
+        }
+
+        // Both sources out for as long as `nvidia-smi` was given: one failed D3DKMT round
+        // (a driver reset) doesn't end the session's telemetry.
+        if smi_dropped && kmt_failures >= GPU_MAX_CONSECUTIVE_FAILURES {
+            log::info!("dGPU telemetry unavailable (no D3DKMT reading, nvidia-smi dropped); not polling further");
+            GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            return;
         }
 
         std::thread::sleep(GPU_POLL_INTERVAL);
@@ -1214,7 +1365,7 @@ pub fn set_hotkey_spec(spec: Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_gpu_telemetry, parse_hotkey};
+    use super::{kmt_celsius, parse_gpu_telemetry, parse_hotkey, watts_due, WATTS_EVERY};
 
     #[test]
     fn gpu_telemetry_parses_whole_and_decimal_temperatures() {
@@ -1225,6 +1376,28 @@ mod tests {
         assert_eq!(parse_gpu_telemetry("[N/A], 12.5"), None);
         assert_eq!(parse_gpu_telemetry(""), None);
         assert_eq!(parse_gpu_telemetry("-1, 3"), None);
+    }
+
+    #[test]
+    fn d3dkmt_tenths_round_to_whole_degrees() {
+        assert_eq!(kmt_celsius(473), Some(47));
+        assert_eq!(kmt_celsius(475), Some(48));
+        assert_eq!(kmt_celsius(0), None, "a driver that doesn't fill the field");
+        assert_eq!(kmt_celsius(1500), None);
+    }
+
+    #[test]
+    fn nvidia_smi_runs_for_power_only_when_due() {
+        use std::time::Duration;
+        // No D3DKMT reading: nvidia-smi is the temperature source, every round.
+        assert!(watts_due(None, Some((Duration::from_secs(1), 50))));
+        // First round, and after WATTS_EVERY.
+        assert!(watts_due(Some(50), None));
+        assert!(watts_due(Some(50), Some((WATTS_EVERY, 50))));
+        // In between, only when the temperature moved by WATTS_TEMP_STEP.
+        assert!(!watts_due(Some(52), Some((Duration::from_secs(5), 50))));
+        assert!(watts_due(Some(53), Some((Duration::from_secs(5), 50))));
+        assert!(watts_due(Some(47), Some((Duration::from_secs(5), 50))));
     }
 
     #[test]

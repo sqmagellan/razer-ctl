@@ -79,7 +79,12 @@ fn log_tooltip_transition(tooltip: &str) {
     const UNKNOWN: u8 = 2;
     static LAST_HAD_GPU: AtomicU8 = AtomicU8::new(UNKNOWN);
 
-    let has_gpu = u8::from(tooltip.contains("\nGPU "));
+    // "GPU 47°C", which may follow "CPU 62°C" on its line; not the Custom mode's "GPU High".
+    let has_gpu = u8::from(
+        tooltip
+            .match_indices("GPU ")
+            .any(|(i, _)| tooltip[i + 4..].starts_with(|c: char| c.is_ascii_digit())),
+    );
     if LAST_HAD_GPU.swap(has_gpu, Ordering::Relaxed) != has_gpu {
         log::info!(
             "tooltip ({} UTF-16 units, dGPU fields {}): {:?}",
@@ -92,6 +97,10 @@ fn log_tooltip_transition(tooltip: &str) {
 
 /// How long a failed fan RPM read pauses the next ones (see `refresh_fan`).
 const FAN_READ_PAUSE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Shortest gap between EC temperature reads. The sensors move slowly; the reads ride on
+/// the fan reads, which come every 500 ms while the icon is hovered.
+const EC_TEMP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Resyncs for a perf/fan mode the EC acknowledged and didn't take, before the tray gives
 /// up until the next change. On the resync backoff they come about 2, 4 and 8 s apart:
@@ -133,6 +142,13 @@ pub struct ProgramState {
     /// thread (about 4 s); issue #2's Blade 15 2018 fails every one, so hovering froze the
     /// tray. A failure pauses the reads for [`FAN_READ_PAUSE`].
     fan_reads_paused_until: Option<std::time::Instant>,
+    /// The EC's temperatures (`0x0d85`) as last read, for the tooltip. `None` before the
+    /// first read, and for good once the EC answers "not supported".
+    pub ec_temps: Option<librazer::types::EcTemperatures>,
+    /// No EC temperature read before this.
+    ec_temps_next: Option<std::time::Instant>,
+    /// The EC answered "not supported": never ask again.
+    ec_temps_unsupported: bool,
     pub ac_power: bool,
     /// Windows has said which power source this is at least once. Until then `ac_power` is
     /// a guess (AC), which a config with every profile set acts on as it always has, and a
@@ -239,6 +255,9 @@ impl ProgramState {
             fan_actual: None,
             fan_filter: FanRpmFilter::default(),
             fan_reads_paused_until: None,
+            ec_temps: None,
+            ec_temps_next: None,
+            ec_temps_unsupported: false,
             ac_power,
             power_known: power.is_some(),
             adopt_not_before: None,
@@ -510,6 +529,7 @@ impl ProgramState {
         if self.fan_reads_paused_until.is_some_and(|until| now < until) {
             return;
         }
+        self.refresh_ec_temps(device, now);
         match get_fan_rpm(device) {
             Ok(sample) => {
                 self.fan_reads_paused_until = None;
@@ -521,6 +541,30 @@ impl ProgramState {
                 log::warn!("fan RPM read failed, pausing fan reads for {FAN_READ_PAUSE:?}: {e:#}");
                 self.fan_reads_paused_until = Some(now + FAN_READ_PAUSE);
             }
+        }
+    }
+
+    /// Read the EC's temperatures for the tooltip, at most every [`EC_TEMP_EVERY`]. One
+    /// HID round trip (about 4 ms on `0x029F`). A model without the command answers 0x05
+    /// once and is not asked again; any other failure keeps the last reading.
+    fn refresh_ec_temps(&mut self, device: &device::Device, now: std::time::Instant) {
+        if self.ec_temps_unsupported || self.ec_temps_next.is_some_and(|next| now < next) {
+            return;
+        }
+        self.ec_temps_next = Some(now + EC_TEMP_EVERY);
+        match librazer::command::get_ec_temperatures(device) {
+            Ok(t) => {
+                if self.ec_temps.is_none() {
+                    log::info!("EC temperatures: first read {t:?}");
+                }
+                self.ec_temps = Some(t);
+            }
+            Err(e) if librazer::error::is_not_supported(&e) => {
+                log::info!("EC temperatures: not supported on this model; not asking again");
+                self.ec_temps = None;
+                self.ec_temps_unsupported = true;
+            }
+            Err(e) => log::debug!("EC temperature read failed: {e:#}"),
         }
     }
 
@@ -644,10 +688,11 @@ impl ProgramState {
         const P_FAN: u8 = 1;
         const P_GPU_TEMP: u8 = 2;
         const P_FAN_RPM: u8 = 3;
-        const P_CHARGE: u8 = 4;
-        const P_BRIGHTNESS: u8 = 5;
-        const P_GPU_WATTS: u8 = 6;
-        const P_LOGO: u8 = 7;
+        const P_CPU_TEMP: u8 = 4;
+        const P_CHARGE: u8 = 5;
+        const P_BRIGHTNESS: u8 = 6;
+        const P_GPU_WATTS: u8 = 7;
+        const P_LOGO: u8 = 8;
 
         let mode = match s.perf_mode {
             PerfMode::Battery => "Battery".to_string(),
@@ -698,9 +743,13 @@ impl ProgramState {
             },
         ));
 
-        // dGPU telemetry, when a reading is available. Omitted entirely otherwise -- a
-        // machine with no dGPU must not see "0°C", which reads as a measurement.
+        // Temperatures, when a reading is available. Omitted entirely otherwise -- a
+        // machine with no dGPU must not see "0°C", which reads as a measurement. The CPU
+        // figure is the EC's CPU-side sensor (`0x0d85`), not the die.
         let mut gpu_line = Vec::new();
+        if let Some(cpu_c) = self.ec_temps.and_then(|t| t.cpu_c) {
+            gpu_line.push((P_CPU_TEMP, format!("CPU {cpu_c}°C")));
+        }
         if let Some((temp_c, watts)) = crate::platform::gpu_telemetry() {
             gpu_line.push((P_GPU_TEMP, format!("GPU {temp_c}°C")));
             if watts > 0.0 {
@@ -1115,7 +1164,26 @@ mod tests {
             fan1: 2600,
             fan2: 2500,
         });
+        // Widest two-digit reading, so the budget test covers it.
+        state.ec_temps = Some(librazer::types::EcTemperatures {
+            cpu_c: Some(99),
+            gpu_c: Some(99),
+        });
         state
+    }
+
+    /// The EC's CPU-side temperature shows when it was read and the byte was believable.
+    #[test]
+    fn the_tooltip_shows_the_ec_cpu_temperature_only_when_read() {
+        let mut state = test_state(DeviceState::default());
+        assert!(state.tooltip().unwrap().contains("CPU 99°C"));
+        state.ec_temps = Some(librazer::types::EcTemperatures {
+            cpu_c: None,
+            gpu_c: Some(48),
+        });
+        assert!(!state.tooltip().unwrap().contains("°C"));
+        state.ec_temps = None;
+        assert!(!state.tooltip().unwrap().contains("°C"));
     }
 
     /// A Manual set point the fan cannot run at is never displayed as the speed.
