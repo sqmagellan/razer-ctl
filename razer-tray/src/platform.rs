@@ -611,8 +611,7 @@ fn nvidia_smi_sample() -> Result<(u32, Option<f32>), String> {
 /// A powered-down dGPU is left alone: neither source is asked while the PnP manager says
 /// the GPU is in D3, since `nvidia-smi` would wake it, which on battery would cost more
 /// than the reading is worth. The fields drop out of the tooltip until the GPU is awake for
-/// some other reason. (Untested on a sleeping GPU: the Blade here runs in dGPU-only mode,
-/// where the GPU never sleeps.)
+/// some other reason.
 ///
 /// `nvidia-smi` is tolerated [`GPU_MAX_CONSECUTIVE_FAILURES`] failures in a row before it
 /// is dropped for the session, rather than quitting on the first. The tray starts at login,
