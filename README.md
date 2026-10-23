@@ -84,6 +84,7 @@ Config: `%APPDATA%\razer-tray\config\default-config.toml`. Log:
 |---|---|---|---|
 | Razer Blade 18 (2023), `RZ09-0484U` ([#1](../../issues/1)) | `0x02A0` | Perf modes, Auto fan, Max Fan, keyboard brightness and effects, logo, charge limit, Fn keys | Manual fan RPM: the fans hold near 3200/3300 |
 | Razer Blade 15 (2018) Base, `RZ09-0270` ([#2](../../issues/2)) | `0x023B` | Fan modes and RPM (3500–5700), keyboard brightness and effects | Perf modes change nothing noticeable. No charge limit, logo control or fan speed read. |
+| Razer Blade 17 (2022), `RZ09-0423` ([#10](../../issues/10)) | `0x028B` | Perf modes, CPU/GPU boost, Auto fan, keyboard brightness and effects, logo, charge limit read | Manual fan RPM not honored exactly (max actual seen 4300). Max Fan answers not supported (0x05) |
 
 **Catalogued:** a specific profile from the upstream project's tables. Not tested here.
 

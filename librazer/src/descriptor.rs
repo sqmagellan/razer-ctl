@@ -178,6 +178,29 @@ pub const SUPPORTED: &[Descriptor] = &[
         init_cmds: &[],
         fan_rpm_range: (3500, 5000),
     },
+    // Reported on hardware by a user (issue #10, 2026-10-19; enumerate RZ09-0423P, Windows 11):
+    // perf modes and CPU/GPU boost sets verified by readback (GPU High -> Low), Auto/Manual fan
+    // mode sets accepted, keyboard brightness/effects, logo and charge limit read back. Manual
+    // RPM is NOT honored exactly: set points 3500/4000/4500/5000 read back 4000/3900/4300/4300
+    // actual (max observed 4300), so the range below is still the transcribed one, not a
+    // measurement. `fan max enable` answers NotSupported (0x05) on this EC. Stem prefix:
+    // the reported SKU is RZ09-0423P and other trailing variants are the same chassis.
+    Descriptor {
+        model_number_prefix: "RZ09-0423",
+        name: "Razer Blade 17 (2022)",
+        pid: 0x028b,
+        features: &[
+            "battery-care",
+            "fan",
+            "kbd-backlight",
+            "kbd-lighting",
+            "lid-logo",
+            "lights-always-on",
+            "perf",
+        ],
+        init_cmds: &[],
+        fan_rpm_range: (3500, 5000),
+    },
     // Reported on hardware by a user (issue #1, 2026-09-30; SKU RZ09-0484UEH4-R3U1, Windows
     // 25H2): perf modes, Auto fan, Max Fan, keyboard brightness and effects, logo, charge
     // limit and the Fn keys all work. Manual RPM does NOT: every set point held the fans at
@@ -268,7 +291,6 @@ pub const FAN_RANGE_BY_PID: &[(u16, (u16, u16))] = &[
     (0x0276, (2000, 5400)), // Blade 15 2021 Advanced -- widest range
     (0x0279, (2300, 4300)), // Blade Pro 17 Mid 2021 -- low ceiling
     (0x027a, (3500, 5000)), // Blade 15 Late 2021 Base
-    (0x028b, (3500, 5000)), // Blade 17 2022
     (0x028c, (3500, 5000)), // Blade 14 2022
     // 2023+: transcribed floor of 2200. Unverified, and known too high for 0x029F.
     (0x029e, (2200, 5000)), // Blade 15 2023
@@ -346,6 +368,7 @@ mod tests {
         // A PID in SUPPORTED is deliberately absent from the fallback table.
         assert_eq!(fan_range_for_pid(0x029f), None);
         assert_eq!(fan_range_for_pid(0x02a0), None);
+        assert_eq!(fan_range_for_pid(0x028b), None);
         assert_eq!(fan_range_for_pid(0xFFFF), None);
     }
 }

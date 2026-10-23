@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report
+  ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). Perf modes and CPU/GPU boost sets
+  verified by readback; manual fan RPM is not honored exactly (max actual seen 4300) and Max Fan
+  answers not supported (0x05). Not tested by the maintainer.
+
 Release history for this fork: the README has current behavior, this file how it got there.
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
