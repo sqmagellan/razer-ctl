@@ -21,8 +21,25 @@ unless a user report is cited.
   used. `auto fan rpm` and `auto info` say so, `auto json` has a new `fan_floor_rpm` field, and the
   tray's fan presets read "2000 RPM (runs at 3800)". The fan on Auto has no such limit: under a
   CPU and GPU load it reached 4100 RPM in Balanced and 4600 in Performance and Custom.
+- **EC temperatures.** The EC reports a CPU-side temperature and the GPU's (`0x0d85`, found by
+  [blade-control](https://github.com/jdsgnrinfo/blade-control)). The tooltip adds "CPU 62°C",
+  `auto info` prints both and `auto json` has `ec_cpu_temp_c` and `ec_gpu_temp_c`. On `0x029F` the
+  GPU figure is within 1–2 °C of `nvidia-smi`; the CPU figure is a sensor near the CPU, not the
+  die, and read 60–67 °C at idle. `probe` reads it too, so a report shows whether another model
+  has it.
 
 **Reliability**
+- **GPU temperature without a process.** The tray reads the dGPU temperature from Windows (D3DKMT,
+  the figure Task Manager shows): 0.2 ms instead of 40–80 ms, and within 0.1 °C of `nvidia-smi`.
+  `nvidia-smi` still gives the watts, every 30 s or when the temperature moves 3 °C, and the
+  temperature too wherever Windows doesn't report it. Neither is asked while the GPU sleeps.
+- **Perf modes other firmware reports read as ours.** 1 (the 2018–2020 Blades' Gaming) reads as
+  Performance and 3 (the 2025 firmware's Battery Saver) as Battery. A read of either used to fail.
+  The tray never sends them.
+- **Blade 15 Base 2020 (`0x0255`) shows no charge limit.** Its EC accepts the setting and ignores
+  it, per a user report in blade-control's model table.
+- **Blade 16 (2026), PID `0x02E0`,** is tried before any other Razer device on the machine, like the
+  other listed Blades.
 - **A perf mode write the EC acknowledges and ignores is caught.** It happened once on 2026-10-19.
   The tray reads the perf and fan mode back after applying and retries up to 3 times;
   `auto perf mode` and `auto fan auto|manual` fail instead of reporting success.

@@ -46,14 +46,18 @@ history and the measurements behind it; `README.upstream.md` covers the project 
 - **Undo changes made by Synapse** (off by default): puts perf mode, fan, logo and charge limit back
   when something else changes them. Brightness is left alone. The menu says when Synapse is running;
   the tray never stops it.
+- **Temperatures** in the tooltip: the EC's CPU-side sensor and the dGPU. The CPU figure is a sensor
+  near the CPU, read from the EC (`0x0d85`), not the die temperature. The GPU figure comes from
+  Windows, the same reading Task Manager shows; `nvidia-smi` runs only for the GPU's watts.
 - **Close apps using the GPU**: ends dGPU processes, skipping system ones.
 - **Start with Windows**: an `HKCU\…\Run` entry.
 - **Status for scripts**: `razer-cli auto json` prints the state, actual fan RPM included, as flat
   JSON (a Home Assistant sensor, a status line). A value the laptop doesn't report is `null` and
   listed in `unsupported`. In Manual, `fan_floor_rpm` is the perf mode's measured minimum speed
   where one is known (3800 in Custom on the 2023 Blade 16), and is left out elsewhere. With Max
-  Fan off the fans settle at the larger of it and `fan_setpoint_rpm`. `razer-cli enumerate --json`
-  prints what a device-support report needs.
+  Fan off the fans settle at the larger of it and `fan_setpoint_rpm`. `ec_cpu_temp_c` and
+  `ec_gpu_temp_c` are the EC's two temperatures. `razer-cli enumerate --json` prints what a
+  device-support report needs.
 
 CLI exit codes:
 
@@ -92,16 +96,17 @@ Config: `%APPDATA%\razer-tray\config\default-config.toml`. Log:
 | Razer Blade 15 (2022) | `0x028A` | 3500–5000 RPM |
 
 **Other models** get a generic profile with every feature offered and a fan range from community
-data for 43 more PIDs. There's no init sequence; a guessed one is worse than none. A logo, keyboard
+data for 44 more PIDs. There's no init sequence; a guessed one is worse than none. A logo, keyboard
 brightness or charge limit the firmware lacks shows as "(not supported)" and is left alone; any other
 missing command fails with an error that names it. `razer-cli auto info` marks what's missing. Expect
 perf modes and fans to work. If you try one, please [open an issue](../../issues/new/choose).
 
 ### Left out on purpose
 
-- **Temperature-driven fan curves.** A real CPU temperature on Windows needs a kernel driver; the
+- **Temperature-driven fan curves.** A CPU die temperature on Windows needs a kernel driver; the
   usual one (WinRing0) has CVE-2020-14979 and Defender has quarantined it since March 2025. The ACPI
-  thermal zones are stubs. The NVIDIA dGPU temperature is real and is in the tooltip.
+  thermal zones are stubs. The EC's CPU-side sensor needs no driver, but it isn't the die, and how
+  far it lags the die under load hasn't been measured yet. Both temperatures are in the tooltip.
 - **Cloud profiles, macros and a per-key lighting editor.**
 
 ## Install
