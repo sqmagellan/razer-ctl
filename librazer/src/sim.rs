@@ -320,9 +320,10 @@ impl Model {
     }
 }
 
-/// Getters whose reply is a sensor reading rather than state a write could change (EC
-/// temperatures, `0x0d85`). A model built from a capture replays the captured reply.
-const READINGS: &[u16] = &[0x0d85];
+/// Getters whose reply is a reading rather than state a write could change (EC
+/// temperatures `0x0d85`, power source `0x078c`). A model built from a capture replays the
+/// captured reply.
+const READINGS: &[u16] = &[0x0d85, 0x078c];
 
 /// Fold a getter's reply into the starting state.
 fn note_reading(state: &mut State, command: u16, req: &[u8], reply: &[u8]) {

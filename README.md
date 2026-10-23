@@ -57,7 +57,8 @@ history and the measurements behind it; `README.upstream.md` covers the project 
   listed in `unsupported`. In Manual, `fan_floor_rpm` is the perf mode's measured minimum speed
   where one is known (3800 in Custom on the 2023 Blade 16), and is left out elsewhere. With Max
   Fan off the fans settle at the larger of it and `fan_setpoint_rpm`. `ec_cpu_temp_c` and
-  `ec_gpu_temp_c` are the EC's two temperatures. `razer-cli enumerate --json` prints what a
+  `ec_gpu_temp_c` are the EC's two temperatures; `charger`, `charger_watts` and `charger_code`
+  are the power source it reports. `razer-cli enumerate --json` prints what a
   device-support report needs.
 
 CLI exit codes:

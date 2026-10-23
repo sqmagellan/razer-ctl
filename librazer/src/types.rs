@@ -328,6 +328,58 @@ impl TryFrom<u8> for MaxFanSpeedMode {
     }
 }
 
+/// What powers the laptop, as the EC reports it through `0x078c`. Codes from
+/// jdsgnrinfo/blade-control's table (MIT): 0 the battery, 0x02-0x07 USB-C at 45, 60, 65, 80,
+/// 90 and 100 W, 0x11 and 0x12 the main (barrel) charger at 280 and 330 W, any other the main
+/// charger. The reply repeats the code in its second byte; what that byte means alone is
+/// unknown. On `0x029F` (2026-10-22) on its barrel charger it read `[0x12, 0x12]`; no other
+/// state was seen here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerSource {
+    pub code: u8,
+}
+
+impl PowerSource {
+    pub fn from_args(args: &[u8]) -> Self {
+        Self {
+            code: args.first().copied().unwrap_or(0),
+        }
+    }
+
+    /// "battery", "usb-c" or "main".
+    pub fn kind(self) -> &'static str {
+        match self.code {
+            0x00 => "battery",
+            0x02..=0x07 => "usb-c",
+            _ => "main",
+        }
+    }
+
+    /// The charger's rating, where the table knows the code.
+    pub fn watts(self) -> Option<u16> {
+        match self.code {
+            0x02 => Some(45),
+            0x03 => Some(60),
+            0x04 => Some(65),
+            0x05 => Some(80),
+            0x06 => Some(90),
+            0x07 => Some(100),
+            0x11 => Some(280),
+            0x12 => Some(330),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PowerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.watts() {
+            Some(w) => write!(f, "{} {w} W (code {:#04x})", self.kind(), self.code),
+            None => write!(f, "{} (code {:#04x})", self.kind(), self.code),
+        }
+    }
+}
+
 /// The two temperatures the EC reports through `0x0d85`, in whole degrees Celsius.
 ///
 /// Found by a read-only scan of a Blade 16 (2023) in jdsgnrinfo/blade-control (MIT); in
@@ -540,6 +592,19 @@ mod tests {
         // What we send is unchanged.
         assert_eq!(PerfMode::Performance as u8, 2);
         assert_eq!(PerfMode::Battery as u8, 6);
+    }
+
+    #[test]
+    fn power_source_codes_decode_as_the_table_says() {
+        let seen = PowerSource::from_args(&[0x12, 0x12]); // 0x029F on its barrel charger
+        assert_eq!((seen.kind(), seen.watts()), ("main", Some(330)));
+        assert_eq!(seen.to_string(), "main 330 W (code 0x12)");
+        let usb = PowerSource::from_args(&[0x04, 0x04]);
+        assert_eq!((usb.kind(), usb.watts()), ("usb-c", Some(65)));
+        let battery = PowerSource::from_args(&[0, 0]);
+        assert_eq!((battery.kind(), battery.watts()), ("battery", None));
+        let other = PowerSource::from_args(&[0x0d]); // a Blade 15 Base 2020 on its own charger
+        assert_eq!((other.kind(), other.watts()), ("main", None));
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub const READS: &[Read] = &[
     read("keyboard effect", 0x0f82, &[1, 5, 0]),
     read("lights always on", 0x0084, &[0, 0]),
     read("EC temperatures", 0x0d85, &[0, 0, 0]),
+    read("power source", 0x078c, &[0, 0]),
 ];
 
 /// Actual fan speed is read in rounds: one round can't tell a lone-zone bogus read

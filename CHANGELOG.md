@@ -35,6 +35,10 @@ unless a user report is cited.
   GPU figure runs 1–2 °C under `nvidia-smi`. The CPU figure is a sensor near the CPU, not the
   die: 53–67 °C at idle, up 7 °C in 40 s under a half load and down about 1 °C per 30 s after.
   `probe` reads it too, so a report shows whether another model has it.
+- **The EC's power source.** `auto json` adds `charger` ("battery", "usb-c" or "main"),
+  `charger_watts` and `charger_code`, and `auto info` prints it under the charge limit (`0x078c`,
+  codes from blade-control's table). `0x029F` on its barrel charger reads 0x12, the 330 W charger;
+  no other state was seen here. `probe` reads it too.
 
 **Reliability**
 - **GPU temperature without a process.** The tray reads the dGPU temperature from Windows (D3DKMT,

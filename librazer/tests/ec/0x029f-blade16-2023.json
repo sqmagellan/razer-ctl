@@ -200,8 +200,12 @@
     },
     {
       "command": "0x078c",
-      "support": "mismatch",
-      "evidence": "measured hw-0923: USB-C adapter wattage, mismatch 5 of 5"
+      "support": "works",
+      "evidence": "measured hw-1022: power source [0x12, 0x12] on the barrel charger (330 W in blade-control's table); status 0x02 with remaining_packets wire [0x00, 0x02]. hw-0923's \"mismatch 5 of 5\" was that remaining_packets",
+      "reply": [
+        18,
+        18
+      ]
     },
     {
       "command": "0x0d85",

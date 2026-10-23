@@ -134,6 +134,14 @@ impl Cli for feature::BatteryCare {
             Some(("info", _)) => {
                 let current = command::get_battery_care(device)?;
                 println!("{}: {}", self.name(), current);
+                // Read only, and checked on one model: a failure is said, not returned.
+                match command::get_power_source(device) {
+                    Ok(source) => println!("power source (EC): {source}"),
+                    Err(e) if librazer::error::is_not_supported(&e) => {
+                        println!("power source (EC): not supported")
+                    }
+                    Err(e) => println!("power source (EC): unreadable: {e}"),
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -779,6 +787,12 @@ struct JsonStatus {
     ec_cpu_temp_c: Option<u8>,
     /// The dGPU temperature as the EC reads it (`0x0d85`), whole °C.
     ec_gpu_temp_c: Option<u8>,
+    /// What powers the laptop as the EC reports it (`0x078c`): "battery", "usb-c" or "main".
+    charger: Option<&'static str>,
+    /// The charger's rating where the code is a known one.
+    charger_watts: Option<u16>,
+    /// The EC's raw power source code, for codes nobody has mapped yet.
+    charger_code: Option<u8>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unsupported: Vec<&'static str>,
 }
@@ -937,6 +951,16 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         Err(_) => None,
     };
 
+    // Same rule as the temperatures: new, read only, checked on one model.
+    let power = match command::get_power_source(device) {
+        Ok(p) => Some(p),
+        Err(e) if librazer::error::is_not_supported(&e) => {
+            unsupported.push("charger");
+            None
+        }
+        Err(_) => None,
+    };
+
     Ok(JsonStatus {
         name: device.info.name,
         pid: format!("{:#06x}", device.info.pid),
@@ -955,6 +979,9 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         max_fan,
         ec_cpu_temp_c: ec_temps.and_then(|t| t.cpu_c),
         ec_gpu_temp_c: ec_temps.and_then(|t| t.gpu_c),
+        charger: power.map(|p| p.kind()),
+        charger_watts: power.and_then(|p| p.watts()),
+        charger_code: power.map(|p| p.code),
         unsupported,
     })
 }
@@ -1462,7 +1489,10 @@ mod tests {
         ]
         .iter()
         .map(|c| json!({"command": format!("{c:#06x}"), "support": "works", "evidence": "inferred: CLI test model"}))
-        .chain([json!({"command": "0x0d85", "support": "works", "evidence": "inferred: CLI test model", "reply": [2, 55, 45]})])
+        .chain([
+            json!({"command": "0x0d85", "support": "works", "evidence": "inferred: CLI test model", "reply": [2, 55, 45]}),
+            json!({"command": "0x078c", "support": "works", "evidence": "inferred: CLI test model", "reply": [0x12, 0x12]}),
+        ])
         .collect();
         json!({
             "format": librazer::sim::FORMAT,
@@ -1536,6 +1566,9 @@ mod tests {
                 "max_fan": false,
                 "ec_cpu_temp_c": 55,
                 "ec_gpu_temp_c": 45,
+                "charger": "main",
+                "charger_watts": 330,
+                "charger_code": 0x12,
             })
         );
         assert!(laptop.gaps().is_empty());

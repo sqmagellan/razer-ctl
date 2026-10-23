@@ -20,7 +20,7 @@ use crate::packet::Packet;
 use crate::transport::HidTransport;
 use crate::types::{
     BatteryCare, Cluster, CpuBoost, EcTemperatures, FanMode, FanZone, GpuBoost, KeyboardEffect,
-    LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
+    LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode, PowerSource,
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -218,6 +218,13 @@ pub fn get_fan_actual_rpm(device: &impl HidTransport, fan_zone: FanZone) -> Resu
     let response = device.send(Packet::new(0x0d88, &[0, fan_zone as u8, 0]))?;
     ensure!(response.get_args()[1] == fan_zone as u8);
     Ok(response.get_args()[2] as u16 * 100)
+}
+
+/// What powers the laptop, as the EC reports it (`0x078c`); see [`PowerSource`]. Read-only.
+pub fn get_power_source(device: &impl HidTransport) -> Result<PowerSource> {
+    Ok(PowerSource::from_args(
+        device.send(Packet::new(0x078c, &[0, 0]))?.get_args(),
+    ))
 }
 
 /// The CPU-side and GPU temperatures the EC reports (`0x0d85`); see [`EcTemperatures`].
