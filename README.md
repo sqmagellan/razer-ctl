@@ -58,8 +58,10 @@ history and the measurements behind it; `README.upstream.md` covers the project 
   where one is known (3800 in Custom on the 2023 Blade 16), and is left out elsewhere. With Max
   Fan off the fans settle at the larger of it and `fan_setpoint_rpm`. `ec_cpu_temp_c` and
   `ec_gpu_temp_c` are the EC's two temperatures; `charger`, `charger_watts` and `charger_code`
-  are the power source it reports. `razer-cli enumerate --json` prints what a
-  device-support report needs.
+  are the power source it reports.
+- **Model reports**: `razer-cli probe --out probe.json` reads every setting and saves what the EC
+  answered, to attach to a device-support issue. It only reads. `probe --writes` (tray closed) also
+  tests each write, then puts the settings back and checks them.
 
 CLI exit codes:
 
@@ -100,9 +102,10 @@ Config: `%APPDATA%\razer-tray\config\default-config.toml`. Log:
 
 **Other models** get a generic profile with every feature offered and a fan range from community
 data for 44 more PIDs. There's no init sequence; a guessed one is worse than none. A logo, keyboard
-brightness or charge limit the firmware lacks shows as "(not supported)" and is left alone; any other
-missing command fails with an error that names it. `razer-cli auto info` marks what's missing. Expect
-perf modes and fans to work. If you try one, please [open an issue](../../issues/new/choose).
+brightness, charge limit or Max Fan the firmware lacks shows as "(not supported)" and is left
+alone; any other missing command fails with an error that names it. `razer-cli auto info` marks
+what's missing. Expect perf modes and fans to work. If you try one, please
+[open an issue](../../issues/new/choose).
 
 ### Left out on purpose
 

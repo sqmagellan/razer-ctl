@@ -28,21 +28,16 @@ body:
     validations:
       required: false
   - type: textarea
-    id: enumerate
+    id: probe
     attributes:
-      label: Output of `razer-cli enumerate`
-      description: This gives the USB product ID, which is the key everything else hangs off.
-      render: text
+      label: Attach `probe.json`
+      description: |
+        Run `razer-cli probe --out probe.json` (from release 0.9.7 or later) and drag the file
+        into this box; it's too long to paste. It only reads settings and takes a few seconds. It
+        holds the USB product ID and the model number (SKU); it reads no serial number. If it
+        fails, paste the error.
     validations:
       required: true
-  - type: textarea
-    id: status
-    attributes:
-      label: Output of `razer-cli auto json`
-      description: Paste it as-is, even if it errored; the error is the useful part.
-      render: json
-    validations:
-      required: false
   - type: checkboxes
     id: worked
     attributes:

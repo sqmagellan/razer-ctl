@@ -4,7 +4,10 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
-## Unreleased
+## 0.9.7: temperatures, `razer-cli probe`, Blade 17 (2022) profile (2026-10-25)
+Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and put
+every setting back; the tray from this code has run on it since 2026-10-23. #10's reporter measured
+the Blade 17 (2022) (`0x028B`).
 
 **New**
 - **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report
@@ -65,6 +68,8 @@ unless a user report is cited.
   GPU out.
 - **Tests run against simulated ECs** built from four laptops' reports and hardware runs. A
   command the reports don't cover answers "unmodeled" instead of agreeing with the code.
+- Versions: `razer-tray` 0.9.7, `librazer` 0.11.0 (breaking: `Optional` gains `MaxFan`),
+  `razer-cli` 0.9.1.
 
 ## 0.9.6: laptops that lack a feature, a first run that reads the laptop, Blade 18 profile (2026-10-15)
 Tested on `0x029F` (2026-10-15): `auto json` matches 0.9.5 byte for byte; fan set points above 5000
