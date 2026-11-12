@@ -11,12 +11,14 @@ unless a user report is cited.
   settings: `0x04` is a temporary full charge, and further bits are documented by
   [openblade-core](https://github.com/OpenBladeProject/openblade-core). Max Fan used to write the
   whole byte, which would clear them; it now reads the byte and changes only `0x02`, and reading
-  Max Fan looks at that bit alone. A laptop that can't read the byte gets the old write. Not
-  retested on `0x029F`, where no other bit has been seen set.
+  Max Fan looks at that bit alone. A laptop that can't read the byte gets the old write. Tested
+  on `0x029F` (2026-11-11): the byte reads `0x02` with Max Fan on and `0x00` off.
 - **A charge limit is read back until it shows.** openblade-core records that a Blade 16 can keep
   reporting the old limit for 1-2 s after a change. The limit is now written once, then read up to
-  9 times, 250 ms apart; if it never shows, the write is reported as failed and the tray tries
-  again on its next pass. Not retested on `0x029F`.
+  9 times, 250 ms apart, by `razer-cli`; if it never shows, the command fails. The tray writes
+  once without waiting, as before, because it writes from its menu thread; Enforce repairs a
+  late read with one more write. On `0x029F` (2026-11-11) 70%, off and 70% each read back on
+  the first read (the whole command took 44-62 ms), so this laptop doesn't lag.
 
 ## 0.9.7: temperatures, `razer-cli probe`, Blade 17 (2022) profile (2026-10-25)
 Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and put
