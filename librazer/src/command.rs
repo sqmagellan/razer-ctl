@@ -250,12 +250,35 @@ pub fn set_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode)
 
 /// The Max Fan write alone, for a caller that has read the perf mode itself: so a "not
 /// supported" answer here is about Max Fan, never about the perf read.
+///
+/// `0x070f` writes a whole byte ("Power Mode Control"), and Max Fan is only its `0x02`
+/// bit: `0x04` is temporary full charge and other bits carry further options
+/// (OpenBladeProject/openblade-core's command notes, read 2026-11-11). So the byte is read
+/// first and only the Max Fan bit is changed. A laptop that can't read it ("not supported")
+/// gets the bare bit, as before.
 pub fn send_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode) -> Result<()> {
-    _send_command(device, 0x070f, &[mode as u8]).map(|_| ())
+    let others = match read_power_mode_control(device) {
+        Ok(byte) => byte & !PMC_MAX_FAN,
+        Err(e) if crate::error::is_not_supported(&e) => 0,
+        Err(e) => return Err(e),
+    };
+    _send_command(device, 0x070f, &[others | mode as u8]).map(|_| ())
 }
 
+/// The Max Fan bit of the Power Mode Control byte; see [`send_max_fan_speed_mode`].
+const PMC_MAX_FAN: u8 = MaxFanSpeedMode::Enable as u8;
+
+fn read_power_mode_control(device: &impl HidTransport) -> Result<u8> {
+    Ok(device.send(Packet::new(0x078f, &[0]))?.get_args()[0])
+}
+
+/// Whether Max Fan is on: the `0x02` bit only, whatever the other bits of the byte say.
 pub fn get_max_fan_speed_mode(device: &impl HidTransport) -> Result<MaxFanSpeedMode> {
-    device.send(Packet::new(0x078f, &[0]))?.get_args()[0].try_into()
+    Ok(if read_power_mode_control(device)? & PMC_MAX_FAN != 0 {
+        MaxFanSpeedMode::Enable
+    } else {
+        MaxFanSpeedMode::Disable
+    })
 }
 
 pub fn set_fan_mode(device: &impl HidTransport, mode: FanMode) -> Result<()> {
@@ -573,13 +596,48 @@ pub fn get_battery_care(device: &impl HidTransport) -> Result<BatteryCare> {
     }
 }
 
+/// How many times [`set_battery_care`] reads the limit back before giving up.
+pub const CHARGE_CONFIRM_READS: usize = 9;
+
+/// Gap between those reads: nine reads cover about 2 s.
+const CHARGE_CONFIRM_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Write the charge limit, then read it back until it shows.
+///
+/// A Blade 16 can keep answering the old limit for 1-2 s after a write
+/// (OpenBladeProject/openblade-core, the owner report behind its 9 x 250 ms check, read
+/// 2026-11-11). The write is sent once and never repeated; the read is retried up to
+/// [`CHARGE_CONFIRM_READS`] times. A limit that never shows is an error, so the caller (the
+/// tray's Enforce) tries again on its next pass. A laptop that can't read the limit
+/// ("not supported") is trusted on the write's echo, as before.
 pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result<()> {
     let args = &[mode.wire_byte()];
     ensure!(device
         .send(Packet::new(0x0712, args))?
         .get_args()
         .starts_with(args));
-    Ok(())
+    let mut last = 0;
+    for read in 0..CHARGE_CONFIRM_READS {
+        if read > 0 {
+            device.pause(CHARGE_CONFIRM_INTERVAL);
+        }
+        last = match device.send(Packet::new(0x0792, &[0])) {
+            Ok(response) => response.get_args()[0],
+            Err(e) if crate::error::is_not_supported(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if BatteryCare::try_from(last).is_ok_and(|shown| shown == mode) {
+            if read > 0 {
+                log::info!("charge limit {mode} showed on read {}", read + 1);
+            }
+            return Ok(());
+        }
+    }
+    bail!(
+        "charge limit {mode} ({:#04x}) was acknowledged but still reads {last:#04x} \
+         after {CHARGE_CONFIRM_READS} reads",
+        mode.wire_byte()
+    )
 }
 
 #[cfg(test)]
@@ -736,12 +794,128 @@ mod tests {
         ));
     }
 
+    // ---- Power Mode Control byte (0x070f / 0x078f) -----------------------------------
+    //
+    // The byte is a bitfield, not a Max Fan switch: 0x02 = Max Fans, 0x04 = temporary
+    // full charge, and other bits carry further options (OpenBladeProject/openblade-core,
+    // docs/blade18-observer-evidence.md and docs/developer-guide.md, read 2026-11-11).
+    // A Max Fan write must keep the bits it doesn't own.
+
+    /// A laptop whose Power Mode Control byte starts at `byte` and that applies writes.
+    fn pmc_laptop(byte: u8) -> MockTransport {
+        let pmc = std::cell::Cell::new(byte);
+        MockTransport::with_responder(move |req| match req.command() {
+            0x078f => reply(&[pmc.get()]),
+            0x070f => {
+                pmc.set(req.get_args()[0]);
+                reply(&[pmc.get()])
+            }
+            _ => reply(req.get_args()),
+        })
+    }
+
+    #[test]
+    fn max_fan_write_keeps_the_other_power_mode_control_bits() {
+        let mock = pmc_laptop(0x05);
+        send_max_fan_speed_mode(&mock, MaxFanSpeedMode::Enable).unwrap();
+        send_max_fan_speed_mode(&mock, MaxFanSpeedMode::Disable).unwrap();
+        let writes: Vec<_> = mock
+            .sent()
+            .into_iter()
+            .filter(|(c, _)| *c == 0x070f)
+            .collect();
+        assert_eq!(writes, vec![(0x070f, vec![0x07]), (0x070f, vec![0x05])]);
+    }
+
+    #[test]
+    fn max_fan_read_looks_only_at_its_bit() {
+        assert_eq!(
+            get_max_fan_speed_mode(&pmc_laptop(0x06)).unwrap(),
+            MaxFanSpeedMode::Enable
+        );
+        assert_eq!(
+            get_max_fan_speed_mode(&pmc_laptop(0x04)).unwrap(),
+            MaxFanSpeedMode::Disable
+        );
+    }
+
+    #[test]
+    fn max_fan_write_without_a_readable_byte_sends_the_bare_bit() {
+        // A laptop that can't read the byte back: the bits it might hold are unknowable,
+        // so it gets the old whole-byte write (the pre-fix behavior, no worse).
+        let mock = MockTransport::with_fallible_responder(|req| match req.command() {
+            0x078f => Err(anyhow::Error::new(
+                crate::packet::ResponseError::NotSupported,
+            )),
+            _ => Ok(reply(req.get_args())),
+        });
+        send_max_fan_speed_mode(&mock, MaxFanSpeedMode::Enable).unwrap();
+        assert_eq!(mock.sent().last().unwrap(), &(0x070f, vec![0x02]));
+    }
+
+    // ---- charge limit confirmation ---------------------------------------------------
+
+    /// A laptop whose charge-limit read keeps the old value for `stale_reads` reads after
+    /// a write (the Blade 16 lag openblade-core records: 1-2 s).
+    fn charge_laptop(old: BatteryCare, stale_reads: usize) -> MockTransport {
+        let state = std::cell::Cell::new((old.wire_byte(), old.wire_byte(), 0usize));
+        MockTransport::with_responder(move |req| match req.command() {
+            0x0712 => {
+                let (shown, _, _) = state.get();
+                state.set((shown, req.get_args()[0], 0));
+                reply(&req.get_args()[..1])
+            }
+            0x0792 => {
+                let (shown, written, reads) = state.get();
+                let now = if reads >= stale_reads { written } else { shown };
+                state.set((now, written, reads + 1));
+                reply(&[now])
+            }
+            _ => reply(req.get_args()),
+        })
+    }
+
+    fn count(mock: &MockTransport, command: u16) -> usize {
+        mock.sent().iter().filter(|(c, _)| *c == command).count()
+    }
+
+    #[test]
+    fn set_battery_care_waits_out_a_lagging_read() {
+        let mock = charge_laptop(BatteryCare::DISABLE, 3);
+        set_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap();
+        assert_eq!(count(&mock, 0x0712), 1, "the setter is never repeated");
+        assert_eq!(count(&mock, 0x0792), 4);
+    }
+
+    #[test]
+    fn set_battery_care_fails_when_the_limit_never_shows() {
+        let mock = charge_laptop(BatteryCare::DISABLE, usize::MAX);
+        let err = set_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("charge limit"), "{err}");
+        assert_eq!(count(&mock, 0x0712), 1, "the setter is never repeated");
+        assert_eq!(count(&mock, 0x0792), CHARGE_CONFIRM_READS);
+    }
+
+    #[test]
+    fn set_battery_care_without_a_readable_limit_trusts_the_echo() {
+        let mock = MockTransport::with_fallible_responder(|req| match req.command() {
+            0x0792 => Err(anyhow::Error::new(
+                crate::packet::ResponseError::NotSupported,
+            )),
+            _ => Ok(reply(req.get_args())),
+        });
+        set_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap();
+    }
+
     #[test]
     fn set_battery_care_emits_single_byte_register() {
-        let mock = MockTransport::echo();
+        let mock = charge_laptop(BatteryCare::DISABLE, 0);
         set_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap();
         assert_eq!(
-            mock.sent(),
+            mock.sent()
+                .into_iter()
+                .filter(|(c, _)| *c == 0x0712)
+                .collect::<Vec<_>>(),
             vec![(
                 0x0712,
                 vec![BatteryCare::from_percent(80).unwrap().wire_byte()]

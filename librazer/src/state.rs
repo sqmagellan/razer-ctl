@@ -3130,6 +3130,8 @@ colors = ["#ffffff"]
             let mut p = Packet::new(req.command(), &[]);
             match req.command() {
                 0x070f => return Err(anyhow::Error::new(ResponseError::NotSupported)),
+                // The charge limit reads back as the default intent's limit.
+                0x0792 => p.set_args(&[DeviceState::default().battery_care.wire_byte()]),
                 0x0d82 => p.set_args(&[
                     0,
                     req.get_args()[1],

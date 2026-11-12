@@ -510,7 +510,7 @@ impl Inner {
 
     fn fan_target(&self, z: usize) -> Option<u16> {
         let fan = &self.model.fan;
-        if self.state.perf_mode[z] == CUSTOM && self.state.max_fan == MAX_FAN_ON {
+        if self.state.perf_mode[z] == CUSTOM && self.state.max_fan & MAX_FAN_ON != 0 {
             return Some(fan.max_fan_rpm);
         }
         if self.state.fan_mode[z] != MANUAL {
