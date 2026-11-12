@@ -607,15 +607,14 @@ const CHARGE_CONFIRM_INTERVAL: std::time::Duration = std::time::Duration::from_m
 /// A Blade 16 can keep answering the old limit for 1-2 s after a write
 /// (OpenBladeProject/openblade-core, the owner report behind its 9 x 250 ms check, read
 /// 2026-11-11). The write is sent once and never repeated; the read is retried up to
-/// [`CHARGE_CONFIRM_READS`] times. A limit that never shows is an error, so the caller (the
-/// tray's Enforce) tries again on its next pass. A laptop that can't read the limit
-/// ("not supported") is trusted on the write's echo, as before.
+/// [`CHARGE_CONFIRM_READS`] times. A limit that never shows is an error, so the caller can
+/// try again. A laptop that can't read the limit ("not supported") is trusted
+/// on the write's echo, as before.
+///
+/// This can wait about 2 s, so it is for the CLI. The tray writes from its UI thread and
+/// uses [`write_battery_care`]: its Enforce pass repairs a lagging read with one more write.
 pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result<()> {
-    let args = &[mode.wire_byte()];
-    ensure!(device
-        .send(Packet::new(0x0712, args))?
-        .get_args()
-        .starts_with(args));
+    write_battery_care(device, mode)?;
     let mut last = 0;
     for read in 0..CHARGE_CONFIRM_READS {
         if read > 0 {
@@ -638,6 +637,17 @@ pub fn set_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result
          after {CHARGE_CONFIRM_READS} reads",
         mode.wire_byte()
     )
+}
+
+/// Write the charge limit once and check the EC's echo, without reading it back. See
+/// [`set_battery_care`] for the confirmed write.
+pub fn write_battery_care(device: &impl HidTransport, mode: BatteryCare) -> Result<()> {
+    let args = &[mode.wire_byte()];
+    ensure!(device
+        .send(Packet::new(0x0712, args))?
+        .get_args()
+        .starts_with(args));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -877,6 +887,15 @@ mod tests {
 
     fn count(mock: &MockTransport, command: u16) -> usize {
         mock.sent().iter().filter(|(c, _)| *c == command).count()
+    }
+
+    #[test]
+    fn write_battery_care_never_reads_back() {
+        // The tray's UI thread must not wait on a lagging read.
+        let mock = charge_laptop(BatteryCare::DISABLE, usize::MAX);
+        write_battery_care(&mock, BatteryCare::from_percent(80).unwrap()).unwrap();
+        assert_eq!(count(&mock, 0x0712), 1);
+        assert_eq!(count(&mock, 0x0792), 0);
     }
 
     #[test]

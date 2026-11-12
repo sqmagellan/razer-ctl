@@ -70,20 +70,9 @@ pub struct MockTransport {
 impl MockTransport {
     /// Echoing transport: each response repeats the request's args, mimicking the
     /// firmware's success ack. Satisfies the `starts_with(args)` checks the set_*
-    /// paths use, so it's the right mock for write-path tests. The charge-limit read
-    /// (`0x0792`) answers with the last limit written (`0x0712`), as the EC does, because
-    /// `set_battery_care` reads its write back.
+    /// paths use, so it's the right mock for write-path tests.
     pub fn echo() -> Self {
-        let charge = std::cell::Cell::new(None);
-        Self::with_responder(move |req| match (req.command(), charge.get()) {
-            (0x0792, Some(byte)) => Packet::new(0x0792, &[byte]),
-            (command, _) => {
-                if command == 0x0712 {
-                    charge.set(Some(req.get_args()[0]));
-                }
-                Packet::new(command, req.get_args())
-            }
-        })
+        Self::with_responder(|req| Packet::new(req.command(), req.get_args()))
     }
 
     /// Transport whose response is computed from each request -- use for read-path

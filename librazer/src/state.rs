@@ -628,7 +628,7 @@ impl DeviceState {
         continue_after_rejection(
             &mut first,
             write_optional(device, Optional::BatteryCare, || {
-                command::set_battery_care(device, self.battery_care)
+                command::write_battery_care(device, self.battery_care)
             }),
         )?;
         first
@@ -697,7 +697,7 @@ impl DeviceState {
         continue_after_rejection(
             &mut first,
             write_optional(device, Optional::BatteryCare, || {
-                command::set_battery_care(device, self.battery_care)
+                command::write_battery_care(device, self.battery_care)
             }),
         )?;
         first
@@ -2018,6 +2018,10 @@ mod tests {
         );
         assert!(applied.contains(&0x0712), "apply writes battery care");
         assert!(
+            !applied.contains(&0x0792),
+            "apply runs on the tray's UI thread: no charge-limit read-back poll"
+        );
+        assert!(
             !applied.contains(&0x0004),
             "apply must NOT set device mode (driver mode breaks Fn keys)"
         );
@@ -3130,8 +3134,6 @@ colors = ["#ffffff"]
             let mut p = Packet::new(req.command(), &[]);
             match req.command() {
                 0x070f => return Err(anyhow::Error::new(ResponseError::NotSupported)),
-                // The charge limit reads back as the default intent's limit.
-                0x0792 => p.set_args(&[DeviceState::default().battery_care.wire_byte()]),
                 0x0d82 => p.set_args(&[
                     0,
                     req.get_args()[1],
