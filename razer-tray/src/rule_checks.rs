@@ -15,6 +15,10 @@ pub const DELAYS: [(Duration, &str); 2] = [
     (Duration::from_secs(15), "app rule +15s"),
 ];
 
+/// A check this far past its time is dropped (the loop ran late, or the device was being
+/// resynced): its write would land long after the transition, over whatever was chosen since.
+pub const EXPIRE_AFTER: Duration = Duration::from_secs(30);
+
 /// The read-backs still to run for the latest rule transition.
 #[derive(Debug, Default)]
 pub struct RuleChecks {
@@ -31,13 +35,22 @@ impl RuleChecks {
             .collect();
     }
 
-    /// The earliest check due at `now`, removed, as the reason to log with it.
+    /// The earliest check due at `now`, removed, as the reason to log with it. Checks more
+    /// than [`EXPIRE_AFTER`] late are dropped on the way.
     pub fn take_due(&mut self, now: Instant) -> Option<&'static str> {
         // Kept in time order by `schedule`, so the first is the earliest.
-        match self.due.first() {
-            Some((at, _)) if now >= *at => Some(self.due.remove(0).1),
-            _ => None,
+        while let Some(&(at, why)) = self.due.first() {
+            if now < at {
+                return None;
+            }
+            self.due.remove(0);
+            let late = now.duration_since(at);
+            if late <= EXPIRE_AFTER {
+                return Some(why);
+            }
+            log::info!("{why}: skipped, {} s late", late.as_secs());
         }
+        None
     }
 }
 
@@ -69,10 +82,25 @@ mod tests {
         let t0 = Instant::now();
         let mut checks = RuleChecks::default();
         checks.schedule(t0);
-        let late = t0 + Duration::from_secs(40);
+        let late = t0 + Duration::from_secs(20);
         assert_eq!(checks.take_due(late), Some("app rule +3s"));
         assert_eq!(checks.take_due(late), Some("app rule +15s"));
         assert_eq!(checks.take_due(late), None);
+    }
+
+    #[test]
+    fn a_check_far_past_its_time_is_dropped_not_run() {
+        let t0 = Instant::now();
+        let mut checks = RuleChecks::default();
+        checks.schedule(t0);
+        // +3 s is 37 s late and dropped; +15 s is 25 s late and still runs.
+        assert_eq!(
+            checks.take_due(t0 + Duration::from_secs(40)),
+            Some("app rule +15s")
+        );
+        checks.schedule(t0);
+        assert_eq!(checks.take_due(t0 + Duration::from_secs(100)), None);
+        assert_eq!(checks.take_due(t0 + Duration::from_secs(101)), None);
     }
 
     #[test]

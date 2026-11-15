@@ -1128,8 +1128,14 @@ impl ProgramState {
         if !drift {
             log::info!("{reason}: device matches intended state");
         } else {
+            // Name every enforced field that moved, not only perf and fan: a charge-limit
+            // drift alone used to read as "Balanced/Auto != intended Balanced/Auto".
+            let fields = self
+                .observed
+                .enforced_drift(&self.device_state, self.unsupported)
+                .join(", ");
             log::warn!(
-                "{reason}: device {:?}/{:?} != intended {:?}/{:?}{}",
+                "{reason}: device {:?}/{:?} != intended {:?}/{:?} [{fields}]{}",
                 self.observed.perf_mode,
                 self.observed.fan_speed,
                 self.device_state.perf_mode,

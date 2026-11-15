@@ -724,6 +724,43 @@ impl DeviceState {
         self.enforced_fields_differ_except(intended, unsupported_on(device))
     }
 
+    /// The enforced fields where `self` (a reading) differs from `intended`, each as
+    /// `field read -> intended`, for a log line that names the drift. Leaves out what
+    /// `skip` lists, like [`Self::enforced_fields_differ_on`].
+    pub fn enforced_drift(&self, intended: &DeviceState, skip: Unsupported) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.perf_mode != intended.perf_mode {
+            out.push(format!(
+                "perf {:?} -> {:?}",
+                self.perf_mode, intended.perf_mode
+            ));
+        }
+        if self.fan_speed != intended.fan_speed {
+            out.push(format!(
+                "fan {:?} -> {:?}",
+                self.fan_speed, intended.fan_speed
+            ));
+        }
+        if !skip.contains(Optional::MaxFan) && self.max_fan != intended.max_fan {
+            out.push(format!("max fan {} -> {}", self.max_fan, intended.max_fan));
+        }
+        if !skip.contains(Optional::Logo)
+            && self.lights_mode.logo_mode != intended.lights_mode.logo_mode
+        {
+            out.push(format!(
+                "logo {:?} -> {:?}",
+                self.lights_mode.logo_mode, intended.lights_mode.logo_mode
+            ));
+        }
+        if !skip.contains(Optional::BatteryCare) && self.battery_care != intended.battery_care {
+            out.push(format!(
+                "charge limit {:?} -> {:?}",
+                self.battery_care, intended.battery_care
+            ));
+        }
+        out
+    }
+
     fn enforced_fields_differ_except(&self, intended: &DeviceState, skip: Unsupported) -> bool {
         self.perf_mode != intended.perf_mode
             || self.fan_speed != intended.fan_speed
@@ -2334,6 +2371,32 @@ mod tests {
             "every perf write must carry the intended mode, got {perf_writes:?}"
         );
         assert_eq!(held.get(), crate::types::PerfMode::Balanced as u8);
+    }
+
+    #[test]
+    fn enforced_drift_names_each_differing_field_and_skips_what_the_model_lacks() {
+        let intended = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            ..DeviceState::default()
+        };
+        let read = DeviceState {
+            perf_mode: PerfMode::Performance,
+            max_fan: !intended.max_fan,
+            ..intended
+        };
+        assert_eq!(
+            read.enforced_drift(&intended, Unsupported::default()),
+            vec![
+                "perf Performance -> Balanced".to_string(),
+                format!("max fan {} -> {}", read.max_fan, intended.max_fan),
+            ]
+        );
+        let skip = Unsupported::default().with(Optional::MaxFan);
+        assert_eq!(
+            read.enforced_drift(&intended, skip),
+            vec!["perf Performance -> Balanced".to_string()]
+        );
+        assert!(intended.enforced_drift(&intended, skip).is_empty());
     }
 
     #[test]

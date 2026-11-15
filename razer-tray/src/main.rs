@@ -657,9 +657,9 @@ fn main() -> Result<()> {
 
             // After a rule started or ended: read the device back and, if it is not in the
             // intended state, write it again. The transition's own confirm read can pass with
-            // the EC ending elsewhere (0x029F 2026-11-15). Regardless of Enforce: the tray
-            // made this change, so holding it for 15 s fights nobody's choice but a write
-            // made in those seconds.
+            // the EC ending elsewhere (0x029F 2026-11-15). Regardless of Enforce: the tray made
+            // this change. Only two reads, at +3 s and +15 s, and none more than 30 s late,
+            // so a later choice made elsewhere is left alone.
             if io_ok {
                 if let Some(reason) = rule_checks.take_due(now) {
                     state.reconcile(&mut tray_icon, &device, reason, true);
