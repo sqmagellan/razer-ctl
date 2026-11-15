@@ -486,8 +486,20 @@ impl DeviceState {
             log::warn!("max fan command failed: {:?}", e);
         }
 
+        // The fan mode rides the perf packet, so the fan write re-sends a perf mode. Send
+        // the one just written, not one read back: right after the perf write a read can
+        // still answer the old mode, and writing that back undid the perf write after its
+        // confirm read had passed (0x029F 2026-11-15, an app rule's revert to Balanced left
+        // Performance). After a failed perf write, keep the mode the EC holds.
+        let set_fan = |mode: FanMode| {
+            if perf_result.is_ok() {
+                command::set_perf_and_fan_mode(device, self.wire_perf_mode(), mode)
+            } else {
+                command::set_fan_mode(device, mode)
+            }
+        };
         let fan_result = match self.fan_speed {
-            FanSpeed::Auto => command::set_fan_mode(device, crate::types::FanMode::Auto),
+            FanSpeed::Auto => set_fan(FanMode::Auto),
             // Validate BEFORE switching the mode: a rejected RPM used to leave the fan in
             // Manual at whatever set point the EC last held (possibly 4800) while the UI
             // showed the rejected value.
@@ -499,8 +511,9 @@ impl DeviceState {
                     "manual fan {rpm} RPM is not representable; fan mode left unchanged"
                 ))
             }
-            FanSpeed::Manual(rpm) => command::set_fan_mode(device, crate::types::FanMode::Manual)
-                .and_then(|_| command::set_fan_rpm(device, rpm, false)),
+            FanSpeed::Manual(rpm) => {
+                set_fan(FanMode::Manual).and_then(|_| command::set_fan_rpm(device, rpm, false))
+            }
         };
         if let Err(e) = &fan_result {
             log::warn!("fan command failed: {:?}", e);
@@ -621,17 +634,22 @@ impl DeviceState {
         first
     }
 
-    /// Check that the EC is in this state's perf and fan mode, after [`Self::apply`]. See
-    /// [`command::confirm_perf_mode`] for why an acknowledged write isn't enough.
-    pub fn confirm_modes(&self, device: &impl HidTransport) -> Result<()> {
-        let perf = match self.perf_mode {
+    /// This state's perf mode as the EC names it (the boosts of Custom aside).
+    fn wire_perf_mode(&self) -> crate::types::PerfMode {
+        match self.perf_mode {
             PerfMode::Battery => crate::types::PerfMode::Battery,
             PerfMode::Silent => crate::types::PerfMode::Silent,
             PerfMode::Balanced => crate::types::PerfMode::Balanced,
             PerfMode::Performance => crate::types::PerfMode::Performance,
             PerfMode::Hyperboost => crate::types::PerfMode::Hyperboost,
             PerfMode::Custom(..) => crate::types::PerfMode::Custom,
-        };
+        }
+    }
+
+    /// Check that the EC is in this state's perf and fan mode, after [`Self::apply`]. See
+    /// [`command::confirm_perf_mode`] for why an acknowledged write isn't enough.
+    pub fn confirm_modes(&self, device: &impl HidTransport) -> Result<()> {
+        let perf = self.wire_perf_mode();
         let fan = match self.fan_speed {
             FanSpeed::Auto => FanMode::Auto,
             FanSpeed::Manual(_) => FanMode::Manual,
@@ -2244,6 +2262,103 @@ mod tests {
         };
         let mock = crate::transport::MockTransport::echo();
         assert!(state.apply_perf_fan_logo(&mock).is_ok());
+    }
+
+    /// An EC whose perf-mode reads trail its writes: the two zone reads right after a
+    /// perf write still answer the mode from before it. Returns the transport and the
+    /// mode the EC ends up holding.
+    fn lagging_perf_reads(
+        start: crate::types::PerfMode,
+    ) -> (
+        crate::transport::MockTransport,
+        std::rc::Rc<std::cell::Cell<u8>>,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let held = Rc::new(Cell::new(start as u8));
+        let before = Rc::new(Cell::new(start as u8));
+        let stale_reads = Rc::new(Cell::new(0u8));
+        let (h, b, s) = (held.clone(), before.clone(), stale_reads.clone());
+        let mock = crate::transport::MockTransport::with_responder(move |req| {
+            let args = req.get_args();
+            match req.command() {
+                0x0d02 => {
+                    // A fresh write (not the second zone of the same one) moves "before".
+                    if s.get() == 0 {
+                        b.set(h.get());
+                    }
+                    h.set(args[2]);
+                    s.set(2);
+                    Packet::new(req.command(), args)
+                }
+                0x0d82 => {
+                    let mode = if s.get() > 0 {
+                        s.set(s.get() - 1);
+                        b.get()
+                    } else {
+                        h.get()
+                    };
+                    Packet::new(req.command(), &[0, args[1], mode, FanMode::Auto as u8])
+                }
+                _ => Packet::new(req.command(), args),
+            }
+        });
+        (mock, held)
+    }
+
+    /// 0x029F 2026-11-15: an app rule ended, the tray wrote Balanced and its read-back
+    /// passed, yet the EC held Performance a minute later. The fan write after the perf
+    /// write used to read the perf mode and write that back with the fan mode; a read that
+    /// still answers the old mode put the old mode back, and the confirm read could land
+    /// between the two writes and pass.
+    #[test]
+    fn the_fan_write_never_puts_back_a_perf_mode_read_before_the_perf_write_landed() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Auto,
+            ..DeviceState::default()
+        };
+        let (mock, held) = lagging_perf_reads(crate::types::PerfMode::Performance);
+        state.apply(&mock).unwrap();
+        state.confirm_modes(&mock).unwrap();
+        let perf_writes: Vec<u8> = mock
+            .sent()
+            .into_iter()
+            .filter(|(c, _)| *c == 0x0d02)
+            .map(|(_, a)| a[2])
+            .collect();
+        assert!(
+            perf_writes
+                .iter()
+                .all(|&m| m == crate::types::PerfMode::Balanced as u8),
+            "every perf write must carry the intended mode, got {perf_writes:?}"
+        );
+        assert_eq!(held.get(), crate::types::PerfMode::Balanced as u8);
+    }
+
+    #[test]
+    fn a_manual_fan_write_keeps_the_intended_perf_mode_too() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Manual(3000),
+            ..DeviceState::default()
+        };
+        let (mock, held) = lagging_perf_reads(crate::types::PerfMode::Performance);
+        let _ = state.apply_perf_fan_logo(&mock);
+        let perf_writes: Vec<(u8, u8)> = mock
+            .sent()
+            .into_iter()
+            .filter(|(c, _)| *c == 0x0d02)
+            .map(|(_, a)| (a[2], a[3]))
+            .collect();
+        assert!(
+            perf_writes
+                .iter()
+                .all(|&(m, _)| m == crate::types::PerfMode::Balanced as u8),
+            "got {perf_writes:?}"
+        );
+        assert_eq!(perf_writes.last().unwrap().1, FanMode::Manual as u8);
+        assert_eq!(held.get(), crate::types::PerfMode::Balanced as u8);
     }
 
     /// Pin the HID cost of a `read()`.

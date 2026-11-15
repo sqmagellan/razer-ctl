@@ -262,6 +262,18 @@ pub fn set_fan_mode(device: &impl HidTransport, mode: FanMode) -> Result<()> {
     _set_perf_mode(device, get_perf_mode(device)?.0, mode)
 }
 
+/// Write the perf mode and the fan mode together (one packet per zone), with no read first.
+/// For a caller that knows the perf mode it wants: [`set_fan_mode`] reads the perf mode to
+/// re-send it, and right after a perf write that read can still answer the old mode, which
+/// the fan write then puts back (`0x029F` 2026-11-15).
+pub fn set_perf_and_fan_mode(
+    device: &impl HidTransport,
+    perf_mode: PerfMode,
+    fan_mode: FanMode,
+) -> Result<()> {
+    _set_perf_mode(device, perf_mode, fan_mode)
+}
+
 /// How long [`confirm_perf_mode`] waits before its one re-read.
 const CONFIRM_REREAD_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
