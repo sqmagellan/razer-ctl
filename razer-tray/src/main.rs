@@ -4,6 +4,7 @@ mod config;
 mod menu;
 mod platform;
 mod program;
+mod rule_checks;
 mod state;
 
 use anyhow::Result;
@@ -312,6 +313,8 @@ fn main() -> Result<()> {
     // +15 s -- the second catches an EC that settles late (the G-Helper #5682 lesson: one
     // re-apply at the instant of resume can lose to the firmware's own post-wake writes).
     let mut wake_checks: Vec<(std::time::Instant, String, platform::WakeSource)> = Vec::new();
+    // Read-backs after an app rule starts or ends (see rule_checks.rs).
+    let mut rule_checks = rule_checks::RuleChecks::default();
 
     event_loop.run(move |_, _, control_flow| {
         let now = std::time::Instant::now();
@@ -561,6 +564,7 @@ fn main() -> Result<()> {
                 let matched =
                     state::matching_app_profile(&state.app_profiles, &running, state.ac_power);
                 if matched != state.action.map(|a| a.rule) {
+                    rule_checks.schedule(now);
                     match matched {
                         Some(i) => {
                             let rule = &state.app_profiles[i];
@@ -591,6 +595,10 @@ fn main() -> Result<()> {
                     }
                 }
             } else if state.app_profiles.is_empty() {
+                // The rules were removed while one ran: that ends it too.
+                if state.action.is_some() {
+                    rule_checks.schedule(now);
+                }
                 state.action = None;
             }
 
@@ -644,6 +652,17 @@ fn main() -> Result<()> {
                     // A custom color does not survive standby (the keyboard falls back to
                     // its stored effect), so repaint it whatever the reconcile decided.
                     state.paint_keyboard(&device, true);
+                }
+            }
+
+            // After a rule started or ended: read the device back and, if it is not in the
+            // intended state, write it again. The transition's own confirm read can pass with
+            // the EC ending elsewhere (0x029F 2026-11-15). Regardless of Enforce: the tray
+            // made this change, so holding it for 15 s fights nobody's choice but a write
+            // made in those seconds.
+            if io_ok {
+                if let Some(reason) = rule_checks.take_due(now) {
+                    state.reconcile(&mut tray_icon, &device, reason, true);
                 }
             }
 
