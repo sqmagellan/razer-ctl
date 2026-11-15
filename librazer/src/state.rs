@@ -490,7 +490,7 @@ impl DeviceState {
         // the one just written, not one read back: right after the perf write a read can
         // still answer the old mode, and writing that back undid the perf write after its
         // confirm read had passed (0x029F 2026-11-15, an app rule's revert to Balanced left
-        // Performance). After a failed perf write, keep the mode the EC holds.
+        // Performance). After a failed perf write, keep the mode the EC reports.
         let set_fan = |mode: FanMode| {
             if perf_result.is_ok() {
                 command::set_perf_and_fan_mode(device, self.wire_perf_mode(), mode)
@@ -2344,7 +2344,7 @@ mod tests {
             ..DeviceState::default()
         };
         let (mock, held) = lagging_perf_reads(crate::types::PerfMode::Performance);
-        let _ = state.apply_perf_fan_logo(&mock);
+        state.apply_perf_fan_logo(&mock).unwrap();
         let perf_writes: Vec<(u8, u8)> = mock
             .sent()
             .into_iter()
@@ -2359,6 +2359,34 @@ mod tests {
         );
         assert_eq!(perf_writes.last().unwrap().1, FanMode::Manual as u8);
         assert_eq!(held.get(), crate::types::PerfMode::Balanced as u8);
+    }
+
+    #[test]
+    fn a_custom_fan_write_keeps_custom_after_the_boosts() {
+        let state = DeviceState {
+            perf_mode: PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            fan_speed: FanSpeed::Auto,
+            ..DeviceState::default()
+        };
+        let (mock, held) = lagging_perf_reads(crate::types::PerfMode::Balanced);
+        state.apply_perf_fan_logo(&mock).unwrap();
+        let sent = mock.sent();
+        let perf_writes: Vec<u8> = sent
+            .iter()
+            .filter(|(c, _)| *c == 0x0d02)
+            .map(|(_, a)| a[2])
+            .collect();
+        assert!(
+            perf_writes
+                .iter()
+                .all(|&m| m == crate::types::PerfMode::Custom as u8),
+            "got {perf_writes:?}"
+        );
+        // The boosts go out between the Custom write and the fan write, as before.
+        let boost_at = sent.iter().position(|(c, _)| *c == 0x0d07).unwrap();
+        let last_perf_at = sent.iter().rposition(|(c, _)| *c == 0x0d02).unwrap();
+        assert!(boost_at < last_perf_at, "{sent:04x?}");
+        assert_eq!(held.get(), crate::types::PerfMode::Custom as u8);
     }
 
     /// Pin the HID cost of a `read()`.
