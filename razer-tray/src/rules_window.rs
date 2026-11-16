@@ -243,6 +243,7 @@ mod win {
     use windows::Win32::UI::Controls::{
         InitCommonControlsEx, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
         DialogBoxIndirectParamW, EndDialog, GetDlgItem, GetWindowLongPtrW, GetWindowTextLengthW,
         GetWindowTextW, KillTimer, MessageBoxW, SendMessageW, SetForegroundWindow, SetTimer,
@@ -270,6 +271,7 @@ mod win {
     const BS_AUTOCHECKBOX: u32 = 3;
     const BS_GROUPBOX: u32 = 7;
     const ES_AUTOHSCROLL: u32 = 0x80;
+    const ES_NUMBER: u32 = 0x2000;
     const SS_RIGHT: u32 = 2;
     const CBS_DROPDOWN: u32 = 2;
     const CBS_DROPDOWNLIST: u32 = 3;
@@ -333,6 +335,8 @@ mod win {
     const ID_GPU_LABEL: u32 = 213;
     const ID_GPU: u32 = 214;
     const ID_FANS: u32 = 215;
+    const ID_CPU_LIMIT: u32 = 216;
+    const ID_CPU_MHZ: u32 = 217;
     const ID_PLUGGED: u32 = 220;
     const ID_PRIORITY: u32 = 221;
 
@@ -901,7 +905,7 @@ mod win {
             WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SHELLFONT | DS_MODALFRAME | DS_CENTER,
             0,
             274,
-            236,
+            252,
         );
         let label = |t: &mut Template, text: &str, id: u32, y: i16| {
             t.item(
@@ -963,7 +967,7 @@ mod win {
             0xffff,
             CHILD | BS_GROUPBOX,
             0,
-            (7, 72, 260, 66),
+            (7, 72, 260, 82),
         );
         label(&mut t, "&Power mode:", 0xffff, 85);
         t.item(
@@ -1015,6 +1019,31 @@ mod win {
             0,
             (91, 117, 80, 100),
         );
+        label(&mut t, "CPU speed limit:", 0xffff, 133);
+        t.item(
+            Class::Atom(BUTTON),
+            "Li&mit to",
+            ID_CPU_LIMIT,
+            CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0,
+            (91, 134, 44, 10),
+        )
+        .item(
+            Class::Atom(EDIT),
+            "",
+            ID_CPU_MHZ,
+            CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+            WS_EX_CLIENTEDGE,
+            (137, 133, 34, 12),
+        )
+        .item(
+            Class::Atom(STATIC),
+            "MHz",
+            0xffff,
+            CHILD,
+            0,
+            (175, 135, 20, 8),
+        );
         // When to apply
         t.item(
             Class::Atom(BUTTON),
@@ -1022,7 +1051,7 @@ mod win {
             0xffff,
             CHILD | BS_GROUPBOX,
             0,
-            (7, 143, 260, 62),
+            (7, 159, 260, 62),
         )
         .item(
             Class::Atom(BUTTON),
@@ -1030,16 +1059,16 @@ mod win {
             ID_PLUGGED,
             CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
             0,
-            (91, 156, 120, 10),
+            (91, 172, 120, 10),
         );
-        label(&mut t, "P&riority:", 0xffff, 172);
+        label(&mut t, "P&riority:", 0xffff, 188);
         t.item(
             Class::Atom(EDIT),
             "",
             ID_PRIORITY,
             CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
             WS_EX_CLIENTEDGE,
-            (91, 172, 30, 12),
+            (91, 188, 30, 12),
         )
         .item(
             Class::Atom(STATIC),
@@ -1047,7 +1076,7 @@ mod win {
             0xffff,
             CHILD,
             0,
-            (91, 188, 170, 8),
+            (91, 204, 170, 8),
         )
         .item(
             Class::Atom(BUTTON),
@@ -1055,7 +1084,7 @@ mod win {
             IDOK,
             CHILD | WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON,
             0,
-            (155, 214, 54, 14),
+            (155, 230, 54, 14),
         )
         .item(
             Class::Atom(BUTTON),
@@ -1063,7 +1092,7 @@ mod win {
             IDCANCEL,
             CHILD | WS_TABSTOP,
             0,
-            (213, 214, 54, 14),
+            (213, 230, 54, 14),
         );
         let ctx = EditCtx {
             form,
@@ -1124,6 +1153,17 @@ mod win {
                     0,
                 );
                 set_text(item(hwnd, ID_PRIORITY), &f.priority);
+                send(
+                    item(hwnd, ID_CPU_LIMIT),
+                    BM_SETCHECK,
+                    f.cpu_limit as usize,
+                    0,
+                );
+                set_text(item(hwnd, ID_CPU_MHZ), &f.cpu_mhz);
+                let _ = EnableWindow(
+                    item(hwnd, ID_CPU_MHZ),
+                    windows::Win32::Foundation::BOOL::from(f.cpu_limit),
+                );
                 1
             }
             WM_COMMAND => {
@@ -1135,6 +1175,13 @@ mod win {
                 match (id, code) {
                     (ID_PERF, CBN_SELCHANGE) => {
                         show_boosts(hwnd, custom_picked(combo_pick(item(hwnd, ID_PERF))));
+                    }
+                    (ID_CPU_LIMIT, BN_CLICKED) => {
+                        let on = checked(item(hwnd, ID_CPU_LIMIT));
+                        let _ = EnableWindow(
+                            item(hwnd, ID_CPU_MHZ),
+                            windows::Win32::Foundation::BOOL::from(on),
+                        );
                     }
                     (ID_BROWSE, BN_CLICKED) => {
                         if let Some(exe) = browse(hwnd) {
@@ -1155,6 +1202,8 @@ mod win {
                             fans: c.fans[combo_pick(item(hwnd, ID_FANS)).min(c.fans.len() - 1)].0,
                             only_plugged_in: checked(item(hwnd, ID_PLUGGED)),
                             priority: text_of(item(hwnd, ID_PRIORITY)),
+                            cpu_limit: checked(item(hwnd, ID_CPU_LIMIT)),
+                            cpu_mhz: text_of(item(hwnd, ID_CPU_MHZ)),
                         };
                         match form.to_rule(&c.base, c.fan_max) {
                             Ok(rule) => {

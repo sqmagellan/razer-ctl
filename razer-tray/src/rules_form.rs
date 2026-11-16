@@ -63,6 +63,9 @@ pub struct RuleForm {
     pub fans: Fans,
     pub only_plugged_in: bool,
     pub priority: String,
+    /// "CPU speed limit": `cpu_max_mhz`.
+    pub cpu_limit: bool,
+    pub cpu_mhz: String,
 }
 
 impl RuleForm {
@@ -77,6 +80,8 @@ impl RuleForm {
             fans: Fans::DontChange,
             only_plugged_in: true,
             priority: "0".into(),
+            cpu_limit: false,
+            cpu_mhz: "3600".into(),
         }
     }
 
@@ -104,6 +109,8 @@ impl RuleForm {
             fans,
             only_plugged_in: rule.require_ac == Some(true),
             priority: rule.priority.to_string(),
+            cpu_limit: rule.cpu_max_mhz.is_some(),
+            cpu_mhz: rule.cpu_max_mhz.unwrap_or(3600).to_string(),
         }
     }
 
@@ -119,7 +126,21 @@ impl RuleForm {
             .trim()
             .parse()
             .map_err(|_| "Priority must be a whole number, like 0 or 10.".to_string())?;
+        let cpu_max_mhz = if self.cpu_limit {
+            match self.cpu_mhz.trim().parse::<u32>() {
+                Ok(mhz) if mhz >= librazer::cpu_cap::CPU_CAP_MIN_MHZ => Some(mhz),
+                _ => {
+                    return Err(format!(
+                        "The CPU speed limit must be a number of MHz, {} or more.",
+                        librazer::cpu_cap::CPU_CAP_MIN_MHZ
+                    ))
+                }
+            }
+        } else {
+            None
+        };
         let mut rule = base.clone();
+        rule.cpu_max_mhz = cpu_max_mhz;
         rule.process = app.to_string();
         let name = self.name.trim();
         rule.name = (!name.is_empty()).then(|| name.to_string());
@@ -196,10 +217,13 @@ pub fn row(rule: &AppProfile, running: bool) -> [String; 3] {
         name.push_str(" (running)");
     }
     let apps = rule.all_processes().collect::<Vec<_>>().join(", ");
-    let power = match rule.perf_mode {
+    let mut power = match rule.perf_mode {
         Some(p) => perf_label(p),
         None => "Don't change".into(),
     };
+    if let Some(mhz) = rule.cpu_max_mhz {
+        power.push_str(&format!(", CPU {mhz} MHz"));
+    }
     [name, apps, power]
 }
 
@@ -274,6 +298,7 @@ mod tests {
             logo_mode: Some(librazer::types::LogoMode::Breathing),
             battery_care: Some(librazer::types::BatteryCare::from_percent(80).unwrap()),
             fan_speed: Some(FanSpeed::Manual(3500)),
+            cpu_max_mhz: Some(3600),
             ..Default::default()
         };
         for rule in [longshot(), helldivers, AppProfile::default()] {
@@ -307,6 +332,8 @@ mod tests {
             fans: Fans::Max,
             only_plugged_in: false,
             priority: "-2".into(),
+            cpu_limit: true,
+            cpu_mhz: "3200".into(),
         }
         .to_rule(&longshot(), FAN_MAX)
         .unwrap();
@@ -319,6 +346,7 @@ mod tests {
         assert_eq!(edited.fan_speed, Some(FanSpeed::Manual(FAN_MAX)));
         assert_eq!(edited.require_ac, None);
         assert_eq!(edited.priority, -2);
+        assert_eq!(edited.cpu_max_mhz, Some(3200));
         assert!(edited.enabled);
     }
 
@@ -359,6 +387,13 @@ mod tests {
         form.priority = "high".into();
         assert!(form.to_rule(&AppProfile::default(), FAN_MAX).is_err());
         form.priority = " 5 ".into();
+        form.cpu_limit = true;
+        form.cpu_mhz = "700".into();
+        assert!(
+            form.to_rule(&AppProfile::default(), FAN_MAX).is_err(),
+            "under the 800 MHz floor"
+        );
+        form.cpu_limit = false;
         let rule = form.to_rule(&AppProfile::default(), FAN_MAX).unwrap();
         assert_eq!(
             (rule.priority, rule.perf_mode, rule.require_ac),
@@ -381,6 +416,7 @@ mod tests {
             process: "a.exe".into(),
             processes: vec!["b.exe".into()],
             perf_mode: Some(PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)),
+            cpu_max_mhz: Some(3600),
             ..Default::default()
         };
         assert_eq!(
@@ -388,7 +424,7 @@ mod tests {
             [
                 "a.exe".to_string(),
                 "a.exe, b.exe".into(),
-                "Custom (Boost, High)".into()
+                "Custom (Boost, High), CPU 3600 MHz".into()
             ]
         );
         assert_eq!(
