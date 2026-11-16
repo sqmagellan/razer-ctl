@@ -6,6 +6,7 @@
 //! [`PowerPlan`], so all of it is tested on any host.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,10 @@ pub const CPU_CAP_MIN_MHZ: u32 = 800;
 
 /// The baseline file's name, beside the tray config.
 pub const BASELINE_FILE: &str = "cpu-cap-baseline.json";
+
+/// A failed cap is tried again after `RETRY_FIRST`, doubling up to `RETRY_MAX`.
+const RETRY_FIRST: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// The two "maximum processor frequency" settings (MHz, 0 = no limit), one per processor
 /// efficiency class.
@@ -36,11 +41,16 @@ impl FreqMax {
     }
 }
 
-/// What the settings held before the first cap, and on which power scheme.
+/// What the settings held on one power scheme before the first cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapBaseline {
     pub scheme: String,
     pub before: FreqMax,
+    /// Caps this tray wrote, or was about to write, to `scheme`. A setting holding one of
+    /// them is put back; any other value was set by something else. Missing in files from
+    /// earlier builds, which put `before` back as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<Vec<u32>>,
 }
 
 /// The operating system's side. `scheme` is a power scheme GUID as lowercase text.
@@ -84,30 +94,39 @@ pub fn scheme_bits(scheme: &str) -> Option<u128> {
 /// have changed; it does nothing when the settings already agree.
 #[derive(Debug)]
 pub struct CpuCap {
-    /// The baseline file. It exists whenever `baseline` is set, so a crash can't lose it.
+    /// The baseline file. It holds `baselines` whenever that is not empty, written before
+    /// each cap, so a crash can't lose what to put back.
     path: PathBuf,
-    /// What to put back. Set from before the first write until the values are back.
-    baseline: Option<CapBaseline>,
-    /// The cap last attempted, so a failure is logged once per value and not on every pass.
-    tried: Option<u32>,
-    /// The cap written and read back. None after a failure, or a start with a leftover file.
-    applied: Option<u32>,
+    /// One entry per power scheme this tray capped, until its values are back.
+    baselines: Vec<CapBaseline>,
+    /// The cap written and read back, and on which scheme.
+    applied: Option<(String, u32)>,
+    /// A cap that failed: when to try it again and the delay after that.
+    retry: Option<Retry>,
     /// A failed restore was logged; it is retried without logging each time.
     restore_failed: bool,
+}
+
+#[derive(Debug)]
+struct Retry {
+    scheme: Option<String>,
+    mhz: u32,
+    at: Instant,
+    delay: Duration,
 }
 
 impl CpuCap {
     /// Start from the baseline file at `path`, if a previous run left one.
     pub fn open(path: PathBuf) -> Self {
-        let baseline = load(&path);
-        if let Some(b) = &baseline {
-            log::info!("CPU cap: found settings to put back from an earlier run: {b:?}");
+        let baselines = load(&path);
+        if !baselines.is_empty() {
+            log::info!("CPU cap: found settings to put back from an earlier run: {baselines:?}");
         }
         Self {
             path,
-            baseline,
-            tried: None,
+            baselines,
             applied: None,
+            retry: None,
             restore_failed: false,
         }
     }
@@ -115,80 +134,164 @@ impl CpuCap {
     /// Bring the settings in line with `wanted`. Failures are logged and never returned:
     /// a cap that can't be set must not stop the rest of the rule.
     pub fn reconcile(&mut self, wanted: Option<u32>, power: &impl PowerPlan) {
-        match wanted {
-            Some(mhz) if self.tried != Some(mhz) => {
-                self.tried = Some(mhz);
-                self.applied = None;
-                match self.apply(mhz, power) {
-                    Ok(()) => {
-                        self.applied = Some(mhz);
-                        log::info!("CPU cap: {mhz} MHz");
-                    }
-                    Err(e) => log::warn!("CPU cap: {mhz} MHz not applied: {e:#}"),
+        self.reconcile_at(wanted, power, Instant::now());
+    }
+
+    /// [`Self::reconcile`] at a given time, for the retry schedule.
+    pub fn reconcile_at(&mut self, wanted: Option<u32>, power: &impl PowerPlan, now: Instant) {
+        let Some(mhz) = wanted else {
+            self.applied = None;
+            self.retry = None;
+            self.restore_all(power);
+            return;
+        };
+        // The active scheme is checked every pass: the cap follows a plan switch.
+        let scheme = power.active_scheme();
+        let key = scheme.as_ref().ok().cloned();
+        if let (Some(s), Some((applied_s, applied_mhz))) = (&key, &self.applied) {
+            if s == applied_s && *applied_mhz == mhz {
+                return;
+            }
+        }
+        let first_failure = match &self.retry {
+            Some(r) if r.scheme == key && r.mhz == mhz => {
+                if now < r.at {
+                    return;
+                }
+                false
+            }
+            _ => true,
+        };
+        self.applied = None;
+        let result = scheme.and_then(|s| self.apply(&s, mhz, power).map(|()| s));
+        match result {
+            Ok(s) => {
+                if self.retry.take().is_some() {
+                    log::info!("CPU cap: {mhz} MHz applied after earlier failures");
+                } else {
+                    log::info!("CPU cap: {mhz} MHz");
+                }
+                self.applied = Some((s, mhz));
+            }
+            Err(e) => {
+                let delay = match &self.retry {
+                    Some(r) if !first_failure => (r.delay * 2).min(RETRY_MAX),
+                    _ => RETRY_FIRST,
+                };
+                if first_failure {
+                    log::warn!("CPU cap: {mhz} MHz not applied, will retry: {e:#}");
+                }
+                self.retry = Some(Retry {
+                    scheme: key,
+                    mhz,
+                    at: now + delay,
+                    delay,
+                });
+            }
+        }
+    }
+
+    /// Before each write the file names the cap about to be written, next to what the
+    /// scheme held before the first one. Later caps keep that first baseline.
+    fn apply(&mut self, scheme: &str, mhz: u32, power: &impl PowerPlan) -> Result<()> {
+        let i = match self.baselines.iter().position(|b| b.scheme == scheme) {
+            Some(i) => i,
+            None => {
+                let before = power.read(scheme)?;
+                self.baselines.push(CapBaseline {
+                    scheme: scheme.to_string(),
+                    before,
+                    caps: Some(Vec::new()),
+                });
+                self.baselines.len() - 1
+            }
+        };
+        let fresh = self.baselines[i].caps.as_ref().is_some_and(Vec::is_empty);
+        if let Some(caps) = &mut self.baselines[i].caps {
+            if !caps.contains(&mhz) {
+                caps.push(mhz);
+            }
+        }
+        if let Err(e) = save(&self.path, &self.baselines) {
+            if fresh {
+                // Nothing was written to this scheme, so nothing needs putting back.
+                self.baselines.remove(i);
+            }
+            return Err(e);
+        }
+        write_checked(power, scheme, FreqMax::both(mhz))?;
+        // Written and read back: only this cap can be ours now. A failed save here keeps
+        // the longer list, which still restores correctly.
+        if let Some(caps) = &mut self.baselines[i].caps {
+            caps.retain(|c| *c == mhz);
+            let _ = save(&self.path, &self.baselines);
+        }
+        Ok(())
+    }
+
+    fn restore_all(&mut self, power: &impl PowerPlan) {
+        if self.baselines.is_empty() {
+            return;
+        }
+        let mut errors = Vec::new();
+        let mut done = Vec::new();
+        let mut left = Vec::new();
+        for b in &self.baselines {
+            match restore_one(b, power) {
+                Ok(target) => done.push((b.scheme.clone(), target)),
+                Err(e) => {
+                    errors.push(format!("{}: {e:#}", b.scheme));
+                    left.push(b.clone());
                 }
             }
-            Some(_) => {}
-            None => {
-                self.tried = None;
-                self.restore(power);
-            }
         }
-    }
-
-    /// The baseline goes to disk before the first write, and later caps keep it, so what
-    /// comes back is always what the settings held before any rule touched them.
-    fn apply(&mut self, mhz: u32, power: &impl PowerPlan) -> Result<()> {
-        let scheme = match &self.baseline {
-            Some(b) => b.scheme.clone(),
-            None => {
-                let scheme = power.active_scheme()?;
-                let before = power.read(&scheme)?;
-                let baseline = CapBaseline {
-                    scheme: scheme.clone(),
-                    before,
-                };
-                save(&self.path, &baseline)?;
-                self.baseline = Some(baseline);
-                scheme
-            }
-        };
-        write_checked(power, &scheme, FreqMax::both(mhz))
-    }
-
-    fn restore(&mut self, power: &impl PowerPlan) {
-        let Some(baseline) = &self.baseline else {
-            return;
-        };
-        let now = power.read(&baseline.scheme).ok();
-        let target = match (self.applied, now) {
-            (Some(cap), Some(now)) => keep_outside_changes(baseline.before, now, cap),
-            _ => baseline.before,
-        };
-        let result = if now == Some(target) {
+        // A file left behind would be replayed over later changes at the next start, so a
+        // failed save or delete keeps every entry and is retried like a failed write. A
+        // scheme already back reads as its target then, so the retry doesn't write it.
+        let file = if left.is_empty() {
+            delete(&self.path)
+        } else if done.is_empty() {
             Ok(())
         } else {
-            write_checked(power, &baseline.scheme, target)
+            save(&self.path, &left)
         };
-        // A file left behind would be replayed over later changes at the next start, so a
-        // failed delete is retried like a failed write.
-        if let Err(e) = result.and_then(|()| delete(&self.path)) {
-            if !self.restore_failed {
-                self.restore_failed = true;
-                log::warn!("CPU cap: could not finish putting back {target:?}, will retry: {e:#}");
+        match file {
+            Ok(()) => {
+                for (scheme, target) in &done {
+                    log::info!("CPU cap: off on {scheme}, settings are {target:?}");
+                }
+                self.baselines = left;
             }
-            return;
+            Err(e) => errors.push(format!("{e:#}")),
         }
-        log::info!("CPU cap: off, settings are {target:?}");
-        self.baseline = None;
-        self.applied = None;
-        self.restore_failed = false;
+        if errors.is_empty() {
+            self.restore_failed = false;
+        } else if !self.restore_failed {
+            self.restore_failed = true;
+            log::warn!("CPU cap: could not finish putting settings back, will retry: {errors:?}");
+        }
     }
 }
 
-/// `before`, except where `now` no longer holds `cap`: something else changed that setting
-/// while the rule ran (the user, or another tool), and its value stands.
-fn keep_outside_changes(before: FreqMax, now: FreqMax, cap: u32) -> FreqMax {
-    let pick = |before, now| if now == cap { before } else { now };
+/// Put one scheme back. Values this tray may have left (`caps`) go back to `before`;
+/// any other value was set by something else while the rule ran, and it stands. A scheme
+/// that can't be read is left alone and retried, never written blind.
+fn restore_one(b: &CapBaseline, power: &impl PowerPlan) -> Result<FreqMax> {
+    let now = power.read(&b.scheme)?;
+    let target = match &b.caps {
+        Some(caps) => keep_outside_changes(b.before, now, caps),
+        // A file from before `caps` was recorded: put the baseline back as it was.
+        None => b.before,
+    };
+    if now != target {
+        write_checked(power, &b.scheme, target)?;
+    }
+    Ok(target)
+}
+
+/// `before`, except where `now` holds none of our `caps`.
+fn keep_outside_changes(before: FreqMax, now: FreqMax, caps: &[u32]) -> FreqMax {
+    let pick = |before, now| if caps.contains(&now) { before } else { now };
     FreqMax {
         class0: pick(before.class0, now.class0),
         class1: pick(before.class1, now.class1),
@@ -202,23 +305,35 @@ fn write_checked(power: &impl PowerPlan, scheme: &str, values: FreqMax) -> Resul
     Ok(())
 }
 
-/// A baseline left by an earlier run. An unusable file can't be acted on, so it is dropped.
-fn load(path: &Path) -> Option<CapBaseline> {
+/// The file holds a list; a file from an earlier build holds one entry without `caps`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BaselineFile {
+    Many(Vec<CapBaseline>),
+    One(CapBaseline),
+}
+
+/// Baselines left by an earlier run. An unusable file can't be acted on, so it is dropped.
+fn load(path: &Path) -> Vec<CapBaseline> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
             log::warn!("CPU cap: could not read {}: {e}", path.display());
-            return None;
+            return Vec::new();
         }
     };
-    let parsed = serde_json::from_str::<CapBaseline>(&text);
+    let parsed = match serde_json::from_str::<BaselineFile>(&text) {
+        Ok(BaselineFile::Many(v)) => Some(v),
+        Ok(BaselineFile::One(b)) => Some(vec![b]),
+        Err(_) => None,
+    };
     match parsed {
-        Ok(b) if scheme_bits(&b.scheme).is_some() => Some(b),
+        Some(v) if !v.is_empty() && v.iter().all(|b| scheme_bits(&b.scheme).is_some()) => v,
         _ => {
             log::warn!("CPU cap: deleting unusable {}", path.display());
             let _ = std::fs::remove_file(path);
-            None
+            Vec::new()
         }
     }
 }
@@ -233,7 +348,7 @@ fn delete(path: &Path) -> Result<()> {
 }
 
 /// Written like the config: a sibling temp file, flushed, then renamed over.
-fn save(path: &Path, baseline: &CapBaseline) -> Result<()> {
+fn save(path: &Path, baselines: &[CapBaseline]) -> Result<()> {
     use std::io::Write;
 
     if let Some(dir) = path.parent() {
@@ -242,7 +357,7 @@ fn save(path: &Path, baseline: &CapBaseline) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     let mut f =
         std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    f.write_all(serde_json::to_string(baseline)?.as_bytes())?;
+    f.write_all(serde_json::to_string(baselines)?.as_bytes())?;
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
@@ -337,10 +452,16 @@ mod tests {
         }
     }
 
+    fn saved(path: &Path) -> Vec<CapBaseline> {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     fn leftover(path: &Path, before: FreqMax) {
+        // The single-entry form an earlier build wrote, without `caps`.
         let b = CapBaseline {
             scheme: BALANCED.to_string(),
             before,
+            caps: None,
         };
         std::fs::write(path, serde_json::to_string(&b).unwrap()).unwrap();
     }
@@ -414,8 +535,7 @@ mod tests {
         assert_eq!(plan.now(BALANCED), FreqMax::both(3600));
         assert_eq!(*plan.file_at_write.borrow(), vec![true]);
         // The file holds the values from before the cap.
-        let saved: CapBaseline =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved = &saved(&path)[0];
         assert_eq!(saved.before, FreqMax::both(0));
         assert_eq!(saved.scheme, BALANCED);
     }
@@ -459,8 +579,7 @@ mod tests {
         cap.reconcile(Some(3600), &plan);
         cap.reconcile(Some(4000), &plan);
         assert_eq!(plan.now(BALANCED), FreqMax::both(4000));
-        let saved: CapBaseline =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved = &saved(&path)[0];
         assert_eq!(saved.before, FreqMax::both(0));
         cap.reconcile(None, &plan);
         assert_eq!(plan.now(BALANCED), FreqMax::both(0));
@@ -525,8 +644,7 @@ mod tests {
         let mut cap = CpuCap::open(path.clone());
         cap.reconcile(Some(3800), &plan);
         assert_eq!(plan.now(BALANCED), FreqMax::both(3800));
-        let saved: CapBaseline =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved = &saved(&path)[0];
         assert_eq!(saved.before, FreqMax::both(0));
         cap.reconcile(None, &plan);
         assert_eq!(plan.now(BALANCED), FreqMax::both(0));
@@ -639,11 +757,11 @@ mod tests {
         cap.reconcile(None, &plan);
         assert_eq!(plan.now(BALANCED), FreqMax::both(0));
         assert_eq!(plan.write_count(), 2);
-        assert!(cap.baseline.is_some());
+        assert!(!cap.baselines.is_empty());
         std::fs::remove_dir(&path).unwrap();
         cap.reconcile(None, &plan);
         assert_eq!(plan.write_count(), 2);
-        assert!(cap.baseline.is_none());
+        assert!(cap.baselines.is_empty());
     }
 
     #[test]
@@ -716,5 +834,123 @@ mod tests {
             );
             assert!(!path.exists());
         }
+    }
+
+    /// Crash after another tool moved a capped setting: the next start keeps that change.
+    #[test]
+    fn a_crash_restore_keeps_a_change_made_by_something_else() {
+        let path = scratch("crash-outside");
+        let plan = FakePlan::new(&path, FreqMax::both(0));
+        let mut cap = CpuCap::open(path.clone());
+        cap.reconcile(Some(3600), &plan);
+        plan.set(
+            BALANCED,
+            FreqMax {
+                class0: 4200,
+                class1: 3600,
+            },
+        );
+        drop(cap); // the crash: nothing is put back
+        let mut cap = CpuCap::open(path.clone());
+        cap.reconcile(None, &plan);
+        assert_eq!(
+            plan.now(BALANCED),
+            FreqMax {
+                class0: 4200,
+                class1: 0,
+            }
+        );
+        assert!(!path.exists());
+    }
+
+    /// Crash in the middle of a switch from 3600 to 4000: either value is ours.
+    #[test]
+    fn a_crash_during_a_switch_still_restores_either_cap() {
+        for left in [3600, 4000] {
+            let path = scratch("crash-switch");
+            let plan = FakePlan::new(&path, FreqMax::both(0));
+            let mut cap = CpuCap::open(path.clone());
+            cap.reconcile(Some(3600), &plan);
+            *plan.fail_write.borrow_mut() = true; // the 4000 write never lands
+            cap.reconcile(Some(4000), &plan);
+            *plan.fail_write.borrow_mut() = false;
+            plan.set(BALANCED, FreqMax::both(left));
+            drop(cap);
+            let mut cap = CpuCap::open(path.clone());
+            cap.reconcile(None, &plan);
+            assert_eq!(plan.now(BALANCED), FreqMax::both(0), "left {left}");
+        }
+    }
+
+    #[test]
+    fn a_restore_that_cannot_read_waits_instead_of_writing_blind() {
+        let path = scratch("restore-noread");
+        let plan = FakePlan::new(&path, FreqMax::both(0));
+        let mut cap = CpuCap::open(path.clone());
+        cap.reconcile(Some(3600), &plan);
+        let writes = plan.write_count();
+        *plan.fail_read.borrow_mut() = true;
+        cap.reconcile(None, &plan);
+        assert_eq!(plan.write_count(), writes);
+        assert!(path.exists());
+        *plan.fail_read.borrow_mut() = false;
+        cap.reconcile(None, &plan);
+        assert_eq!(plan.now(BALANCED), FreqMax::both(0));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_plan_switch_during_the_rule_caps_the_new_plan_and_restores_both() {
+        let path = scratch("plan-switch");
+        let plan = FakePlan::new(&path, FreqMax::both(0));
+        plan.set(OTHER, FreqMax::both(4500));
+        let mut cap = CpuCap::open(path.clone());
+        cap.reconcile(Some(3600), &plan);
+        *plan.active.borrow_mut() = OTHER.to_string();
+        cap.reconcile(Some(3600), &plan);
+        assert_eq!(plan.now(OTHER), FreqMax::both(3600));
+        assert_eq!(plan.now(BALANCED), FreqMax::both(3600));
+        // A crash now still knows both plans.
+        drop(cap);
+        let mut cap = CpuCap::open(path.clone());
+        cap.reconcile(None, &plan);
+        assert_eq!(plan.now(BALANCED), FreqMax::both(0));
+        assert_eq!(plan.now(OTHER), FreqMax::both(4500));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_failed_cap_is_retried_with_a_growing_delay() {
+        use std::time::{Duration, Instant};
+        let path = scratch("retry");
+        let plan = FakePlan::new(&path, FreqMax::both(0));
+        *plan.fail_write.borrow_mut() = true;
+        let mut cap = CpuCap::open(path.clone());
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut writes_at = Vec::new();
+        for s in 0..=40 {
+            let before = plan.write_count();
+            cap.reconcile_at(Some(3600), &plan, at(s));
+            if plan.write_count() > before {
+                writes_at.push(s);
+            }
+        }
+        // Tried at once, then 5 s, 10 s and 20 s later: not every pass.
+        assert_eq!(writes_at, vec![0, 5, 15, 35]);
+        // The delay stops growing at 5 minutes.
+        for s in (41..4000).step_by(5) {
+            cap.reconcile_at(Some(3600), &plan, at(s));
+        }
+        let last = plan.write_count();
+        cap.reconcile_at(Some(3600), &plan, at(4000 + RETRY_MAX.as_secs()));
+        assert_eq!(plan.write_count(), last + 1);
+        // Once it works, it stays applied.
+        *plan.fail_write.borrow_mut() = false;
+        cap.reconcile_at(Some(3600), &plan, at(5000 + RETRY_MAX.as_secs()));
+        assert_eq!(plan.now(BALANCED), FreqMax::both(3600));
+        let ok = plan.write_count();
+        cap.reconcile_at(Some(3600), &plan, at(6000 + RETRY_MAX.as_secs()));
+        assert_eq!(plan.write_count(), ok);
     }
 }
