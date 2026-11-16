@@ -21,10 +21,10 @@ Thanks to Finesssee for documenting and measuring them.
 - **CPU speed cap in game rules.** `cpu_max_mhz` (800 or more) caps the CPU on AC while the rule
   runs, through `PROCFREQMAX` and `PROCFREQMAX1` on the active Windows power plan; a plan switch
   gets the cap too. Before each write the old values and the cap go to a file. The old values come
-  back when the rule ends, on unplug and on Quit, or at the next start after a crash. A value
-  something else changed meanwhile is left alone. A failed write is retried after 5 s, doubling up
-  to 5 minutes. The rules window has a "CPU speed limit" row. A Helldivers 2 rule held 3600 MHz
-  for 28 minutes and put the settings back when the game closed.
+  back when the rule ends, on unplug and on Quit, or at the next start after a crash. A setting
+  changed meanwhile to a value other than the cap is left alone. A failed write is retried after
+  5 s, doubling up to 5 minutes. The rules window has a "CPU speed limit" row. A Helldivers 2 rule
+  held 3600 MHz for 28 minutes and put the settings back when the game closed.
 - **"What's keeping the GPU awake?"** lists the apps with dedicated memory on the NVIDIA GPU, from
   the GPU Process Memory performance counters, matched to the dGPU by its adapter LUID. Neither
   read wakes the GPU. With no other display adapter (dGPU-only mode) it says the GPU drives the
