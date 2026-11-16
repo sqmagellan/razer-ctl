@@ -49,6 +49,7 @@ pub enum Verdict {
     Failure,
     NotSupported,
     Mismatch,
+    Timeout,
 }
 
 impl From<Result<(), ResponseError>> for Verdict {
@@ -59,6 +60,7 @@ impl From<Result<(), ResponseError>> for Verdict {
             Err(ResponseError::Failure) => Verdict::Failure,
             Err(ResponseError::NotSupported) => Verdict::NotSupported,
             Err(ResponseError::Mismatch) => Verdict::Mismatch,
+            Err(ResponseError::Timeout) => Verdict::Timeout,
         }
     }
 }

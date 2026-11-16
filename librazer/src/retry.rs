@@ -33,7 +33,10 @@ pub fn after_rejection(err: ResponseError, retry_failure: bool, attempt: usize) 
         Decision::Fail
     } else if attempt + 1 >= MAX_ATTEMPTS {
         Decision::Exhausted
-    } else if err.is_busy() {
+    } else if err.is_busy() || err == ResponseError::Timeout {
+        // A timeout is the EC saying it ran out of time, not that the bus is out of step:
+        // try again soon, like Busy. A single-shot send never gets here (see above): the
+        // command may have run.
         Decision::RetryAfter(BUSY_BACKOFF)
     } else {
         Decision::RetryAfter(RETRY_BACKOFF)
@@ -43,6 +46,22 @@ pub fn after_rejection(err: ResponseError, retry_failure: bool, attempt: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ec_timeout_is_retried_quickly_but_never_re_sent_by_a_single_shot() {
+        assert_eq!(
+            after_rejection(ResponseError::Timeout, true, 0),
+            Decision::RetryAfter(BUSY_BACKOFF)
+        );
+        assert_eq!(
+            after_rejection(ResponseError::Timeout, true, MAX_ATTEMPTS - 1),
+            Decision::Exhausted
+        );
+        assert_eq!(
+            after_rejection(ResponseError::Timeout, false, 0),
+            Decision::Fail
+        );
+    }
 
     #[test]
     fn not_supported_is_final_on_the_first_answer() {

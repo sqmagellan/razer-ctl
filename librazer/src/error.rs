@@ -169,7 +169,11 @@ pub fn is_retryable(err: &anyhow::Error) -> bool {
             || cause.downcast_ref::<PerfNotApplied>().is_some()
             || matches!(
                 cause.downcast_ref::<crate::packet::ResponseError>(),
-                Some(crate::packet::ResponseError::Busy | crate::packet::ResponseError::Mismatch)
+                Some(
+                    crate::packet::ResponseError::Busy
+                        | crate::packet::ResponseError::Mismatch
+                        | crate::packet::ResponseError::Timeout
+                )
             )
     })
 }

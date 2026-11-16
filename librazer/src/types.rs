@@ -266,7 +266,9 @@ impl TryFrom<u8> for FanMode {
 
     fn try_from(fan_mode: u8) -> Result<Self, Self::Error> {
         match fan_mode {
-            0 => Ok(Self::Auto),
+            // 2 is Synapse 4's "ForceAuto" (Finesssee/razer-ctl, MIT): the firmware's own
+            // curve, like Auto. Read only: we never send 2.
+            0 | 2 => Ok(Self::Auto),
             1 => Ok(Self::Manual),
             _ => bail!("Failed to convert {} to FanMode", fan_mode),
         }
@@ -727,6 +729,13 @@ mod tests {
         assert_eq!(seen.recommended_watts(), Some(330));
         assert_eq!(seen.to_string(), "main 330 W (code 0x12)");
         assert_eq!(PowerSource::from_args(&[0x12]).recommended_watts(), None);
+    }
+
+    /// Fan mode 2 is Synapse's "ForceAuto" (Finesssee/razer-ctl); read as Auto, never sent.
+    #[test]
+    fn fan_mode_2_reads_as_auto() {
+        assert_eq!(FanMode::try_from(2).unwrap(), FanMode::Auto);
+        assert!(FanMode::try_from(3).is_err());
     }
 
     #[test]

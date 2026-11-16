@@ -261,7 +261,7 @@ impl Model {
                     Verdict::NotSupported => Support::NotSupported,
                     Verdict::Failure => Support::Failure,
                     Verdict::Mismatch => Support::Mismatch,
-                    Verdict::Busy => Support::Unknown,
+                    Verdict::Busy | Verdict::Timeout => Support::Unknown,
                 },
                 _ => Support::Unknown,
             };

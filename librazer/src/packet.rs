@@ -22,6 +22,7 @@ enum CommandStatus {
     Busy = 0x01,
     Successful = 0x02,
     Failure = 0x03,
+    Timeout = 0x04,
     NotSupported = 0x05,
 }
 
@@ -37,6 +38,9 @@ pub enum ResponseError {
     Failure,
     /// Status 0x05 -- command unsupported on this device.
     NotSupported,
+    /// Status 0x04 -- the EC timed out on the command (Synapse 4's status table, as
+    /// Finesssee/razer-ctl lists it). Retried quickly, like Busy, by a normal send.
+    Timeout,
     /// Header mismatch, or a status byte outside the documented set. The response
     /// may belong to a different transaction, so the bus may be out of step.
     Mismatch,
@@ -56,6 +60,7 @@ impl std::fmt::Display for ResponseError {
             ResponseError::Failure => write!(f, "Command failed (status 0x03)"),
             ResponseError::NotSupported => write!(f, "Command not supported (status 0x05)"),
             ResponseError::Mismatch => write!(f, "Response does not match the report"),
+            ResponseError::Timeout => write!(f, "Device timed out (status 0x04)"),
         }
     }
 }
@@ -254,6 +259,7 @@ impl Packet {
             s if s == CommandStatus::Busy as u8 => Err(ResponseError::Busy),
             s if s == CommandStatus::Failure as u8 => Err(ResponseError::Failure),
             s if s == CommandStatus::NotSupported as u8 => Err(ResponseError::NotSupported),
+            s if s == CommandStatus::Timeout as u8 => Err(ResponseError::Timeout),
             _ => Err(ResponseError::Mismatch),
         }
     }
@@ -566,6 +572,17 @@ mod tests {
         assert!(ResponseError::Busy.is_busy());
         assert!(!ResponseError::Failure.is_busy());
         assert!(!ResponseError::NotSupported.is_busy());
+    }
+
+    /// Status 0x04 is the EC's own timeout (Synapse's status table, via
+    /// Finesssee/razer-ctl): a retryable answer of its own, not a stray reply.
+    #[test]
+    fn classify_response_names_the_ec_timeout() {
+        let req = Packet::new(0x0d82, &[0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(
+            response_to(&req, 0x04).classify_response(&req),
+            Err(ResponseError::Timeout)
+        );
     }
 
     #[test]
