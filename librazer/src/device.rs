@@ -1,6 +1,7 @@
 use crate::capture::{Exchange, Outcome, Recorder, Recording};
 use crate::descriptor::{Descriptor, SUPPORTED};
 use crate::error::{DetectError, TransportError};
+use crate::hid_lock::{self, HidLock};
 use crate::packet::{Packet, ResponseError};
 use crate::retry::{self, Decision, MAX_ATTEMPTS, RETRY_BACKOFF};
 use crate::transport::HidTransport;
@@ -16,6 +17,8 @@ pub struct Device {
     unsupported: Option<UnsupportedLog>,
     /// Set by [`Device::recording`]: every attempt is logged for `razer-cli probe`.
     recorder: Option<Recorder>,
+    /// Held for each request and its reply; see [`crate::hid_lock`].
+    hid_lock: Option<HidLock>,
 }
 
 // Read the model id and clip to conform with https://mysupport.razer.com/app/answers/detail/a_id/5481
@@ -128,6 +131,7 @@ impl Device {
                     info: descriptor.clone(),
                     unsupported: None,
                     recorder: None,
+                    hid_lock: HidLock::open(&hid_lock::default_path()),
                 });
             }
         }
@@ -182,6 +186,10 @@ impl Device {
             let last = attempt == MAX_ATTEMPTS - 1;
             thread::sleep(time::Duration::from_micros(1000));
 
+            // The request and its reply under the cross-process lock, released before any
+            // backoff below so a retry never makes another process wait.
+            let held = self.hid_lock.as_ref().and_then(|l| l.hold(hid_lock::WAIT));
+
             // An OS-level failure (the HID stack busy right after resume, a handle racing
             // another process) used to abort on the first attempt and skip the retry loop
             // entirely, and it surfaced as an unclassified error (exit 1) although it is
@@ -196,6 +204,7 @@ impl Device {
                         "send_feature_report: {e}"
                     ))));
                 }
+                drop(held);
                 thread::sleep(RETRY_BACKOFF);
                 continue;
             }
@@ -216,6 +225,7 @@ impl Device {
                             "get_feature_report: {e}"
                         ))));
                     }
+                    drop(held);
                     thread::sleep(RETRY_BACKOFF);
                     continue;
                 }
@@ -231,9 +241,12 @@ impl Device {
                         response_buf.len()
                     ))));
                 }
+                drop(held);
                 thread::sleep(RETRY_BACKOFF);
                 continue;
             }
+
+            drop(held);
 
             // skip report id byte
             let response = <&[u8] as TryInto<Packet>>::try_into(&response_buf[1..])?;

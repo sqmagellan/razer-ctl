@@ -11,6 +11,8 @@ pub mod device;
 
 pub mod error;
 pub mod feature;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub mod hid_lock;
 pub mod keyboard;
 pub mod matching;
 pub mod observe;
