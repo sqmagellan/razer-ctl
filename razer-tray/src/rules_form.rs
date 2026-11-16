@@ -88,7 +88,8 @@ impl RuleForm {
             Some(p) => (Some(kind_of(p)), CpuBoost::Boost, GpuBoost::High),
         };
         let fans = match (rule.fan_speed, rule.max_fan) {
-            (_, Some(true)) => Fans::AsInFile,
+            // Max Fan, on or off, is a setting the dialog doesn't show: keep it.
+            (_, Some(_)) => Fans::AsInFile,
             (None, _) => Fans::DontChange,
             (Some(FanSpeed::Auto), _) => Fans::Auto,
             (Some(FanSpeed::Manual(rpm)), _) if rpm == fan_max => Fans::Max,
@@ -326,6 +327,11 @@ mod tests {
         let mut rule = longshot();
         rule.require_ac = Some(false);
         rule.max_fan = Some(true);
+        let mut off = longshot();
+        off.max_fan = Some(false);
+        let form = RuleForm::from_rule(&off, FAN_MAX);
+        assert_eq!(form.fans, Fans::AsInFile);
+        assert_eq!(form.to_rule(&off, FAN_MAX).unwrap(), off);
         rule.perf_mode = Some(PerfMode::Custom(CpuBoost::Low, GpuBoost::Low));
         rule.enabled = false;
         let form = RuleForm::from_rule(&rule, FAN_MAX);

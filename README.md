@@ -65,7 +65,7 @@ history and the measurements behind it; `README.upstream.md` covers the project 
   Fan off the fans settle at the larger of it and `fan_setpoint_rpm`. `ec_cpu_temp_c` and
   `ec_gpu_temp_c` are the EC's two temperatures; `charger`, `charger_watts` and `charger_code`
   are the power source it reports, and `charger_recommended_watts` the charger the laptop asks
-  for. `auto info` says when the two differ.
+  for. `auto info` says when a charger it knows differs from that.
 - **Model reports**: `razer-cli probe --out probe.json` reads every setting and saves what the EC
   answered, to attach to a device-support issue. It only reads. `probe --writes` (tray closed) also
   tests each write, then puts the settings back and checks them.

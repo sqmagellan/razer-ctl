@@ -35,6 +35,8 @@ pub struct Shared {
     pub fan_max: u16,
     /// The open window, if any (an `HWND` as an integer).
     pub window: Option<isize>,
+    /// A window is being opened: its thread runs, its `HWND` isn't known yet.
+    pub opening: bool,
 }
 
 impl Shared {
@@ -435,8 +437,11 @@ mod win {
         send(hwnd, CB_GETCURSEL, 0, 0).max(0) as usize
     }
 
-    unsafe fn ctx<T>(hwnd: HWND) -> Option<&'static mut T> {
-        (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut T).as_mut()
+    /// The dialog's context, as a shared reference only: the dialog procedures are re-entered
+    /// (a control sends a notification while a handler runs), so state that changes lives in
+    /// a `RefCell` and is borrowed briefly, never across a call that runs a message loop.
+    unsafe fn ctx<T>(hwnd: HWND) -> Option<&'static T> {
+        (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const T).as_ref()
     }
 
     fn modal(template: &Template, owner: HWND, proc_: DlgProc, param: isize) -> isize {
@@ -461,25 +466,37 @@ mod win {
 
     struct ListCtx {
         link: Link,
+        state: std::cell::RefCell<ListState>,
+    }
+
+    #[derive(Default)]
+    struct ListState {
         generation: u64,
         rules: Vec<AppProfile>,
         running: Option<usize>,
         status: String,
         fan_max: u16,
-        /// Set while the list is being filled, so its check box events are not changes.
-        filling: bool,
     }
 
     pub fn open(link: Link) {
-        if let Some(hwnd) = link.shared().window {
-            unsafe {
-                let _ = SetForegroundWindow(HWND(hwnd));
+        {
+            let mut shared = link.shared();
+            if let Some(hwnd) = shared.window {
+                unsafe {
+                    let _ = SetForegroundWindow(HWND(hwnd));
+                }
+                return;
             }
-            return;
+            if shared.opening {
+                return;
+            }
+            shared.opening = true;
         }
+        let thread_link = link.clone();
         let spawned = std::thread::Builder::new()
             .name("rules-window".into())
             .spawn(move || {
+                let link = thread_link;
                 unsafe {
                     let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
                         dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -563,20 +580,20 @@ mod win {
                 );
                 let ctx = Box::into_raw(Box::new(ListCtx {
                     link: link.clone(),
-                    generation: 0,
-                    rules: Vec::new(),
-                    running: None,
-                    status: String::new(),
-                    fan_max: 0,
-                    filling: false,
+                    state: Default::default(),
                 }));
                 modal(&t, HWND(0), list_proc, ctx as isize);
-                link.shared().window = None;
+                {
+                    let mut shared = link.shared();
+                    shared.window = None;
+                    shared.opening = false;
+                }
                 // SAFETY: the dialog is closed; nothing else holds the pointer.
                 drop(unsafe { Box::from_raw(ctx) });
             });
         if let Err(e) = spawned {
             log::warn!("could not open the rules window: {e}");
+            link.shared().opening = false;
         }
     }
 
@@ -587,7 +604,11 @@ mod win {
                 let Some(c) = ctx::<ListCtx>(hwnd) else {
                     return 0;
                 };
-                c.link.shared().window = Some(hwnd.0);
+                {
+                    let mut shared = c.link.shared();
+                    shared.window = Some(hwnd.0);
+                    shared.opening = false;
+                }
                 let list = item(hwnd, ID_LIST);
                 let ex = LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
                 send(list, LVM_SETEXTENDEDLISTVIEWSTYLE, ex as usize, ex);
@@ -631,23 +652,31 @@ mod win {
                 if hdr.id_from != ID_LIST as usize {
                     return 0;
                 }
-                if hdr.code == LVN_ITEMCHANGED && !c.filling {
+                if hdr.code == LVN_ITEMCHANGED {
                     let nm = &*(lp.0 as *const NmListView);
                     let was = (nm.old_state & LVIS_STATEIMAGEMASK) >> 12;
                     let now = (nm.new_state & LVIS_STATEIMAGEMASK) >> 12;
-                    if was != 0 && now != 0 && was != now {
-                        let i = nm.item as usize;
-                        if let Some(rule) = c.rules.get(i) {
-                            let mut rules = c.rules.clone();
-                            rules[i].enabled = now == 2;
-                            log::info!(
-                                "rules window: '{}' {}",
-                                rule.label(),
-                                if now == 2 { "enabled" } else { "disabled" }
-                            );
-                            submit(hwnd, c, rules);
-                        }
+                    if was == 0 || now == 0 || was == now {
+                        return 0;
                     }
+                    // Borrowed means `refresh` is filling the list: not the user's click.
+                    let Ok(st) = c.state.try_borrow() else {
+                        return 0;
+                    };
+                    let i = nm.item as usize;
+                    let Some(rule) = st.rules.get(i) else {
+                        return 0;
+                    };
+                    let mut rules = st.rules.clone();
+                    rules[i].enabled = now == 2;
+                    log::info!(
+                        "rules window: '{}' {}",
+                        rule.label(),
+                        if now == 2 { "enabled" } else { "disabled" }
+                    );
+                    let generation = st.generation;
+                    drop(st);
+                    submit(hwnd, c, generation, rules);
                 } else if hdr.code == NM_DBLCLK {
                     edit_selected(hwnd, c);
                 }
@@ -664,25 +693,33 @@ mod win {
                 }
                 match id {
                     ID_ADD => {
-                        if let Some(rule) = edit_rule(hwnd, None, c.fan_max) {
-                            let mut rules = c.rules.clone();
+                        let Some((generation, rules, fan_max)) = snapshot(c) else {
+                            return 1;
+                        };
+                        if let Some(rule) = while_modal(hwnd, || edit_rule(hwnd, None, fan_max)) {
+                            let mut rules = rules;
                             log::info!("rules window: added '{}'", rule.label());
                             rules.push(rule);
-                            submit(hwnd, c, rules);
+                            submit(hwnd, c, generation, rules);
                         }
                     }
                     ID_EDIT => edit_selected(hwnd, c),
                     ID_DELETE => {
-                        if let Some(i) = selected(hwnd) {
-                            if let Some(rule) = c.rules.get(i) {
-                                let ask = format!("Delete the rule \"{}\"?", rule.label());
-                                if message(hwnd, &ask, MB_YESNO | MB_ICONWARNING) == IDYES.0 {
-                                    let mut rules = c.rules.clone();
-                                    log::info!("rules window: deleted '{}'", rule.label());
-                                    rules.remove(i);
-                                    submit(hwnd, c, rules);
-                                }
-                            }
+                        let (Some(i), Some((generation, rules, _))) = (selected(hwnd), snapshot(c))
+                        else {
+                            return 1;
+                        };
+                        let Some(rule) = rules.get(i).cloned() else {
+                            return 1;
+                        };
+                        let ask = format!("Delete the rule \"{}\"?", rule.label());
+                        let answer =
+                            while_modal(hwnd, || message(hwnd, &ask, MB_YESNO | MB_ICONWARNING));
+                        if answer == IDYES.0 {
+                            let mut rules = rules;
+                            log::info!("rules window: deleted '{}'", rule.label());
+                            rules.remove(i);
+                            submit(hwnd, c, generation, rules);
                         }
                     }
                     IDCANCEL => {
@@ -712,34 +749,47 @@ mod win {
         (i >= 0).then_some(i as usize)
     }
 
-    unsafe fn edit_selected(hwnd: HWND, c: &mut ListCtx) {
-        let Some(i) = selected(hwnd) else {
+    /// The list as shown, and its generation: what a change is made from.
+    fn snapshot(c: &ListCtx) -> Option<(u64, Vec<AppProfile>, u16)> {
+        let st = c.state.try_borrow().ok()?;
+        Some((st.generation, st.rules.clone(), st.fan_max))
+    }
+
+    /// Run a modal dialog over the list with the list's refresh stopped, so the list a
+    /// change is made from can't change under it. The change still carries the generation
+    /// it was made from, and the tray drops it if a hand edit landed meanwhile.
+    unsafe fn while_modal<R>(hwnd: HWND, f: impl FnOnce() -> R) -> R {
+        let _ = KillTimer(hwnd, TIMER);
+        let r = f();
+        SetTimer(hwnd, TIMER, 1000, None);
+        r
+    }
+
+    unsafe fn edit_selected(hwnd: HWND, c: &ListCtx) {
+        let (Some(i), Some((generation, rules, fan_max))) = (selected(hwnd), snapshot(c)) else {
             return;
         };
-        let Some(old) = c.rules.get(i).cloned() else {
+        let Some(old) = rules.get(i).cloned() else {
             return;
         };
-        if let Some(rule) = edit_rule(hwnd, Some(&old), c.fan_max) {
+        if let Some(rule) = while_modal(hwnd, || edit_rule(hwnd, Some(&old), fan_max)) {
             if rule != old {
-                let mut rules = c.rules.clone();
+                let mut rules = rules;
                 log::info!("rules window: edited '{}'", rule.label());
                 rules[i] = rule;
-                submit(hwnd, c, rules);
+                submit(hwnd, c, generation, rules);
             }
         }
     }
 
     /// Send a new list to the tray, then wait (briefly) for it to come back as the tray's,
     /// so the next change is made from it.
-    unsafe fn submit(hwnd: HWND, c: &mut ListCtx, rules: Vec<AppProfile>) {
-        let _ = c.link.changes.send(Change {
-            based_on: c.generation,
-            rules,
-        });
+    unsafe fn submit(hwnd: HWND, c: &ListCtx, based_on: u64, rules: Vec<AppProfile>) {
+        let _ = c.link.changes.send(Change { based_on, rules });
         (c.link.wake)();
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(3) {
-            if c.link.shared().generation != c.generation {
+            if c.link.shared().generation != based_on {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -749,24 +799,27 @@ mod win {
 
     /// Show the tray's rules, when they changed or `force`. The running mark and the status
     /// line follow every second.
-    unsafe fn refresh(hwnd: HWND, c: &mut ListCtx, force: bool) {
+    unsafe fn refresh(hwnd: HWND, c: &ListCtx, force: bool) {
         let (generation, rules, running, idle, fan_max) = {
             let s = c.link.shared();
             (s.generation, s.rules.clone(), s.running, s.idle, s.fan_max)
         };
-        c.fan_max = fan_max;
+        // Held while the list is filled: the notifications that sends find it borrowed.
+        let Ok(mut st) = c.state.try_borrow_mut() else {
+            return;
+        };
+        st.fan_max = fan_max;
         let idle = idle.unwrap_or(crate::state::PerfMode::Balanced);
         let status = rules_form::status_line(&rules, running, idle);
-        if status != c.status {
+        if status != st.status {
             set_text(item(hwnd, ID_STATUS), &status);
-            c.status = status;
+            st.status = status;
         }
-        if !force && generation == c.generation && running == c.running {
+        if !force && generation == st.generation && running == st.running {
             return;
         }
         let list = item(hwnd, ID_LIST);
         let keep = selected(hwnd);
-        c.filling = true;
         send(list, LVM_DELETEALLITEMS, 0, 0);
         for (i, rule) in rules.iter().enumerate() {
             let cols = rules_form::row(rule, running == Some(i));
@@ -805,10 +858,9 @@ mod win {
             };
             send(list, LVM_SETITEMSTATE, i, &sel as *const _ as isize);
         }
-        c.filling = false;
-        c.generation = generation;
-        c.rules = rules;
-        c.running = running;
+        st.generation = generation;
+        st.rules = rules;
+        st.running = running;
     }
 
     // ---- one rule ------------------------------------------------------------------
@@ -819,7 +871,7 @@ mod win {
         apps: Vec<String>,
         fans: Vec<(Fans, &'static str)>,
         fan_max: u16,
-        result: Option<AppProfile>,
+        result: std::cell::RefCell<Option<AppProfile>>,
     }
 
     /// The rule dialog. `None` from it: cancelled.
@@ -1009,16 +1061,16 @@ mod win {
             0,
             (213, 214, 54, 14),
         );
-        let mut ctx = EditCtx {
+        let ctx = EditCtx {
             form,
             base,
             apps,
             fans,
             fan_max,
-            result: None,
+            result: Default::default(),
         };
-        modal(&t, owner, edit_proc, &mut ctx as *mut EditCtx as isize);
-        ctx.result
+        modal(&t, owner, edit_proc, &ctx as *const EditCtx as isize);
+        ctx.result.into_inner()
     }
 
     unsafe fn show_boosts(hwnd: HWND, show: bool) {
@@ -1102,7 +1154,7 @@ mod win {
                         };
                         match form.to_rule(&c.base, c.fan_max) {
                             Ok(rule) => {
-                                c.result = Some(rule);
+                                *c.result.borrow_mut() = Some(rule);
                                 let _ = EndDialog(hwnd, 1);
                             }
                             Err(why) => {

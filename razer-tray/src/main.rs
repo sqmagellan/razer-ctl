@@ -579,13 +579,20 @@ fn main() -> Result<()> {
             // A rule list from the rules window, made from the rules the tray has now: save
             // it and scan at once. One made from an older list (a hand edit landed since) is
             // dropped; the window shows the newer list within a second.
+            // The generation moves as each change is taken, so a second change made from the
+            // same list is dropped too.
             while let Ok(change) = rules_rx.try_recv() {
-                let current = rules_shared
-                    .lock()
-                    .map(|s| s.generation)
-                    .unwrap_or_default();
-                if change.based_on == current {
+                let Ok(mut shared) = rules_shared.lock() else {
+                    break;
+                };
+                if change.based_on == shared.generation {
                     state.replace_rules(change.rules, &tray_icon);
+                    shared.publish(
+                        &state.app_profiles,
+                        state.action.map(|a| a.rule),
+                        state.saved_profile().perf_mode,
+                        state.fan_rpm_range.1,
+                    );
                     last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
                 } else {
                     log::info!("rules window: a change made from an older rule list; dropped");

@@ -39,8 +39,9 @@ laptop; thanks to Finesssee for writing them down and measuring them.
   if something drifted. Forced drift on `0x029F` was put right in 3.3 s.
 - **The CLI and the tray take turns on the EC.** Each request and its reply now hold a file lock
   shared by every razer-ctl process, so `razer-cli` can't read a reply meant for the tray (both use
-  transaction id `0x1f`). The wait is capped at 1 s, so a stuck process can't freeze the tray.
-  From Finesssee/razer-ctl, with the same lock file.
+  transaction id `0x1f`). A request waits at most 1 s for the lock; if another process still
+  holds it, the request fails unsent and the tray retries on its next pass. From
+  Finesssee/razer-ctl, with the same lock file.
 - **Max Fan changes only its own bit.** The EC byte behind Max Fan (`0x070f`) also holds other
   settings: `0x04` is a temporary full charge, and further bits are documented by
   [openblade-core](https://github.com/OpenBladeProject/openblade-core). Max Fan used to write the

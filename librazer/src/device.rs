@@ -108,6 +108,8 @@ impl Device {
             .collect();
         candidates.sort_by_key(|info| (info.interface_number() != 0, info.usage_page() != 0xff00));
 
+        // The probe below is a request too, so it takes the lock like an exchange does.
+        let lock = HidLock::open(&hid_lock::default_path());
         for info in candidates {
             // One interface that won't open (held exclusively, or access denied) must not
             // end the search: another interface of the same PID may be the control one.
@@ -125,13 +127,23 @@ impl Device {
             let probe: Vec<u8> = std::iter::once(0u8)
                 .chain(Into::<Vec<u8>>::into(&Packet::new(0x0084, &[0, 0])))
                 .collect();
-            if device.send_feature_report(&probe).is_ok() {
+            let held = match &lock {
+                Some(l) => Some(l.hold(hid_lock::WAIT).ok_or_else(|| {
+                    anyhow::Error::new(TransportError(
+                        "another razer-ctl process held the HID lock; device not probed".into(),
+                    ))
+                })?),
+                None => None,
+            };
+            let sent = device.send_feature_report(&probe).is_ok();
+            drop(held);
+            if sent {
                 return Ok(Device {
                     device,
                     info: descriptor.clone(),
                     unsupported: None,
                     recorder: None,
-                    hid_lock: HidLock::open(&hid_lock::default_path()),
+                    hid_lock: lock,
                 });
             }
         }
@@ -188,7 +200,21 @@ impl Device {
 
             // The request and its reply under the cross-process lock, released before any
             // backoff below so a retry never makes another process wait.
-            let held = self.hid_lock.as_ref().and_then(|l| l.hold(hid_lock::WAIT));
+            let held = match &self.hid_lock {
+                Some(lock) => match lock.hold(hid_lock::WAIT) {
+                    Some(held) => Some(held),
+                    // Final, and nothing was sent: the caller's own retry (the tray's resync)
+                    // tries again later instead of this thread waiting longer.
+                    None => {
+                        note(attempt, "HID lock busy".into());
+                        return Err(anyhow::Error::new(TransportError(format!(
+                            "another razer-ctl process held the HID lock for {} ms; nothing sent",
+                            hid_lock::WAIT.as_millis()
+                        ))));
+                    }
+                },
+                None => None,
+            };
 
             // An OS-level failure (the HID stack busy right after resume, a handle racing
             // another process) used to abort on the first attempt and skip the retry loop

@@ -8,16 +8,18 @@
 //!
 //! Adapted from Finesssee/razer-ctl (MIT; copyright notice in LICENSE), which takes the
 //! same lock file, so its tools and these wait for each other too. Unlike there, the wait
-//! is bounded: a process that hangs while holding the lock delays the others by
-//! [`WAIT`] per exchange and never blocks them, so the lock cannot freeze the tray's menu.
-//! The OS releases the lock when the process holding it exits.
+//! is bounded: a request waits up to [`WAIT`] and, if another process still holds the lock,
+//! fails as a retryable transport error without being sent. A process that hangs while
+//! holding it therefore costs the others failed requests, never a frozen thread. The OS
+//! releases the lock when the process holding it exits. Where the lock file can't be opened
+//! or locked at all, requests go ahead without it, as before it existed.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long one exchange waits for the lock before going ahead without it. An exchange
-/// holds it for a few milliseconds.
+/// How long one exchange waits for the lock before failing unsent. An exchange holds it
+/// for a few milliseconds.
 pub const WAIT: Duration = Duration::from_secs(1);
 
 /// The lock file every razer-ctl process uses.
@@ -30,13 +32,16 @@ pub fn default_path() -> PathBuf {
 #[derive(Debug)]
 pub struct HidLock(File);
 
-/// The lock, held until dropped.
+/// The lock, held until dropped. `None` inside: locking isn't available here, and the
+/// exchange goes ahead unlocked.
 #[derive(Debug)]
-pub struct Held<'a>(&'a File);
+pub struct Held<'a>(Option<&'a File>);
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        if let Some(f) = self.0 {
+            let _ = f.unlock();
+        }
     }
 }
 
@@ -60,26 +65,20 @@ impl HidLock {
         }
     }
 
-    /// Take the lock, waiting up to `wait`. `None` when another process kept it that long
-    /// or locking failed; the caller then goes ahead without it.
+    /// Take the lock, waiting up to `wait`. `None` only when another process kept it that
+    /// long: the caller must not send. Locking that fails outright gives an empty [`Held`].
     pub fn hold(&self, wait: Duration) -> Option<Held<'_>> {
         let deadline = Instant::now() + wait;
         loop {
             match self.0.try_lock() {
-                Ok(()) => return Some(Held(&self.0)),
+                Ok(()) => return Some(Held(Some(&self.0))),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(2));
                 }
-                Err(TryLockError::WouldBlock) => {
-                    log::warn!(
-                        "another process held the HID lock for {} ms; going ahead without it",
-                        wait.as_millis()
-                    );
-                    return None;
-                }
+                Err(TryLockError::WouldBlock) => return None,
                 Err(TryLockError::Error(e)) => {
                     log::warn!("HID lock failed ({e}); going ahead without it");
-                    return None;
+                    return Some(Held(None));
                 }
             }
         }
