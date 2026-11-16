@@ -57,69 +57,66 @@ Thanks to Finesssee for documenting and measuring them.
   `recommended`), `razer-cli` 0.9.2.
 
 ## 0.9.7: temperatures, `razer-cli probe`, Blade 17 (2022) profile (2026-10-25)
-Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and put
-every setting back; the tray from this code has run on it since 2026-10-23. #10's reporter measured
-the Blade 17 (2022) (`0x028B`).
+Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and restored
+every setting; the tray from this code has run on it since 2026-10-23. #10's reporter measured the
+Blade 17 (2022) (`0x028B`).
 
 **New**
-- **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report
-  and its reporter's pull request ([#10](https://github.com/sqmagellan/razer-ctl/issues/10),
-  [#11](https://github.com/sqmagellan/razer-ctl/pull/11)). Perf modes and CPU/GPU boost read back;
-  manual fan RPM is not followed exactly (the most seen was 4300). Max Fan answers "not
+- **Razer Blade 17 (2022), `RZ09-0423`, PID `0x028B`** gets its own profile, from a user report and
+  its reporter's pull request ([#10](https://github.com/sqmagellan/razer-ctl/issues/10),
+  [#11](https://github.com/sqmagellan/razer-ctl/pull/11)). Perf modes and CPU/GPU boost read back.
+  Manual fan RPM is not followed exactly; the highest seen was 4300. Max Fan answers "not
   supported" (0x05), so the tray grays it out and never sends it. Not tested here.
-- **A laptop can lack Max Fan.** On a model not in the supported list, a "not supported" answer
-  to Max Fan is recorded like a missing logo: the item is grayed out and "(max)" leaves the
-  tooltip. It used to stay offered, and a Custom apply with it on failed every time.
-- **`razer-cli probe`** reads every setting on both fan zones and saves what the EC answered,
-  including the raw status byte, retries and timing, as one JSON file to attach to a model report.
-  It writes nothing. `probe --writes` (tray closed) also changes perf mode, boosts, Max Fan and the
-  fan for a few minutes, reads each one back, then puts everything back and checks it. It saves the
-  settings to a recovery file first; Ctrl-C restores them, and `probe --restore FILE` replays one.
+- **A laptop can lack Max Fan.** On an unlisted model, a "not supported" answer to Max Fan is
+  handled like a missing logo: the item is grayed out and "(max)" leaves the tooltip. It used to
+  stay offered, and a Custom apply with it on always failed.
+- **`razer-cli probe`** saves every setting the EC reports on both fan zones, with the raw status
+  byte, retries and timing, as one JSON file for a model report. It writes nothing.
+  `probe --writes` (tray closed) also changes perf mode, boosts, Max Fan and the fan for a few
+  minutes, reads each back, then restores and checks everything. It saves a recovery file first;
+  Ctrl-C restores it, and `probe --restore FILE` replays one.
 - **`auto fan rpm` switches the fan to Manual** on a laptop that can read its fan mode. It used to
-  write only the set point, so a fan on Auto stayed on the firmware curve and a fan sweep measured that curve instead
-  ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). The value must be a multiple of 100
-  within the laptop's fan range; stderr says when the mode changed.
+  write only the set point, so a fan on Auto stayed on the firmware curve and a fan sweep measured
+  that curve ([#10](https://github.com/sqmagellan/razer-ctl/issues/10)). The value must be a
+  multiple of 100 within the laptop's fan range; stderr says when the mode changed.
 - **Blade 16 (2023) Custom floor.** In Custom with a manual fan, this EC runs the fans at the set
-  point or 3800 RPM, whichever is higher. A lower set point is stored and reads back, but isn't
-  used. `auto fan rpm` and `auto info` say so, `auto json` has a new `fan_floor_rpm` field, and the
-  tray's fan presets read "2000 RPM (runs at 3800)". The fan on Auto has no such limit: under a
-  CPU and GPU load it reached 4100 RPM in Balanced and 4600 in Performance and Custom.
-- **EC temperatures.** The EC reports a CPU-side temperature and the GPU's (`0x0d85`, found by
+  point or 3800 RPM, whichever is higher. A lower set point reads back but isn't used. `auto fan
+  rpm` and `auto info` say so, `auto json` adds `fan_floor_rpm`, and the tray's presets read "2000
+  RPM (runs at 3800)". Auto has no such limit: under CPU and GPU load it reached 4100 RPM in
+  Balanced and 4600 in Performance and Custom.
+- **EC temperatures.** The EC reports a CPU-side and a GPU temperature (`0x0d85`, found by
   [blade-control](https://github.com/jdsgnrinfo/blade-control)). The tooltip adds "CPU 62°C",
   `auto info` prints both and `auto json` has `ec_cpu_temp_c` and `ec_gpu_temp_c`. On `0x029F` the
-  GPU figure runs 1–2 °C under `nvidia-smi`. The CPU figure is a sensor near the CPU, not the
-  die: 53–67 °C at idle, up 7 °C in 40 s under a half load and down about 1 °C per 30 s after.
-  `probe` reads it too, so a report shows whether another model has it.
+  GPU figure runs 1–2 °C under `nvidia-smi`. The CPU figure is a sensor near the CPU, not the die:
+  53–67 °C at idle, up 7 °C in 40 s at half load, then down about 1 °C per 30 s. `probe` reads it,
+  so a report shows whether another model has it.
 - **The EC's power source.** `auto json` adds `charger` ("battery", "usb-c" or "main"),
-  `charger_watts` and `charger_code`, and `auto info` prints it under the charge limit (`0x078c`,
-  codes from blade-control's table). `0x029F` on its barrel charger reads 0x12, the 330 W charger;
-  no other state was seen here. `probe` reads it too.
+  `charger_watts` and `charger_code`; `auto info` prints it under the charge limit (`0x078c`, codes
+  from blade-control's table). `0x029F` on its barrel charger reads 0x12, the 330 W charger; no
+  other state was seen here. `probe` reads it too.
 
 **Reliability**
 - **GPU temperature without a process.** The tray reads the dGPU temperature from Windows (D3DKMT,
-  the figure Task Manager shows): 0.2 ms instead of 40–80 ms, and its raw reading matched
-  `nvidia-smi` to 0.1 °C. `nvidia-smi` still gives the watts, every 30 s or when the temperature
-  moves 3 °C, and the temperature too wherever Windows doesn't report it. Neither is asked while
-  the GPU sleeps, and `nvidia-smi` waits until the GPU has been awake for two polls in a row,
-  so a GPU woken for a moment by something else isn't woken again by the tray. On `0x029F` in
-  Optimus mode, with everything else that wakes the GPU switched off, it slept through 90 s of
-  the tray running and 30 s of EC temperature reads 4 times a second. `nvidia-smi` wakes it on
-  every call.
-- **Perf modes other firmware reports read as ours.** 1 (the 2018–2020 Blades' Gaming) reads as
-  Performance and 3 (the 2025 firmware's Battery Saver) as Battery. `0x029F` stores and reads back
-  both, and a read of either used to fail. The tray never sends them.
+  Task Manager's figure) in 0.2 ms instead of 40–80 ms; the raw value matched `nvidia-smi` within
+  0.1 °C. `nvidia-smi` still gives the watts, every 30 s or on a 3 °C move, and the temperature
+  where Windows has none. Neither runs while the GPU sleeps, and `nvidia-smi` waits for two awake
+  polls in a row, so the tray doesn't re-wake a GPU something else woke briefly. On `0x029F` in
+  Optimus mode, with every other waker off, the GPU slept through 90 s of the tray and 30 s of EC
+  temperature reads at 4 per second. `nvidia-smi` wakes it on every call.
+- **Other firmware's perf modes read as ours.** 1 (Gaming on 2018–2020 Blades) reads as Performance
+  and 3 (Battery Saver on 2025 firmware) as Battery. `0x029F` stores and reads back both; a read of
+  either used to fail. The tray never sends them.
 - **Blade 15 Base 2020 (`0x0255`) shows no charge limit.** Its EC accepts the setting and ignores
   it, per a user report in blade-control's model table.
-- **Blade 16 (2026), PID `0x02E0`,** is tried before any other Razer device on the machine, like the
-  other listed Blades.
-- **A perf mode write the EC acknowledges and ignores is caught.** It happened once on 2026-10-19.
-  The tray reads the perf and fan mode back after applying and retries up to 3 times;
-  `auto perf mode` and `auto fan auto|manual` fail instead of reporting success.
-- **The tray shows the GPU again on drivers that print a decimal temperature.** `nvidia-smi`
-  answered "57.54" where a whole number was expected, so every poll failed and the tooltip left the
-  GPU out.
-- **Tests run against simulated ECs** built from four laptops' reports and hardware runs. A
-  command the reports don't cover answers "unmodeled" instead of agreeing with the code.
+- **Blade 16 (2026), PID `0x02E0`,** is tried before other Razer devices, like the other listed
+  Blades.
+- **A perf mode write the EC acknowledges and ignores is caught.** It happened once, on 2026-10-19.
+  The tray reads perf and fan mode back after applying and retries up to 3 times; `auto perf mode`
+  and `auto fan auto|manual` fail instead of reporting success.
+- **GPU back in the tooltip with decimal temperatures.** A driver's `nvidia-smi` printed "57.54"
+  where a whole number was expected, so every poll failed and the tooltip dropped the GPU.
+- **Tests run against simulated ECs** built from four laptops' reports and hardware runs. A command
+  the reports don't cover answers "unmodeled" instead of agreeing with the code.
 - Versions: `razer-tray` 0.9.7, `librazer` 0.11.0 (breaking: `Optional` gains `MaxFan`),
   `razer-cli` 0.9.1.
 
@@ -130,116 +127,115 @@ run at 5000; the tray ran 11 minutes on the existing config, a missing config an
 
 **New**
 - **Razer Blade 18 (2023), `RZ09-0484U`, PID `0x02A0`** gets its own profile, from a user report
-  ([#1](https://github.com/sqmagellan/razer-ctl/issues/1)). Everything worked for them except manual
-  fan RPM, which holds the fans near 3200/3300. Still open. Not tested here.
-- **Laptops not in the supported list keep working without a feature they lack.** A logo, keyboard
-  brightness or charge limit the EC answers "not supported" (0x05) is left alone: reads skip it,
-  writes skip it, drift checks ignore it, and its menu shows "(not supported)". One such answer used
-  to fail every read, so the tray could change only the refresh rate
-  ([#2](https://github.com/sqmagellan/razer-ctl/issues/2)). Supported models are unchanged.
+  ([#1](https://github.com/sqmagellan/razer-ctl/issues/1)). All worked for them but manual fan RPM,
+  which holds the fans near 3200/3300 (still open). Not tested here.
+- **Unlisted laptops work without a feature they lack.** A logo, keyboard brightness or charge
+  limit the EC answers "not supported" (0x05) is skipped by reads, writes and drift checks, and its
+  menu shows "(not supported)". One such answer used to fail every read, so the tray could change
+  only the refresh rate ([#2](https://github.com/sqmagellan/razer-ctl/issues/2)). Supported models
+  are unchanged.
 - **Blade 15 2018 Base (`0x023b`):** fan range up to 5700 (its owner heard 5700 over 5000; Synapse
-  offers 5700), and the logo menu is grayed out from the start: that EC reads the logo back but
-  ignores writes. Per-PID list in `librazer/src/unsupported.rs`.
+  offers 5700). The logo menu is grayed out from the start: that EC reads the logo back but ignores
+  writes. Per-PID list in `librazer/src/unsupported.rs`.
 - **`razer-cli auto info` and `auto json` report what they can.** Both stopped at the first rejected
-  read. `info` now marks each missing feature "not supported", including "Fan actual" on an EC with
-  no speed read. `json` sets those fields to `null` and lists them in a new `unsupported` field,
-  left out when empty, so a laptop that answers everything prints the same JSON as before.
+  read. `info` marks each missing feature "not supported", including "Fan actual" on an EC with no
+  speed read. `json` sets those fields to `null` and lists them in a new `unsupported` field, left
+  out when empty, so a laptop that answers everything prints the same JSON as before.
 
 **Reliability**
 - **First run reads the laptop instead of resetting it.** A new config used to be hardcoded
-  defaults, applied at startup: Performance mode, logo and backlight off, 80% charge limit. Now each
-  profile starts unset (`ac_state_unset` / `battery_state_unset`) and takes the first reading on its
-  power source, without writing it back. Hand-editing an unset profile sets it. The `0x029F` EC
+  defaults applied at startup: Performance mode, logo and backlight off, 80% charge limit. Now each
+  profile starts unset (`ac_state_unset` / `battery_state_unset`) and adopts the first reading on
+  its power source without writing it back. Hand-editing an unset profile sets it. The `0x029F` EC
   keeps brightness per power source and can take seconds to switch, so an adopted profile can hold
   the other source's brightness.
 - **A config that doesn't parse is no longer applied or replaced.** It used to become defaults on
-  the laptop and then on disk. Now the tray only reads the laptop and saves nothing until the file
+  the laptop, then on disk. Now the tray only reads the laptop and saves nothing until the file
   parses or you pick **Reset settings to defaults**, offered only then. A dialog and the top of the
-  menu say so. A file that can't be read is handled the same way.
-- **An attached Razer mouse no longer gets picked as the laptop.** On an unlisted model the app tried
-  each Razer USB device in random order, and a mouse answers too, so the fan range and results
-  changed between runs (#2). Known laptop PIDs now go first, and the log names the PID in use.
-- **Fan zone 2 is checked.** A manual fan whose zone 2 set point is off target now counts as drift
-  and is repaired wherever other drift is. After 3 repairs in a row that don't hold, the check stops
-  until restart. From upstream blauzim/razer-ctl `435c870`. Zone 2 reads back as written on
-  `0x029F`; the repair path isn't tested on hardware.
+  menu say so. An unreadable file is handled the same way.
+- **A Razer mouse is no longer picked as the laptop.** On an unlisted model the app tried each Razer
+  USB device in random order; a mouse answers too, so the fan range and results changed between
+  runs (#2). Known laptop PIDs now go first, and the log names the PID in use.
+- **Fan zone 2 is checked.** A manual fan with zone 2 off target counts as drift and is repaired
+  like other drift. After 3 failed repairs in a row, the check stops until restart. From upstream
+  blauzim/razer-ctl `435c870`. Zone 2 reads back as written on `0x029F`; the repair path isn't
+  tested on hardware.
 - **A resync that adopts a profile doesn't write it back.** With "Undo changes made by Synapse" on,
-  a resync that adopted an unset profile wrote it in the same pass. Unit tests cover it.
+  it used to write the adopted profile in the same pass. Unit tests cover it.
 - **`razer-cli auto fan rpm` checks the laptop's own range.** It accepted 2000–5600 on any model.
-  Outside a model's range the EC runs at its floor or ceiling and still reports success. On
-  `0x029F`, 5300, 5500 and 5700 all ran at 5000.
-- **A failed fan speed read pauses fan reads for 60 s.** Each one retried for about 4 s on the UI
+  Out of range, the EC runs at its floor or ceiling and still reports success. On `0x029F`, 5300,
+  5500 and 5700 all ran at 5000.
+- **A failed fan speed read pauses fan reads for 60 s.** Each retried for about 4 s on the UI
   thread, so hovering froze the tray on #2's laptop. "Response does not match" errors now show the
   sent and received header.
-- **An "off" charge limit is read twice before it's believed.** On `0x029F`, `auto json` read a
-  60% limit as off three times in an hour while the battery held at 74% on AC for 19 hours: false
-  reads. The second read wins when they differ, and both raw bytes go to the log. Costs one more
-  read and 50 ms when the limit really is off.
+- **An "off" charge limit is read twice before it's believed.** On `0x029F`, `auto json` falsely
+  read a 60% limit as off three times in an hour; the battery held at 74% on AC for 19 hours. The
+  second read wins when they differ, and both raw bytes are logged. It costs one read and 50 ms when
+  the limit really is off.
 - `razer-cli fan info` in the 0.9.x notes below doesn't exist; it's `razer-cli auto info`.
 - Configs from 0.9.5 load and save byte for byte as before.
 - Versions: `razer-tray` 0.9.6, `librazer` 0.10.0 (breaking: `ConfigState` gains `ac_state_unset`
   and `battery_state_unset`), `razer-cli` 0.9.0.
 
 ## 0.9.5: keyboard colors, a clearer menu, and a tray that can't die at login or lose its config
-Built and tested on `0x029F` (2026-09-23). Probes that set the scope, same machine: `0x070f` is Max
-Fan (fans 2100 → 4700 RPM, no charging above the limit); tray and CLI running together don't cause
-bad fan reads (0/60 either way); the ACPI "High Precision Temperature" counter is frozen at 45.05 °C
-under load like the others; the machine sleeps in Modern Standby (69 standby cycles in 17 days
-against 5 resumes); the EC kept its state across two measured standbys.
+Built and tested on `0x029F` (2026-09-23). Probes on the same machine set the scope: `0x070f` is Max
+Fan (fans 2100 → 4700 RPM, no charging above the limit); tray and CLI together cause no bad fan
+reads (0/60 either way); the ACPI "High Precision Temperature" counter is frozen at 45.05 °C under
+load like the others; the machine sleeps in Modern Standby (69 standby cycles in 17 days, 5
+resumes); the EC kept its state across two measured standbys.
 
 **New**
 - **Custom keyboard colors.** Presets from the config (one color, or one per row), "Follow
   performance mode" (the tray icon's color), and a battery bar on keys 1–0 (lit keys = charge in
   tens, the rest at 20%, cyan while charging). The 0.9.0-era note that color needs driver mode was
   wrong: six `0x030b` row writes and `0x030a [5, 0]` show a frame in Normal mode with the Fn keys
-  intact. The EC doesn't keep the frame, so the tray repaints it after a wake, after every apply,
-  and on the first input after the idle fade. Mapped for `0x029F` only. `razer-cli auto
-  kbd-lighting color` previews it, with `--perf`, `--battery` and `--charging`.
-- **Screen refresh rate per profile**, **Match Windows power to Razer performance mode** (opt-in,
-  and turning it off restores the earlier Windows mode for each power source), an opt-in
-  **perf-cycle hotkey**, and a warning at the top of the menu when Synapse is running.
-- **Menu.** A line at the top says whether changes go to the plugged-in or the battery profile.
-  Keyboard lighting holds effects, colors, brightness, Battery bar and Keep keyboard lit. Enforce is
-  now "Undo changes made by Synapse" and "Close GPU apps" is "Close apps using the GPU".
+  intact. The EC doesn't keep the frame, so the tray repaints it after a wake, after every apply and
+  on the first input after the idle fade. Mapped for `0x029F` only.
+  `razer-cli auto kbd-lighting color` previews it, with `--perf`, `--battery` and `--charging`.
+- **Screen refresh rate per profile**, **Match Windows power to Razer performance mode** (opt-in;
+  turning it off restores each power source's earlier Windows mode), an opt-in **perf-cycle
+  hotkey**, and a menu warning when Synapse is running.
+- **Menu.** A top line says whether changes go to the plugged-in or the battery profile. Keyboard
+  lighting holds effects, colors, brightness, Battery bar and Keep keyboard lit. Enforce is now
+  "Undo changes made by Synapse" and "Close GPU apps" is "Close apps using the GPU".
 - Fn-lock (`0x0206`) was tried and dropped: it round-trips on `0x029F` but changes nothing.
 
 **Reliability**
-- **Startup and recovery.** One HID error during startup used to exit the tray with nothing in the
-  log. The tray now comes up from the config and resyncs with backoff (2 s doubling to 60 s),
-  reopening the device after three failures, without blocking the event loop or reloading the
-  config. A resync aims at the current target, so a plug or unplug while it waits is honored. Only
-  bus trouble triggers a resync; a write the EC rejects is logged, shown as what the device did, and
-  no longer stops the independent writes after it.
+- **Startup and recovery.** One HID error at startup used to exit the tray with nothing logged. The
+  tray now starts from the config and resyncs with backoff (2 s doubling to 60 s), reopening the
+  device after three failures, without blocking the event loop or reloading the config. A resync
+  aims at the current target, so it honors a plug or unplug while it waits. Only bus trouble
+  triggers a resync. A write the EC rejects is logged, shown as what the device did, and no longer
+  stops the independent writes after it.
 - **The config file.** Saved atomically (temp file, then rename). Missing, unreadable and
   unparseable files are handled separately; an unparseable one gets a timestamped copy. Hand edits
-  are adopted within 5 s and before any save, and one that doesn't parse is never written over. A
-  file that can't be read at startup is waited for, and meanwhile the tray only reads the device.
-  The file is created on first run again.
-- **Modern Standby.** A wake is the resume message, or the display coming back after at least 60 s
-  off. It schedules reads at +3 s and +15 s and writes only if a read shows drift. The +15 s check
-  follows G-Helper #5682, where one re-apply at the moment of resume lost to the firmware. A
-  display-on wake writes only with "Undo changes made by Synapse" on, so a screen timeout never reverts a CLI change.
-- **Actions.** A pick made while an Action runs holds until its process exits (it was reverted a
-  second later). An AC/battery switch carries picks of the Action's fields across, re-checks the
-  rules at once, and no longer applies an AC-only rule on battery. The left-click cycle during an
+  are adopted within 5 s and before any save, and one that doesn't parse is never overwritten. If
+  the file can't be read at startup, the tray waits for it and only reads the device. First run
+  creates the file again.
+- **Modern Standby.** A wake is the resume message, or the display returning after at least 60 s
+  off. It schedules reads at +3 s and +15 s and writes only on drift. The +15 s check follows
+  G-Helper #5682, where one re-apply at resume lost to the firmware. A display-on wake writes only
+  with "Undo changes made by Synapse" on, so a screen timeout never reverts a CLI change.
+- **Actions.** A pick made while an Action runs holds until its process exits; it was reverted a
+  second later. An AC/battery switch carries picks of the Action's fields across, re-checks the
+  rules at once, and no longer applies an AC-only rule on battery. A left-click cycle during an
   Action isn't saved into the profile.
 - **Fans.** Max fan exists only in Custom, and a manual RPM snaps to the chassis range and the
   100-RPM step; both used to look like permanent drift. A rejected manual RPM no longer switches the
   fan to Manual, and fan write failures are returned. The tooltip never shows an ignored set point
-  as the speed, and shows "…" until a read is trusted. `razer-cli fan info` (Wrong; see Unreleased.) uses the
-  same trust rule, and `auto json` adds `fan_actual_trusted`.
+  as the speed, and shows "…" until a read is trusted. `razer-cli fan info` (Wrong; see 0.9.6.)
+  uses the same trust rule, and `auto json` adds `fan_actual_trusted`.
 - **Power source.** An "unknown" `ACLineStatus` keeps the previous answer instead of meaning AC.
-- **dGPU telemetry doesn't wake a sleeping GPU.** Before each `nvidia-smi` sample the tray reads
-  the GPU's power state from Windows, which doesn't wake it, and skips the sample while the GPU is
-  in D3. Only matters with Optimus; untested on a sleeping GPU because the Blade here runs in
-  dGPU-only mode.
-- **Transport.** HID I/O errors are retried with backoff and exit 5, as documented (they aborted on
-  the first attempt with exit 1). Raw `cmd` probes are sent once, never re-sent. Perf zones left
-  disagreeing by an interrupted write are a typed error, and the tray repairs them.
+- **dGPU telemetry doesn't wake a sleeping GPU.** Before each `nvidia-smi` sample the tray reads the
+  GPU's power state from Windows, which doesn't wake it, and skips the sample in D3. Only matters
+  with Optimus. Untested on a sleeping GPU: the Blade here runs dGPU-only.
+- **Transport.** HID I/O errors are retried with backoff and exit 5, as documented; they aborted on
+  the first try with exit 1. Raw `cmd` probes are sent once. Perf zones left disagreeing by an
+  interrupted write are a typed error, and the tray repairs them.
 - **Log** moved to `%LOCALAPPDATA%\razer-tray\`, 1 MiB, rotated through three older files. Logging
-  starts before anything else.
+  starts first.
 - **Supply chain.** bincode is gone: the 90-byte packet is encoded by hand, checked byte-identical
-  first. Every Action is pinned to a commit SHA, tokens are read-only except for the release job,
+  first. Every Action is pinned to a commit SHA, tokens are read-only except the release job's,
   cargo runs `--locked`, and the documented `gh attestation verify` pins the tag and workflow. The
   CLI has tests.
 - American spelling throughout.
@@ -249,233 +245,208 @@ against 5 resumes); the EC kept its state across two measured standbys.
 ## 0.9.3: resume detection that fires, and Actions kept out of saved profiles
 HW-verified on `0x029F` (2026-09-05).
 
-- **The tray never noticed a resume, and its own log said so for six weeks.** `PBT_APMRESUMESUSPEND`
-  replaced the old tick-gap heuristic on 2026-07-25, and every `resume detected` line written since
-  is still the heuristic's: nine Kernel-Power 107 resumes between 07-30 and 09-04 produced none.
-  The cause is the window. `spawn_display_state_monitor` creates a message-only window and registers
-  only `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE`; `PBT_APMRESUME*` arrives
-  as a broadcast, a message-only window receives no broadcasts, and a power-setting registration
-  delivers that setting and nothing else. It now also calls `RegisterSuspendResumeNotification`,
-  which is targeted and so reaches the window. The two registrations are independent (losing one
-  does not cost the other), and startup logs which of them took. Verified on a hibernate/resume at
-  19:18:17: both broadcasts arrived, the latch collapsed them into one re-assert, and that is the
-  first `resume detected (OS power broadcast)` line in the log's history.
-- **An Action's settings could end up in the saved AC or battery profile.** `menu::build` bakes a
-  whole `DeviceState` into every handler, built from whatever is currently effective, which during an
-  Action is the overlay. Picking one unrelated item handed `update()` a state carrying the
-  Action's perf mode and fan, and `update()` assigned the lot to `ac_state` or `battery_state`.
-  Close the game and the profile you returned to had quietly acquired the Action's settings. The
+- **The tray never noticed a resume, and its log hid it for six weeks.** `PBT_APMRESUMESUSPEND`
+  replaced the tick-gap heuristic on 2026-07-25, but every `resume detected` line since came from
+  the heuristic: nine Kernel-Power 107 resumes from 07-30 to 09-04 logged none. The window was the
+  cause. `spawn_display_state_monitor` creates a message-only window and registers only
+  `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE`. `PBT_APMRESUME*` is a
+  broadcast, which a message-only window never gets, and that registration delivers only its own
+  setting. The tray now also calls `RegisterSuspendResumeNotification`, which targets the window.
+  The two registrations are independent, and startup logs which took. On a hibernate and resume at
+  19:18:17 both broadcasts arrived, the latch merged them into one re-assert, and the log showed its
+  first `resume detected (OS power broadcast)`.
+- **An Action's settings could leak into the saved AC or battery profile.** `menu::build` bakes the
+  effective `DeviceState` into every handler, and during an Action that is the overlay. Picking any
+  item handed `update()` the Action's perf mode and fan, and `update()` saved all of it to
+  `ac_state` or `battery_state`. After the game closed, the profile held the Action's settings. The
   README's claim that an Action "never overwrites a saved profile" was the intent, not the
-  behavior. `DeviceState::carry_changes` now writes only the fields that differ between the state
-  the menu was built from and the state the user picked. With no Action active `base == before`, so
-  the common path is bit-identical to the old wholesale assignment, and that equivalence is one of
-  the three new tests. Only the saved profile is narrowed: whether a manual edit should override a
-  running Action *on the device*, or stay masked until it ends, is a separate question and is
-  untouched.
-- **`librazer` 0.8.7 → 0.8.8** for the new `DeviceState::carry_changes`. The addition is additive and
-  changes no existing call, so `razer-cli` stays at 0.8.7. Verified on the
-  Blade: `fmt --check`, clippy `--target x86_64-pc-windows-msvc -Dwarnings`, `cargo build --release`,
-  and 122 tests.
+  behavior. `DeviceState::carry_changes` now saves only the fields that differ between the state
+  the menu was built from and the one picked. With no Action active `base == before`, so the common
+  path is bit-identical to before; one of three new tests checks that. Only the saved profile
+  changes. Whether a manual edit should override a running Action on the device, or wait until it
+  ends, is a separate question, left untouched.
+- **`librazer` 0.8.7 → 0.8.8** for `DeviceState::carry_changes`. It only adds, so `razer-cli` stays
+  at 0.8.7. Verified on the Blade: `fmt --check`, clippy `--target x86_64-pc-windows-msvc
+  -Dwarnings`, `cargo build --release`, and 122 tests.
 
 ## 0.9.2: measured fan floor, filtered fan reads, an audit gate
 HW-verified on `0x029F` (2026-08-15).
 
-- **The manual fan floor is 2000 RPM, not the 2200 the descriptor claimed.** Writing raw `0x0d01`
-  past the CLI's own clamp, set points of 1800 / 1500 / 1200 / 1000 / 800 / 400 / 100 / 0 all settle
-  at exactly 2000 on both zones, held 40 s each across 0–17% CPU load. 2000 and 3000 are honored
-  exactly. It's a floor, not the EC substituting its own thermal demand: Auto idle is asymmetric
-  (2000/1900) while the manual floor is always symmetric (2000/2000). Only the two `RZ09-0483` rows
-  were lowered. Every other row in both tables is transcribed from a third-party `laptops.json`, and
-  guessing a second chassis from a measurement of the first is how the wrong 2200 arrived in the
-  first place. Those rows are now marked suspect rather than silently trusted.
-- **Sub-floor fan writes are rejected instead of silently accepted.** `set_fan_rpm` had no lower
-  bound, so `set_fan_rpm(dev, 400)` returned `Ok(())` while the fan kept spinning at 2000. The EC
-  banks a sub-floor value in its read-back register and ignores it, so every caller above then
-  reported a speed the hardware wasn't honoring. It's bounded at both ends now, with an error that
-  explains why the loud case beats the silent one.
-- **Individual `0x0d88` fan reads aren't trustworthy, so they're filtered.** Roughly 3 in 10 sparse
-  samples carried one impossible zone (0/1800, then 2000/0, then 0/1800 at 30 s spacing), which
-  can't happen at the measured 23–53 RPM/s slew. It goes both directions, and one sample carried a
-  lone 2000 while the fans were genuinely stopped. `FanRpmFilter` drops lone-zone reads and makes a
-  stop earn two consecutive confirmations, while running values publish immediately, because during
-  a ramp the number legitimately moves every poll. Suspicion is kept narrow on purpose: a
-  large-but-nonzero gap isn't flagged, since 100–200 RPM of Auto asymmetry is normal here and no
-  threshold above that has been measured. Tach output is quantized to 100 RPM.
-- **Zero RPM is real, but Auto-only.** 14 of 15 consecutive reads at 1.5 s spacing returned 0/0 over
-  22 s. Manual can't stop the fans, and a set point of 0 doesn't hand back to the firmware curve on
-  this chassis: the mode stays Manual and the fan holds 2000. So razer-control-revived's "0 clears
-  the manual flag" behavior must not be ported here.
-- **`cargo audit` runs weekly as its own workflow.** It's separate from `ci.yml` on purpose. Every
-  other gate answers "did this change break something"; audit answers "did the world change under
-  code nobody touched", which only surfaces on a timer, and a `schedule:` belongs to the workflow
-  rather than re-running four build/test jobs weekly for nothing. Both dependency bumps that ever
-  paid for themselves here were advisory-driven or capability-driven, never calendar-driven:
-  single-instance 0.1.2 → 0.3 dropped the unmaintained `failure` dep (RUSTSEC-2019-0036 /
-  -2020-0036, CVSS 9.8), and tray-icon 0.11.3 → 0.19 deleted a keyboard-hook hack outright. Version
-  lag by itself isn't a defect. Deliberately not `--deny warnings`: the first run reported 13
-  warnings and zero vulnerabilities across 371 dependencies, and ten of the thirteen are the
-  Linux-only GTK stack that exists solely so `cargo build` works on a Linux runner. A gate that
-  cries wolf gets switched off, and `cargo-audit` already fails on vulnerabilities by default.
-- **clap 4.6.1 → 4.6.6** (lockfile only). The one bump that was actually outstanding; three of the
-  four crates checked were already at latest. `Cargo.toml` lists a caret floor, not what gets built,
-  so reading manifests instead of the lockfile overstated the work by three crates. The resolver
-  also unified duplicate `windows-*` crates it was already carrying, a net -5 crates, and nothing
-  `razer-tray` declares changed. Verified on the Blade: librazer tests, clippy
-  `--target x86_64-pc-windows-msvc -Dwarnings`, `fmt --check`, `cargo test -p razer-tray`,
-  `cargo build --release`, and `cargo audit`, all clean.
+- **The manual fan floor is 2000 RPM, not the 2200 the descriptor claimed.** Raw `0x0d01` set
+  points past the CLI's clamp (1800, 1500, 1200, 1000, 800, 400, 100, 0) all settle at exactly 2000
+  on both zones, held 40 s each at 0–17% CPU load. 2000 and 3000 are honored exactly. It is a
+  floor, not EC thermal demand: Auto idle is asymmetric (2000/1900), the manual floor always
+  symmetric (2000/2000). Only the two `RZ09-0483` rows were lowered. Every other row in both tables
+  comes from a third-party `laptops.json`; guessing one chassis from another's measurement is how
+  the wrong 2200 got in. Those rows are now marked suspect.
+- **Sub-floor fan writes are rejected.** `set_fan_rpm` had no lower bound: `set_fan_rpm(dev, 400)`
+  returned `Ok(())` while the fan stayed at 2000. The EC stores a sub-floor value in its read-back
+  register and ignores it, so every caller reported a speed the fan wasn't running. Both ends are
+  bounded now, and the error says why.
+- **Single `0x0d88` fan reads are filtered.** About 3 in 10 sparse samples had one impossible zone
+  (0/1800, then 2000/0, then 0/1800 at 30 s spacing), which the measured 23–53 RPM/s slew rules
+  out. It goes both ways: one sample showed a lone 2000 with the fans stopped. `FanRpmFilter` drops
+  lone-zone reads and needs two reads in a row to report a stop; running values publish at once,
+  since a ramp moves every poll. A large nonzero gap isn't flagged: 100–200 RPM of Auto asymmetry
+  is normal here, and no higher threshold has been measured. Tach output is quantized to 100 RPM.
+- **Zero RPM is real, but Auto-only.** 14 of 15 reads 1.5 s apart returned 0/0 over 22 s. Manual
+  can't stop the fans, and a set point of 0 doesn't return to the firmware curve on this chassis:
+  the mode stays Manual at 2000. So razer-control-revived's "0 clears the manual flag" behavior
+  must not be ported here.
+- **`cargo audit` runs weekly in its own workflow.** CI catches a change that broke something;
+  audit catches a world that changed under untouched code, which only a timer finds, and a separate
+  workflow keeps four build/test jobs from rerunning weekly. The bumps that paid off here were
+  advisory- or capability-driven, never calendar-driven: single-instance 0.1.2 → 0.3 dropped the
+  unmaintained `failure` dep (RUSTSEC-2019-0036 / -2020-0036, CVSS 9.8), and tray-icon 0.11.3 →
+  0.19 removed a keyboard-hook hack. Version lag alone isn't a defect. Not `--deny warnings`: the
+  first run found 13 warnings and zero vulnerabilities in 371 dependencies, ten of the warnings in
+  the Linux-only GTK stack that lets `cargo build` run on a Linux runner. `cargo-audit` fails on
+  vulnerabilities by default.
+- **clap 4.6.1 → 4.6.6** (lockfile only), the one bump outstanding; three of the four crates
+  checked were current. `Cargo.toml` lists a caret floor, not what gets built, so reading manifests
+  instead of the lockfile overstated the work by three crates. The resolver also merged duplicate
+  `windows-*` crates (net -5 crates); nothing `razer-tray` declares changed. Verified on the Blade:
+  librazer tests, clippy `--target x86_64-pc-windows-msvc -Dwarnings`, `fmt --check`,
+  `cargo test -p razer-tray`, `cargo build --release` and `cargo audit`, all clean.
 
 
 ## 2026-07: charge limit, readable lighting, leaner binary
 HW-verified on `0x029F` (2026-07-25).
 
-- **Charge limit is any whole percent 50–100**, not 8 fixed presets. Probing the EC showed it accepts
-  every integer in that range and refuses 49 and below, so the old
-  50/55/…/80 enum was *our* restriction. It hid 43 usable values, including the entire 81–99 band.
-  `battery-care set 88` now does what it says instead of silently rounding to 80.
-  Existing configs (which stored `"Percent80"`) still load; that shim is load-bearing, because the
-  tray loads config with `unwrap_or_default()` and a parse failure would silently discard your saved
-  profiles.
-- **Keyboard effect is read back from the device** (`0x0f82`), so the menu and `auto json` show what
-  the firmware is actually running. This corrects a claim in this README: the getter does exist.
-- **Tray clicks are no longer queued behind hover events.** The event loop took *one* event
-  per ~1s tick, but `Move` fires at the mouse report rate while the cursor is over the icon and
-  the channel is unbounded, so a click was processed only after every Move that preceded it.
-  Approaching the icon enqueues a hundred-plus events, which pushed the mode switch out by
-  minutes, and because the backlog outgrew the drain rate the lag *accumulated* across a
-  session. Both channels are now drained each pass, with hover events coalesced into at most
-  one refresh and a click superseding them. Throttling the hover work never helped: a skipped
-  event still consumed its whole tick.
-- **Left-click no longer opens the menu *and* changes the perf mode.** `tray-icon`'s
-  `menu_on_left_click` defaults to true and must be disabled explicitly. Under 0.11.3 the
-  Windows backend showed the menu only on `WM_RBUTTONUP` and ignored the flag; 0.19 honors it,
-  so a single left-click did both: the menu opened on button-*down* while the perf-mode cycle
-  ran on button-*up*, changing the mode behind the popup where you couldn't see it. Worse, each
-  invisible cycle *persisted*, so the saved AC/battery profile quietly drifted. Left-click is
-  ours (cycle the mode), right-click is the menu.
-- **dGPU temperature and power in the tooltip**, sampled on a background thread so the UI
-  never blocks on a subprocess, and failing open: no NVIDIA tools or no dGPU simply omits the
-  fields rather than showing "0°C". The monitor tolerates ~a minute of failures before giving
-  up, because the tray starts at login, exactly when the driver is least likely to answer, and
-  quitting on the first sample turned a transient startup condition into an empty tooltip for
-  the whole session.
-- **Tray binary is 1.84 MB, down from 3.40 MB.** The six icons are decoded and downscaled to 64×64
-  raw RGBA at build time, so the `image` crate (a full PNG/JPEG/GIF/WebP decoder, present for six
-  fixed icons) is no longer linked into a binary we're about to sign. (`embed-resource` was also a
-  build-dependency with no `build.rs` at all; removed.)
-- **One fan-RPM ceiling instead of three.** `command.rs` bounded RPM at 5500, `FAN_RPM_MAX_ANY` said
-  5300, and the device table reaches 5600, so a CLI-supplied RPM was checked against a limit no real
-  machine had. Both ends are now derived from the tables (2000–5600) and a test keeps them honest.
-- **The tray's pure logic moved into `librazer`** (perf-mode cycle, nearest-brightness step) where the
-  host test suite can actually reach it; the tray crate can't be built on a non-Windows host, so
-  tests placed there would never have run.
+- **Charge limit is any whole percent 50–100**, not 8 fixed presets. The EC accepts every integer
+  in that range and refuses 49 and below, so the old 50/55/…/80 enum was our own limit. It hid 43
+  usable values, all of 81–99 among them. `battery-care set 88` now sets 88 instead of rounding to
+  80. Configs that stored `"Percent80"` still load. That shim matters: the tray loads config with
+  `unwrap_or_default()`, so a parse failure would discard saved profiles.
+- **Keyboard effect is read back** (`0x0f82`), so the menu and `auto json` show what the firmware
+  runs. The README said this getter didn't exist; it does.
+- **Tray clicks no longer wait behind hover events.** The event loop took one event per ~1 s tick,
+  but `Move` fires at the mouse report rate over the icon and the channel is unbounded, so a click
+  waited behind every earlier Move. Approaching the icon queued a hundred-plus events and delayed
+  the mode switch by minutes; the backlog outgrew the drain rate, so the lag grew all session.
+  Both channels now drain each pass, hover events coalesce into at most one refresh, and a click
+  supersedes them. Throttling the hover work never helped: a skipped event still used its tick.
+- **Left-click no longer opens the menu and changes the perf mode.** `tray-icon`'s
+  `menu_on_left_click` defaults to true and must be turned off. Under 0.11.3 the Windows backend
+  showed the menu only on `WM_RBUTTONUP` and ignored the flag. 0.19 honors it, so one left-click
+  opened the menu on button-down and cycled the perf mode, hidden behind the popup, on button-up.
+  Each hidden cycle was saved, so the AC/battery profile drifted. Left-click cycles the mode;
+  right-click opens the menu.
+- **dGPU temperature and power in the tooltip**, sampled on a background thread so the UI never
+  waits on a subprocess. With no NVIDIA tools or no dGPU the fields are left out, not shown as
+  "0°C". The monitor allows about a minute of failures: the tray starts at login, when the driver
+  is least likely to answer, and quitting on the first sample left the tooltip empty all session.
+- **Tray binary is 1.84 MB, down from 3.40 MB.** The six icons are decoded and scaled to 64×64 raw
+  RGBA at build time, so the `image` crate (a full PNG/JPEG/GIF/WebP decoder) is no longer linked.
+  `embed-resource`, a build-dependency with no `build.rs`, is removed.
+- **One fan-RPM ceiling instead of three.** `command.rs` capped RPM at 5500, `FAN_RPM_MAX_ANY` at
+  5300, and the device table reaches 5600, so CLI input was checked against a limit no real machine
+  had. Both ends now come from the tables (2000–5600), and a test keeps them in step.
+- **The tray's pure logic moved into `librazer`** (perf-mode cycle, nearest-brightness step), where
+  host tests reach it. The tray crate doesn't build on a non-Windows host, so tests there never ran.
 
 ## 2026-07: portability and correctness pass (pre-publication)
-Groundwork for making this usable on Blades other than the one it was written on. Everything below
-was verified on `0x029F` where hardware could verify it; the parts that inherently cannot be
-(other chassis) are marked.
+Groundwork for Blades other than the one it was written on. Verified on `0x029F` where hardware
+could verify it; what can't be (other chassis) is marked.
 
-- **Report checksum is now computed.** Every outgoing packet carries the real XOR-of-bytes-2..88
-  checksum that OpenRazer and razer-laptop-control both send, instead of the hard-coded `0x00` we
-  used to ship. HW-verified 2026-07-25: this Blade's EC accepts `crc = 0` *and* a correct CRC
-  equally, so this fixes no bug you can see here. It removes a whole class of silent failure on a
-  model whose firmware does validate the field.
+- **Report checksum is computed.** Each packet carries the XOR of bytes 2..88 that OpenRazer and
+  razer-laptop-control send, instead of a hard-coded `0x00`. HW-verified 2026-07-25: this Blade's
+  EC accepts `crc = 0` and a correct CRC alike, so nothing visible changes here. It prevents silent
+  failures on a model whose firmware checks the field.
 - **An unrecognized Blade no longer refuses to start.** A `RZ09-` SKU missing from `SUPPORTED` gets
-  a generic profile (all features offered, no init sequence guessed) and a loud warning naming the
-  SKU, rather than a hard "not supported" exit whose only workaround was `manual --pid`. Unsupported
-  commands answer `NotSupported` and fail fast, so a missing control degrades to one clean error.
-- **Per-PID fan envelopes for 44 uncatalogued chassis.** Transcribed from the community device
-  tables so the generic profile offers that machine's real fan range. *Transcribed, not tested*:
-  this project owns one Blade. Catalogued models in `SUPPORTED` always win.
-- **Resume detection now uses the OS power broadcast.** `PBT_APMRESUMESUSPEND` replaces the
-  "a tick gap over 30 s means we slept" heuristic, which misfired on this machine: running at
-  `IDLE_PRIORITY_CLASS` under EcoQoS, the loop was starved for **54.9 s while wide awake** and
-  logged a resume that never happened, firing a spurious re-assert.
-- **`DeviceState::read()` no longer duplicates its perf-mode query.** It was calling `get_perf_mode()`
-  twice (once for the perf mode, once for the fan mode), and each call reads both fan zones, so 13
-  round-trips became 11. (It is 12 again now that the keyboard-effect getter is read; see below.) A
-  test pins the budget so it can't quietly regress.
-- **`librazer` is usable as a library.** `HidTransport::send` takes a `Packet`, but `packet` was a
-  private module, so no outside crate could implement the trait. The seam was unusable by exactly
-  the consumers it exists for. `tests/public_api.rs` compiles as a separate crate and pins this.
-- **CI actually gates.** It now runs the test suite (it never did) and builds `windows-msvc`, the
-  configuration we ship; it was building `windows-gnu`. `cargo fmt --check` and clippy are both
-  gated, and the tree is now rustfmt-clean. `Cargo.lock` is committed, as it should be for a repo
-  that ships binaries.
+  a generic profile (all features offered, no guessed init sequence) and a warning naming the SKU,
+  instead of a "not supported" exit whose only workaround was `manual --pid`. Unsupported commands
+  answer `NotSupported` and fail fast, so a missing control gives one clean error.
+- **Per-PID fan ranges for 44 uncatalogued chassis,** transcribed from community device tables so
+  the generic profile offers each machine's real range. Transcribed, not tested: this project owns
+  one Blade. Catalogued models in `SUPPORTED` always win.
+- **Resume detection uses the OS power broadcast.** `PBT_APMRESUMESUSPEND` replaces the "a tick gap
+  over 30 s means we slept" heuristic. That misfired here: at `IDLE_PRIORITY_CLASS` under EcoQoS
+  the loop was starved for 54.9 s while awake, logged a resume that never happened and fired a
+  spurious re-assert.
+- **`DeviceState::read()` no longer queries perf mode twice.** It called `get_perf_mode()` for the
+  perf mode and again for the fan mode, and each call reads both fan zones. 13 round-trips are now
+  11 (12 again since the keyboard-effect getter was added). A test pins the count.
+- **`librazer` works as a library.** `HidTransport::send` takes a `Packet`, but `packet` was a
+  private module, so no outside crate could implement the trait. `tests/public_api.rs` compiles as
+  a separate crate and pins this.
+- **CI gates.** It now runs the tests (it never did) and builds `windows-msvc`, the shipped target,
+  instead of `windows-gnu`. `cargo fmt --check` and clippy are gated, and the tree is
+  rustfmt-clean. `Cargo.lock` is committed, as a repo that ships binaries should.
 
 
 ## 2026-07: keyboard lighting (effects-only)
-All HW-verified on a **single physical unit, a Razer Blade 16 (2023), `RZ09-0483U`, PID `0x029F`**
-(no other model was tested for lighting).
+All HW-verified on one unit, a Razer Blade 16 (2023), `RZ09-0483U`, PID `0x029F`; no other model
+was tested for lighting.
 - **Keyboard RGB effects**: Off / Spectrum / Wave / Breathing, in the tray ("Keyboard lighting"
-  submenu) and CLI (`razer-cli auto kbd-lighting effect <off|spectrum|wave|breathing>`). These are the
-  EC's built-in animated effects (extended-matrix command `0x0f02`, VARSTORE, our native `0x1F`
-  transaction), so they run in Normal mode and the Fn media keys keep working. Readable back via
-  `0x0f82`, so the menu and `auto json` reflect what the firmware is actually running.
-- **No keyboard color, by design.** (Wrong; see 0.9.5.) Arbitrary static/per-key color needs Razer *driver mode*
-  (host-streamed frames, what Synapse does), which disables the Fn media keys. In Normal mode the EC
-  ignores color payloads (falls back to Razer green) and effect-speed parameters (Wave runs at a fixed
-  rate, no slow/fast). Verified across *both* the extended (`0x0f02`) and standard (`0x030a`) matrix
-  families at transactions `0x1F` and `0xFF`, plus the per-key custom-frame path. See Quirks.
-- **`razer-cli … cmd --tx <hex>`**: a transaction-id override on the raw `cmd` path, for protocol
-  debugging (the reference drivers issue some commands at `0xFF` rather than our default `0x1F`).
+  submenu) and CLI (`razer-cli auto kbd-lighting effect <off|spectrum|wave|breathing>`). These are
+  the EC's built-in effects (extended-matrix command `0x0f02`, VARSTORE, our native `0x1F`
+  transaction), so they run in Normal mode and the Fn media keys keep working. Read back via
+  `0x0f82`, so the menu and `auto json` show what the firmware runs.
+- **No keyboard color, by design.** (Wrong; see 0.9.5.) Static or per-key color needs Razer driver
+  mode (host-streamed frames, as Synapse does), which disables the Fn media keys. In Normal mode the
+  EC ignores color payloads (falls back to Razer green) and effect speed (Wave has one fixed rate).
+  Checked on both the extended (`0x0f02`) and standard (`0x030a`) matrix families at transactions
+  `0x1F` and `0xFF`, plus the per-key custom-frame path. See Quirks.
+- **`razer-cli … cmd --tx <hex>`**: a transaction-id override on the raw `cmd` path for protocol
+  debugging; the reference drivers send some commands at `0xFF`, not our default `0x1F`.
 
 ## 2026-07: control, status and self-healing pass
-Landed on top of `0.9.0` (tray stayed `0.9.0`, CLI `0.8.6`); all HW-verified on `0x029F`.
+Landed on `0.9.0` (tray stayed `0.9.0`, CLI `0.8.6`); all HW-verified on `0x029F`.
 
 **New control & status**
 - **`razer-cli auto json`**: full device state as one flat JSON object (perf mode, CPU/GPU boost,
-  fan mode + setpoint + *actual* RPM, keyboard %, logo, charge limit), read in a single pass. Flat on
-  purpose (no Rust enum-tuple encoding), so Home Assistant or a status line can parse it blind.
-- **App profiles**: apply a perf mode while a named app runs, reverting to the AC/battery profile on
-  exit. A transient override that never clobbers a saved profile; empty by default.
-- **Resume re-assert without full enforce**: the intended mode is re-applied on wake by default
-  (`reassert_on_resume`), not only when enforce is on. Wake used to keep whatever the EC reset itself to.
-- **Labeled Custom boosts**: the Custom submenu now labels its two groups ("CPU boost" / "GPU boost")
+  fan mode, set point and actual RPM, keyboard %, logo, charge limit), read in one pass. No Rust
+  enum-tuple encoding, so Home Assistant or a status line can parse it blind.
+- **App profiles**: apply a perf mode while a named app runs, then return to the AC/battery profile
+  on exit. A temporary override that never overwrites a saved profile (Wrong; see 0.9.3.); empty by
+  default.
+- **Resume re-assert without full enforce**: on wake the intended mode is re-applied by default
+  (`reassert_on_resume`), not only with enforce on. Wake used to keep whatever the EC reset to.
+- **Labeled Custom boosts**: the Custom submenu labels its two groups ("CPU boost" / "GPU boost")
   instead of two unlabeled Low/Med/High stacks.
 
 **Self-healing / correctness**
-- **Startup reconcile**: on launch the tray reads the device back after its startup apply and
-  re-asserts once if reality doesn't match intent. A just-booted (especially crash-rebooted) EC will ACK
-  a perf-mode write without actually switching and keeps its last mode across a reboot, so the tray
-  could show "Balanced" while the EC sat in the battery profile. This runs regardless of the enforce
-  flag (startup correctness isn't optional) and retired the external `RazerPerfSilent` scheduled-task hack.
-- **Honest, per-chassis fan range**: the manual menu used to list 0/500/1000/1500/2000 (all at or below
-  the EC's floor, so no effect) and 5500 (above the ceiling). It now offers only speeds the hardware
-  honors, and the envelope is *per model* (a required `fan_rpm_range` on every descriptor), so the app
-  stays universal. Probed on hardware: setpoint 2000 still idles ~2400, and it won't exceed 5000.
+- **Startup reconcile**: after its startup apply the tray reads the device back and re-asserts once
+  on a mismatch. A just-booted EC, especially after a crash reboot, ACKs a perf-mode write without
+  switching and keeps its last mode across a reboot, so the tray could show "Balanced" while the EC
+  sat in the battery profile. It runs whatever the enforce flag says, and it retired the external
+  `RazerPerfSilent` scheduled-task hack.
+- **Per-chassis fan range**: the manual menu listed 0/500/1000/1500/2000 (all at or below the EC's
+  floor, so no effect) and 5500 (above the ceiling). It now offers only speeds the hardware honors,
+  per model (a required `fan_rpm_range` on every descriptor), so the app stays universal. On
+  hardware, set point 2000 still idles at ~2400 and the fan won't pass 5000.
 
 **Housekeeping**
-- **tray-icon 0.11.3 → 0.19**: enabled hover-driven tooltip refresh, which let the global
-  keyboard hook go (see Quirks).
-- **Security**: dropped the unmaintained `failure` crate (RUSTSEC) via single-instance 0.3, and picked
-  up patched `crossbeam-epoch` + `anyhow`. Audit-clean apart from Linux-only GTK transitives that aren't
-  in the Windows binary.
+- **tray-icon 0.11.3 → 0.19**: hover-driven tooltip refresh, which let the global keyboard hook go
+  (see Quirks).
+- **Security**: dropped the unmaintained `failure` crate (RUSTSEC) via single-instance 0.3 and took
+  patched `crossbeam-epoch` and `anyhow`. Audit-clean apart from Linux-only GTK dependencies that
+  aren't in the Windows binary.
 
 ## 0.9.0: first versioned local release
-The first numbered cut of the fork; it rode at upstream's `0.8.6` until now. Given how much changed,
-the highlights:
+The first numbered release of the fork, which had stayed at upstream's `0.8.6`. Highlights:
 
 **Architecture**
-- Put the device behind a `HidTransport` trait so the logic is host-testable with a mock, and moved the
-  state model into `librazer`. 47 host tests.
-- Split the ~1,500-line tray `main.rs` into `main` / `menu` / `state` / `program` / `platform`.
+- The device sits behind a `HidTransport` trait so the logic is host-testable with a mock, and the
+  state model moved into `librazer`. 47 host tests.
+- The ~1,500-line tray `main.rs` is split into `main` / `menu` / `state` / `program` / `platform`.
 - Sentence-case menu labels; reworked tooltip.
 
 **Behavior**
-- Mirror reads are input-gated: they track real input and stop when idle, which killed the old ~10 s
-  backlight pulsing.
+- Mirror reads are input-gated: they follow real input and stop when idle, which ended the old
+  ~10 s backlight pulsing.
 - Fn-key brightness changes are read back and adopted into the active profile.
-- Enforce mode (opt-in), with a resume-from-sleep re-assert.
-- Keyboard always-on is now a Normal-mode keep-alive (see Quirks); it never enters driver mode, so the
+- Enforce mode (opt-in), with a re-assert on resume from sleep.
+- Keyboard always-on is a Normal-mode keep-alive (see Quirks); it never enters driver mode, so the
   Fn keys keep working.
-- Logging dropped from Trace to Info, bounded at 10 MiB.
+- Logging dropped from Trace to Info, capped at 10 MiB.
 
 **Fixes**
-- `battery-care` output went to a suppressed log level; now it prints (and `auto info` shows it).
-- "Close GPU apps" / `taskkill` could kill the desktop. Given nvidia-smi reports dwm/explorer/shell hosts
-  as GPU users and the old code had no real filter, it SIGKILLed the session. Added a shared, host-tested
-  `process_guard` safelist used by both the CLI and tray, plus handling for nvidia-smi's
-  `[Insufficient Permissions]` placeholder.
-- Recovery loop no longer busy-spins on device loss; "Close GPU apps" no longer panics when nvidia-smi
-  isn't on `PATH`; Linux build fix.
-
+- `battery-care` output went to a suppressed log level; now it prints, and `auto info` shows it.
+- "Close GPU apps" / `taskkill` could kill the desktop: nvidia-smi lists dwm, explorer and shell
+  hosts as GPU users, the old code had no real filter, and it SIGKILLed the session. A shared,
+  host-tested `process_guard` safelist now serves the CLI and tray, and nvidia-smi's
+  `[Insufficient Permissions]` placeholder is handled.
+- The recovery loop no longer busy-spins on device loss; "Close GPU apps" no longer panics when
+  nvidia-smi isn't on `PATH`; Linux build fix.
