@@ -700,6 +700,21 @@ impl ProgramState {
         self.rebuild_menu(Some(tray_icon));
     }
 
+    /// A new rule list from the rules window: save it like any menu change. A running rule
+    /// that changed or moved ends here; the next scan starts whatever matches now.
+    pub fn replace_rules(&mut self, rules: Vec<AppProfile>, tray_icon: &tray_icon::TrayIcon) {
+        if let Some(session) = &self.action {
+            if rules.get(session.rule) != self.app_profiles.get(session.rule) {
+                self.action = None;
+            }
+        }
+        self.app_profiles = rules;
+        if let Err(e) = self.persist() {
+            log::warn!("could not save the rules from the rules window: {e:?}");
+        }
+        self.rebuild_menu(Some(tray_icon));
+    }
+
     /// "Edit rules...": write the guide beside the config and open both in Notepad, the
     /// config last so it is in front. The tray picks up a saved edit by itself.
     pub fn open_rules_editor(&mut self) {

@@ -121,6 +121,10 @@ TURNING A RULE ON OR OFF
 Use the check marks in the tray menu under "Game rules". You don't need to
 edit anything for that. The rule that is in force right now says "(running)".
 
+"Rules window..." in the same menu adds, changes and deletes rules without
+editing this file by hand. Use the file for the settings the window doesn't
+show (lighting, charge limit, more than one app); the window keeps them.
+
 
 ADDING OR CHANGING A RULE
 -------------------------

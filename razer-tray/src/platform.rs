@@ -143,6 +143,47 @@ pub fn set_autostart(enable: bool) -> Result<()> {
     Ok(())
 }
 
+/// The file names of the running processes, for the rules window's app list.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn running_process_names() -> Vec<String> {
+    let mut sys = System::new();
+    sys.refresh_processes();
+    sys.processes()
+        .values()
+        .map(|p| p.name().to_string())
+        .collect()
+}
+
+/// The programs using the NVIDIA GPU, for the rules window's app list. Asked only while
+/// the GPU is awake (the PnP state, which can't wake it), since `nvidia-smi` would wake
+/// it; asleep, nothing is using it.
+#[cfg(target_os = "windows")]
+pub fn gpu_process_names() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    if !nvidia_gpu().is_some_and(|g| !g.asleep) {
+        return Vec::new();
+    }
+    let Ok(out) = procCommand::new("nvidia-smi")
+        .args(["--query-compute-apps=name", "--format=csv,noheader"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().rsplit(['\\', '/']).next())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn gpu_process_names() -> Vec<String> {
+    Vec::new()
+}
+
 /// Open a text file for hand editing ("Edit rules..."). Notepad, not the file's
 /// association: `.toml` has none on a stock Windows, and Notepad is always there.
 #[cfg(target_os = "windows")]

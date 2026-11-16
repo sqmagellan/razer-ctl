@@ -41,7 +41,10 @@ history and the measurements behind it; `README.upstream.md` covers the project 
 - **App profiles ("Actions")**: settings that apply while a named app runs. Rules can match several
   executables, carry a `priority`, be disabled, or require AC (`require_ac`). They change only the
   fields they set and never the saved profile. Edits take effect within a few seconds. The
-  **Game rules** menu turns each rule on or off and marks the one running. **Edit rules…** opens
+  **Game rules** menu turns each rule on or off and marks the one running. **Rules window…** lists
+  the rules with a check box each and adds, edits or deletes them in a plain Windows dialog (app,
+  power mode, CPU/GPU boost for Custom, fans, plugged in only, priority); settings it doesn't show
+  are kept as the file has them. **Edit rules…** opens
   the config in Notepad beside `game-rules-help.txt`, a guide to every rule setting with two
   examples; the tray rewrites the guide each time, since a save of the config drops comments.
 - **Perf-cycle hotkey** (off by default): `cycle_perf_hotkey = "Ctrl+Alt+P"` in the config acts like

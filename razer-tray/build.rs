@@ -44,5 +44,23 @@ fn main() {
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
     }
 
+    // Embed a manifest asking for Common Controls 6, so the rules window's list, combo
+    // boxes and buttons have the current Windows look instead of the Windows 95 one. Only
+    // the MSVC linker (link.exe, lld-link) takes these flags.
+    let manifest = Path::new("res").join("razer-tray.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && target_env == "msvc" {
+        // Not canonicalize: on Windows it returns a \\?\ path, which link.exe rejects.
+        let dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+        let full = Path::new(&dir).join(&manifest);
+        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
+            full.display()
+        );
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
 }

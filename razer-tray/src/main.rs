@@ -6,6 +6,8 @@ mod platform;
 mod program;
 mod rule_checks;
 mod rules;
+mod rules_form;
+mod rules_window;
 mod state;
 
 use anyhow::Result;
@@ -286,6 +288,23 @@ fn main() -> Result<()> {
     let tray_channel = TrayIconEvent::receiver();
     let event_loop = EventLoopBuilder::new().build();
 
+    // "Rules window...": the window runs on its own thread, sends new rule lists here and
+    // reads the tray's rules back from `rules_shared` (see rules_window.rs).
+    let rules_shared = std::sync::Arc::new(std::sync::Mutex::new(rules_window::Shared::default()));
+    let (rules_tx, rules_rx) = std::sync::mpsc::channel::<rules_window::Change>();
+    let rules_link = {
+        let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+        rules_window::Link {
+            shared: rules_shared.clone(),
+            changes: rules_tx,
+            wake: std::sync::Arc::new(move || {
+                if let Ok(p) = proxy.lock() {
+                    let _ = p.send_event(());
+                }
+            }),
+        }
+    };
+
     let mut last_device_state_check_timestamp = std::time::Instant::now();
     // The last-input tick recorded at the previous Mirror poll. We only re-poll when
     // this changes (new input), so polling follows your activity and stops when you
@@ -370,6 +389,8 @@ fn main() -> Result<()> {
                     last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
                 } else if event.id == MenuId(rules::EDIT_ID.to_string()) {
                     state.open_rules_editor();
+                } else if event.id == MenuId(rules_window::OPEN_ID.to_string()) {
+                    rules_window::open(rules_link.clone());
                 } else if event.id == MenuId("reset_config".to_string()) {
                     state.reset_config(Some(&tray_icon));
                     // The profiles are unset now: take the next reading through the resync
@@ -555,6 +576,22 @@ fn main() -> Result<()> {
             // acts only on *transitions*: a rule's session starts when its process appears
             // and ends when the last match exits. Picks made in between hold for the
             // session (see ActionSession).
+            // A rule list from the rules window, made from the rules the tray has now: save
+            // it and scan at once. One made from an older list (a hand edit landed since) is
+            // dropped; the window shows the newer list within a second.
+            while let Ok(change) = rules_rx.try_recv() {
+                let current = rules_shared
+                    .lock()
+                    .map(|s| s.generation)
+                    .unwrap_or_default();
+                if change.based_on == current {
+                    state.replace_rules(change.rules, &tray_icon);
+                    last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
+                } else {
+                    log::info!("rules window: a change made from an older rule list; dropped");
+                }
+            }
+
             if !state.app_profiles.is_empty()
                 && now > last_app_scan_timestamp + std::time::Duration::from_secs(5)
             {
@@ -610,6 +647,15 @@ fn main() -> Result<()> {
                     state.action = None;
                     state.rebuild_menu(Some(&tray_icon));
                 }
+            }
+
+            if let Ok(mut shared) = rules_shared.lock() {
+                shared.publish(
+                    &state.app_profiles,
+                    state.action.map(|a| a.rule),
+                    state.saved_profile().perf_mode,
+                    state.fan_rpm_range.1,
+                );
             }
 
             // Converge the device on what it should be now: the Action session, else the

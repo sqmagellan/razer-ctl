@@ -614,6 +614,12 @@ pub fn build(
     }
     game_rules.append(&PredefinedMenuItem::separator())?;
     game_rules.append(&MenuItem::with_id(
+        crate::rules_window::OPEN_ID,
+        "Rules window\u{2026}",
+        true,
+        None,
+    ))?;
+    game_rules.append(&MenuItem::with_id(
         crate::rules::EDIT_ID,
         "Edit rules\u{2026}",
         true,
