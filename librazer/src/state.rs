@@ -1025,7 +1025,9 @@ pub struct ConfigState {
     #[serde(default = "default_true")]
     pub reassert_on_resume: bool,
     // "Actions": app-triggered profile switches. Empty by default (no behavior).
-    #[serde(default)]
+    // An empty list is left out of the file: written as `app_profiles = []`, a rule pasted
+    // as `[[app_profiles]]` at the end would declare the key twice and the file not parse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_profiles: Vec<AppProfile>,
     /// Also switch the Windows power mode (the Settings > Power "Power mode" slider) to
     /// match the perf mode: Battery/Silent -> Best power efficiency, Balanced -> Balanced,

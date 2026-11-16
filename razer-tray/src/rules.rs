@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 
 use crate::state::AppProfile;
 
-/// Menu id prefix of a rule's check mark: `rule_toggle:<index>:<process>`.
+/// Menu id prefix of a rule's check mark: `rule_toggle:<index>:<fingerprint>`.
 const TOGGLE_PREFIX: &str = "rule_toggle:";
 
 /// Menu id of "Edit rules...".
@@ -21,10 +21,18 @@ pub const EDIT_ID: &str = "edit_rules";
 /// The guide "Edit rules..." opens beside the config.
 pub const HELP_FILE: &str = "game-rules-help.txt";
 
-/// The menu id of rule `index`. It carries the rule's process too, so a click on a menu built
-/// before a hand edit moved the rules can't toggle a different rule.
+/// The menu id of rule `index`. It carries a fingerprint of the whole rule too, so a click on
+/// a menu built before a hand edit moved or changed the rules can't toggle a different rule,
+/// even one for the same program.
 pub fn toggle_id(index: usize, rule: &AppProfile) -> String {
-    format!("{TOGGLE_PREFIX}{index}:{}", rule.process)
+    format!("{TOGGLE_PREFIX}{index}:{:016x}", fingerprint(rule))
+}
+
+fn fingerprint(rule: &AppProfile) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    toml::to_string(rule).unwrap_or_default().hash(&mut h);
+    h.finish()
 }
 
 /// Whether `id` is a rule check mark (current or stale).
@@ -35,9 +43,9 @@ pub fn is_toggle_id(id: &str) -> bool {
 /// Flip `enabled` on the rule `id` names. Returns the rule's label and its new state, or
 /// `None` when the id no longer names that rule (the rules changed since the menu was built).
 pub fn toggle(rules: &mut [AppProfile], id: &str) -> Option<(String, bool)> {
-    let (index, process) = id.strip_prefix(TOGGLE_PREFIX)?.split_once(':')?;
+    let (index, print) = id.strip_prefix(TOGGLE_PREFIX)?.split_once(':')?;
     let rule = rules.get_mut(index.parse::<usize>().ok()?)?;
-    if rule.process != process {
+    if format!("{:016x}", fingerprint(rule)) != print {
         return None;
     }
     rule.enabled = !rule.enabled;
@@ -120,8 +128,8 @@ ADDING OR CHANGING A RULE
 2. Copy one of the examples below, starting at its [[app_profiles]] line.
 3. Change the values. Keep the double quotes around text.
 4. Save the file (Ctrl+S).
-5. The tray reads the file again within about 5 seconds. The rule then shows
-   in the tray menu under "Game rules".
+5. The tray checks the file every 5 seconds and picks up the change. The
+   rule then shows in the tray menu under "Game rules".
 
 Each rule starts with the line [[app_profiles]]. The lines under it belong to
 that rule, up to the next line that starts with [ or [[.
@@ -206,9 +214,11 @@ keyboard_color = "FollowPerfMode"
 
 IF SOMETHING GOES WRONG
 -----------------------
-- If the file has a mistake (a missing quote, a misspelled value), the tray
-  keeps the rules it had and doesn't save over the file until it is fixed.
-  The log says what is wrong:
+- If you save a mistake (a missing quote, a misspelled value) while the tray
+  runs, it keeps the rules it had and doesn't save over the file until the
+  mistake is fixed. If the tray starts with a mistake in the file, it uses
+  no rules and says so at the top of its menu. Either way the log says what
+  is wrong:
       {log}
 - Don't keep notes in {config_name}. The tray saves that file again when
   you change a setting from its menu, and lines that start with # are lost.
@@ -217,7 +227,7 @@ IF SOMETHING GOES WRONG
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{FanSpeed, PerfMode};
+    use crate::state::{ConfigState, FanSpeed, PerfMode};
     use librazer::keyboard::KeyboardColor;
     use librazer::types::{BatteryCare, CpuBoost, GpuBoost, KeyboardEffect, LogoMode};
 
@@ -244,6 +254,8 @@ mod tests {
         assert_eq!(toggle(&mut rules, &id), Some(("b.exe".to_string(), false)));
         assert!(rules[0].enabled);
         assert!(!rules[1].enabled);
+        // The rebuilt menu carries the rule as it is now.
+        let id = toggle_id(1, &rules[1]);
         assert_eq!(toggle(&mut rules, &id), Some(("b.exe".to_string(), true)));
         assert!(rules[1].enabled);
     }
@@ -307,6 +319,33 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct Rules {
         app_profiles: Vec<AppProfile>,
+    }
+
+    /// The guide says to paste an example at the very end of the config. That has to work
+    /// on a config the tray saved with no rules in it, too.
+    #[test]
+    fn an_example_pasted_at_the_end_of_a_saved_config_with_no_rules_loads() {
+        for saved in [ConfigState::default(), ConfigState::first_run()] {
+            let text = toml::to_string_pretty(&saved).unwrap();
+            let pasted = format!("{text}\n{EXAMPLES}");
+            let back: ConfigState =
+                toml::from_str(&pasted).unwrap_or_else(|e| panic!("{e}\n--- config ---\n{pasted}"));
+            assert_eq!(back.app_profiles.len(), 2);
+        }
+    }
+
+    /// Two rules for the same program, swapped by hand while the menu was open: the old
+    /// check mark names a rule that is no longer at its place, so it does nothing.
+    #[test]
+    fn a_check_mark_for_a_swapped_rule_of_the_same_program_does_nothing() {
+        let mut a = rule("game.exe", Some("A"));
+        a.require_ac = Some(true);
+        let b = rule("game.exe", Some("B"));
+        let mut rules = vec![a.clone(), b.clone()];
+        let stale = toggle_id(0, &rules[0]);
+        rules = vec![b, a];
+        assert_eq!(toggle(&mut rules, &stale), None);
+        assert!(rules.iter().all(|r| r.enabled));
     }
 
     #[test]
