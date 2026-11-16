@@ -1,7 +1,8 @@
 ## What's new in 0.9.8
 
-- **Game rules menu.** Each app rule has a check mark to turn it on or off. The rule in force shows "(running)".
-- **Rules window.** Add, edit and delete rules in a standard Windows dialog. Pick the app from running programs or browse for it. "Edit rules…" opens the config beside a plain-English guide.
+- **Game rules menu and window.** Each app rule has a check mark to turn it on or off; the rule in force shows "(running)". "Rules window…" adds, edits and deletes rules in a standard Windows dialog. "Edit rules…" opens the config beside a plain-English guide.
+- **CPU speed cap.** A game rule can cap the CPU speed while the game runs on AC, through the Windows power plan. The old values come back when the game closes, and after a crash.
+- **"What's keeping the GPU awake?"** A new menu item lists the apps with memory on the NVIDIA GPU, without waking it.
 - **App rules end cleanly.** A game closing during Modern Standby could leave the laptop in Performance. The tray now checks the laptop 3 s and 15 s after a rule starts or ends and fixes any drift.
 - **CLI and tray take turns.** A lock shared by every razer-ctl process keeps `razer-cli` from reading a reply meant for the tray.
 - **Charger details.** The full charger table, 40 W USB-C to 400 W. `auto info` says when the charger is smaller than the laptop recommends.

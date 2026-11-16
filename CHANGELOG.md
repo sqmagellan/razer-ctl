@@ -4,27 +4,9 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
-## Unreleased
-On `0x029F` the CPU cap has run in a test tray since 2026-11-06 and the dGPU check since
-2026-10-25.
-
-**New**
-- **CPU speed cap in game rules.** `cpu_max_mhz` (800 or more) caps the CPU on AC while the rule
-  runs, through `PROCFREQMAX` and `PROCFREQMAX1` on the Windows power plan active when the cap
-  starts. The old values are saved to a file first and come back when the rule ends, on unplug and
-  on Quit. A value something else changed meanwhile is left alone. After a crash, the next start
-  puts the saved values back. A failed write is logged and not retried for that value. The rules
-  window has a "CPU speed limit" row. A Helldivers 2 rule held 3600 MHz for 28 minutes and put the
-  settings back when the game closed.
-- **"What's keeping the GPU awake?"** lists the apps with dedicated memory on the NVIDIA GPU, from
-  the GPU Process Memory performance counters, matched to the dGPU by its adapter LUID. Neither
-  read wakes the GPU. With no other display adapter (dGPU-only mode) it says the GPU drives the
-  display and can't sleep. `razer-tray --gpu-report <file>` writes the same report.
-
-- Versions: `librazer` gains `cpu_cap`; `AppProfile` gains `cpu_max_mhz` (breaking).
-
-## 0.9.8: game rules menu and window, app rules that end cleanly (2026-11-15)
-Built and tested on `0x029F` (2026-11-11 to 2026-11-15). Five changes come from
+## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)
+Built and tested on `0x029F` (2026-11-11 to 2026-11-15). The CPU cap ran in a test tray from
+2026-11-06 and the dGPU check from 2026-10-25. Five changes come from
 [Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl) (MIT), a fork for the same laptop.
 Thanks to Finesssee for documenting and measuring them.
 
@@ -36,6 +18,17 @@ Thanks to Finesssee for documenting and measuring them.
   doesn't show are kept. It uses stock controls and adds 116 KB to the exe.
 - **Edit rules…** opens the config in Notepad beside `game-rules-help.txt`, a plain-English guide
   to every rule setting. A test fails if a setting is missing from the guide.
+- **CPU speed cap in game rules.** `cpu_max_mhz` (800 or more) caps the CPU on AC while the rule
+  runs, through `PROCFREQMAX` and `PROCFREQMAX1` on the active Windows power plan; a plan switch
+  gets the cap too. Before each write the old values and the cap go to a file. The old values come
+  back when the rule ends, on unplug and on Quit, or at the next start after a crash. A value
+  something else changed meanwhile is left alone. A failed write is retried after 5 s, doubling up
+  to 5 minutes. The rules window has a "CPU speed limit" row. A Helldivers 2 rule held 3600 MHz
+  for 28 minutes and put the settings back when the game closed.
+- **"What's keeping the GPU awake?"** lists the apps with dedicated memory on the NVIDIA GPU, from
+  the GPU Process Memory performance counters, matched to the dGPU by its adapter LUID. Neither
+  read wakes the GPU. With no other display adapter (dGPU-only mode) it says the GPU drives the
+  display and can't sleep. `razer-tray --gpu-report <file>` writes the same report.
 - **Full charger table.** `0x078c` covers 40 W USB-C and 120 W to 400 W barrel chargers. Its
   second byte is the charger the laptop recommends: `auto json` adds `charger_recommended_watts`,
   and `auto info` names it when a smaller charger is plugged in. From Finesssee/razer-ctl.
@@ -73,7 +66,7 @@ Thanks to Finesssee for documenting and measuring them.
 
 - Versions: `razer-tray` 0.9.8, `librazer` 0.12.0 (breaking: `CpuBoost::Undervolt` is
   `Overclock`; `ResponseError` and `capture::Verdict` gain `Timeout`; `PowerSource` gains
-  `recommended`), `razer-cli` 0.9.2.
+  `recommended`; `AppProfile` gains `cpu_max_mhz`), `razer-cli` 0.9.2.
 
 ## 0.9.7: temperatures, `razer-cli probe`, Blade 17 (2022) profile (2026-10-25)
 Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and restored
