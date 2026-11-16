@@ -143,6 +143,22 @@ pub fn set_autostart(enable: bool) -> Result<()> {
     Ok(())
 }
 
+/// Open a text file for hand editing ("Edit rules..."). Notepad, not the file's
+/// association: `.toml` has none on a stock Windows, and Notepad is always there.
+#[cfg(target_os = "windows")]
+pub fn open_in_editor(path: &std::path::Path) -> Result<()> {
+    std::process::Command::new("notepad.exe")
+        .arg(path)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn open_in_editor(path: &std::path::Path) -> Result<()> {
+    std::process::Command::new("xdg-open").arg(path).spawn()?;
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 pub fn gpu_taskkill() -> Result<()> {
     use std::os::windows::process::CommandExt;

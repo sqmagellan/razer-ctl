@@ -246,6 +246,8 @@ impl ProgramState {
                 keyboard_presets: &config.keyboard_presets,
                 battery_bar: config.keyboard_battery_bar,
                 ac_power,
+                rules: &config.app_profiles,
+                running_rule: None,
             },
         )?;
         Ok(Self {
@@ -309,6 +311,8 @@ impl ProgramState {
             keyboard_presets: &self.keyboard_presets,
             battery_bar: self.battery_bar,
             ac_power: self.ac_power,
+            rules: &self.app_profiles,
+            running_rule: self.action.map(|a| a.rule),
         }
     }
 
@@ -675,6 +679,51 @@ impl ProgramState {
         }
         self.app_profiles = disk.app_profiles;
         self.rebuild_menu(None);
+    }
+
+    /// A "Game rules" check mark: turn that rule on or off and save it. The next process
+    /// scan starts or ends the rule. A check mark from a menu built before the rules changed
+    /// is ignored, and the menu is rebuilt either way.
+    pub fn toggle_rule(&mut self, id: &str, tray_icon: &tray_icon::TrayIcon) {
+        match crate::rules::toggle(&mut self.app_profiles, id) {
+            Some((label, enabled)) => {
+                log::info!(
+                    "game rule '{label}' {}",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+                if let Err(e) = self.persist() {
+                    log::warn!("could not save the game rule change: {e:?}");
+                }
+            }
+            None => log::info!("menu item {id} is from before the rules changed; ignored"),
+        }
+        self.rebuild_menu(Some(tray_icon));
+    }
+
+    /// "Edit rules...": write the guide beside the config and open both in Notepad, the
+    /// config last so it is in front. The tray picks up a saved edit by itself.
+    pub fn open_rules_editor(&mut self) {
+        if !self.config_file.exists() {
+            if let Err(e) = self.persist() {
+                log::warn!("could not create the config to edit: {e:?}");
+            }
+        }
+        let config = self.config_file.path().to_path_buf();
+        let Some(dir) = config.parent() else {
+            log::warn!("config path {} has no folder", config.display());
+            return;
+        };
+        let mut files = Vec::new();
+        match crate::rules::write_help(dir, &config, &crate::get_logging_file_path()) {
+            Ok(help) => files.push(help),
+            Err(e) => log::warn!("could not write the game rules guide: {e:?}"),
+        }
+        files.push(config);
+        for file in &files {
+            if let Err(e) = crate::platform::open_in_editor(file) {
+                log::warn!("could not open {}: {e:?}", file.display());
+            }
+        }
     }
 
     pub fn handle_event(&self, event_id: &str) -> Option<DeviceState> {

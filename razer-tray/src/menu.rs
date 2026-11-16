@@ -12,8 +12,8 @@ use librazer::unsupported::{Optional, Unsupported};
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::state::{
-    percent_to_brightness, DeviceState, DeviceStateDelta, FanSpeed, LightsMode, PerfMode,
-    FAN_RPM_STEP,
+    percent_to_brightness, AppProfile, DeviceState, DeviceStateDelta, FanSpeed, LightsMode,
+    PerfMode, FAN_RPM_STEP,
 };
 
 /// Everything besides the device state that the menu shows.
@@ -49,6 +49,10 @@ pub struct MenuOptions<'a> {
     pub battery_bar: bool,
     /// Which profile the header says the picks go to.
     pub ac_power: bool,
+    /// The app rules, for the "Game rules" submenu.
+    pub rules: &'a [AppProfile],
+    /// The rule in force now (an index into `rules`), marked "(running)".
+    pub running_rule: Option<usize>,
 }
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
@@ -76,6 +80,8 @@ pub fn build(
         keyboard_presets,
         battery_bar,
         ac_power,
+        rules,
+        running_rule,
     } = *opts;
     // A setting this laptop lacks keeps its submenu, disabled, so the menu says why it
     // does nothing instead of hiding it.
@@ -581,6 +587,39 @@ pub fn build(
             .map(|i| i as &dyn IsMenuItem)
             .collect::<Vec<_>>(),
     )?)?;
+
+    // Game rules: a check mark per app rule, and the way to edit them by hand. The ids are
+    // handled in main.rs (see rules.rs), not through `event_handlers`: a rule is config, not
+    // a device state.
+    let rule_items: Vec<Box<dyn IsMenuItem>> = if rules.is_empty() {
+        vec![Box::new(MenuItem::new("No rules yet", false, None))]
+    } else {
+        rules
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| {
+                Box::new(CheckMenuItem::with_id(
+                    crate::rules::toggle_id(i, rule),
+                    crate::rules::menu_label(rule, running_rule == Some(i)),
+                    true,
+                    rule.enabled,
+                    None,
+                )) as Box<dyn IsMenuItem>
+            })
+            .collect()
+    };
+    let game_rules = Submenu::new("Game rules", true);
+    for item in &rule_items {
+        game_rules.append(item.as_ref())?;
+    }
+    game_rules.append(&PredefinedMenuItem::separator())?;
+    game_rules.append(&MenuItem::with_id(
+        crate::rules::EDIT_ID,
+        "Edit rules\u{2026}",
+        true,
+        None,
+    ))?;
+    menu.append(&game_rules)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
 

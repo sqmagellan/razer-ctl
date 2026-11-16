@@ -5,6 +5,7 @@ mod menu;
 mod platform;
 mod program;
 mod rule_checks;
+mod rules;
 mod state;
 
 use anyhow::Result;
@@ -363,6 +364,12 @@ fn main() -> Result<()> {
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
                     log::info!("match event id");
                     platform::gpu_taskkill()?;
+                } else if rules::is_toggle_id(event.id.as_ref()) {
+                    state.toggle_rule(event.id.as_ref(), &tray_icon);
+                    // Start or end the rule now, not at the next 5 s scan.
+                    last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
+                } else if event.id == MenuId(rules::EDIT_ID.to_string()) {
+                    state.open_rules_editor();
                 } else if event.id == MenuId("reset_config".to_string()) {
                     state.reset_config(Some(&tray_icon));
                     // The profiles are unset now: take the next reading through the resync
@@ -593,13 +600,16 @@ fn main() -> Result<()> {
                             state.action = None;
                         }
                     }
+                    // The Game rules menu marks the running rule.
+                    state.rebuild_menu(Some(&tray_icon));
                 }
             } else if state.app_profiles.is_empty() {
                 // The rules were removed while one ran: that ends it too.
                 if state.action.is_some() {
                     rule_checks.schedule(now);
+                    state.action = None;
+                    state.rebuild_menu(Some(&tray_icon));
                 }
-                state.action = None;
             }
 
             // Converge the device on what it should be now: the Action session, else the
