@@ -4,9 +4,43 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
-## Unreleased
+## 0.9.8: game rules menu and window, app rules that end cleanly, Finesssee's protocol notes (draft, unreleased)
+Built and tested on `0x029F` (2026-11-11 to 2026-11-15). Five of the changes below come
+from [Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl) (MIT), a fork with the same
+laptop; thanks to Finesssee for writing them down and measuring them.
 
-**Fixed**
+**New**
+- **Game rules menu.** The tray menu lists each app rule with a check mark to turn it on or off,
+  and marks the one in force "(running)". A click saves `enabled` in the config and starts or ends
+  the rule at once.
+- **Rules window.** "Rules window…" in that menu opens a plain Windows dialog: a list with a check
+  box per rule (Rule, App, Power mode), the running rule marked, and Add, Edit and Delete. The rule
+  dialog sets the name, the app (running programs, the ones using the NVIDIA GPU first, or Browse),
+  the power mode with CPU and GPU boost for Custom, the fans (Auto or Max), "Only when plugged in"
+  and the priority. Settings it doesn't show stay as the file has them. It saves through the same
+  path as the menu, so it never writes over a hand edit. No UI framework: stock Windows controls;
+  the exe now carries a manifest for Common Controls 6.
+- **Edit rules…** opens the config in Notepad beside `game-rules-help.txt`, a plain-English guide
+  to every rule setting with two worked examples. The tray rewrites the guide each time, since a
+  save of the config drops comments. A test fails if a rule setting has no line in it.
+- **The whole charger table.** `0x078c`'s levels now cover 40 W USB-C and barrel chargers from
+  120 W to 400 W, and its second byte is the charger the laptop recommends: `auto json` adds
+  `charger_recommended_watts`, and `auto info` says "the laptop recommends 330 W" when a smaller
+  charger is plugged in. From Finesssee/razer-ctl's copy of Synapse 4's table; it agrees with the
+  two readings there are (`0x029F` on 330 W reads `[0x12, 0x12]`, a Blade 15 Base 2020 on its
+  230 W charger `0x0d`).
+
+**Reliability**
+- **An app rule's end is checked.** When a rule ended, the tray wrote Balanced, read it back once,
+  and the EC was in Performance a minute later (`0x029F`, 2026-11-15, after a game closed in Modern
+  Standby). Two causes are fixed. The fan write re-sent a perf mode it had just read, and a read
+  that trailed the perf write put the old mode back; it now re-sends the mode it wrote. And the
+  tray now reads the device again 3 s and 15 s after a rule starts or ends, and writes again only
+  if something drifted. Forced drift on `0x029F` was put right in 3.3 s.
+- **The CLI and the tray take turns on the EC.** Each request and its reply now hold a file lock
+  shared by every razer-ctl process, so `razer-cli` can't read a reply meant for the tray (both use
+  transaction id `0x1f`). The wait is capped at 1 s, so a stuck process can't freeze the tray.
+  From Finesssee/razer-ctl, with the same lock file.
 - **Max Fan changes only its own bit.** The EC byte behind Max Fan (`0x070f`) also holds other
   settings: `0x04` is a temporary full charge, and further bits are documented by
   [openblade-core](https://github.com/OpenBladeProject/openblade-core). Max Fan used to write the
@@ -19,6 +53,28 @@ unless a user report is cited.
   once without waiting, as before, because it writes from its menu thread; Enforce repairs a
   late read with one more write. On `0x029F` (2026-11-11) 70%, off and 70% each read back on
   the first read (the whole command took 44-62 ms), so this laptop doesn't lag.
+- **Max Fan reads from any `0x078f` value.** The byte is a bitfield (`0x01` CPU boost, `0x02`
+  Max Fan, `0x04` charge to full once, `0x08` local dimming, per Finesssee/razer-ctl). A value with
+  another bit set no longer fails to parse. On `0x029F` it read `0x00` in Balanced (2026-11-15).
+- **CPU boost level 4 is Overclock.** It was labeled Undervolt; the capture in `data/README.md`
+  reads "cpu overclock", and Synapse undervolts through Intel XTU, not the EC (Finesssee/razer-ctl).
+  Configs and scripts that say "Undervolt" still work. A config saved by 0.9.8 with this level
+  says "Overclock", which 0.9.7 can't read.
+- **Fan mode 2 and status 0x04.** Fan mode 2 (Synapse's ForceAuto) reads as Auto instead of
+  failing the perf read; it is never sent. Status `0x04` is the EC's timeout: retried after 20 ms
+  instead of 500 ms, and never re-sent by a raw `cmd` (Finesssee/razer-ctl).
+- **A saved config without rules takes a pasted rule.** It used to hold `app_profiles = []`, so a
+  rule pasted at the end made the file fail to parse.
+
+**Not taken**
+- Finesssee/razer-ctl also writes perf and fan mode in one write and waits 200 ms after each,
+  measured there as fans stuck near 4400 RPM. On `0x029F` (2026-11-15, idle) the tray's two-step
+  write reached a 5000 RPM target in about 80 s, the same ramp as one write with the wait, so
+  0.9.8 keeps the two-step write.
+
+- Versions (set at the cut): `razer-tray` 0.9.8, `librazer` 0.12.0 (breaking: `CpuBoost::Undervolt`
+  is `Overclock`, `ResponseError` and `capture::Verdict` gain `Timeout`, `PowerSource` gains
+  `recommended`), `razer-cli` 0.9.2.
 
 ## 0.9.7: temperatures, `razer-cli probe`, Blade 17 (2022) profile (2026-10-25)
 Tested on `0x029F` (2026-10-19 to 2026-10-23): `probe --writes` read back every write and put
