@@ -50,6 +50,13 @@ pub fn parse_instance(name: &str) -> Option<(u32, u64)> {
     Some((pid, (u64::from(high) << 32) | u64::from(low)))
 }
 
+/// Whether a PDH counter item holds a usable value: `PDH_CSTATUS_VALID_DATA` (0) or
+/// `PDH_CSTATUS_NEW_DATA` (1). Anything else is a missing or failed sample.
+#[cfg(any(target_os = "windows", test))]
+pub fn pdh_value_usable(cstatus: u32) -> bool {
+    cstatus <= 1
+}
+
 /// Group per-pid usage into holders, biggest first. `name_of` maps a pid to
 /// (file name, full path); pids that exited or that `skip` names are dropped.
 #[cfg(any(target_os = "windows", test))]
@@ -99,14 +106,15 @@ pub fn format_report(r: &Report) -> String {
     match r.hybrid {
         Some(false) => {
             s.push_str(
-                "dGPU-only mode: the NVIDIA GPU drives the display, so it cannot power down.\n\
+                "dGPU-only mode: the NVIDIA GPU is the only display adapter, so it drives the \
+                 display and cannot power down.\n\
                  To let it sleep, switch to Optimus/hybrid in NVIDIA Control Panel > \
                  Manage Display Mode (needs a restart), then check again.\n",
             );
             return s;
         }
         None => s.push_str("Display mode: unknown (could not list display adapters).\n"),
-        Some(true) => s.push_str("Display mode: hybrid (Intel graphics drives the display).\n"),
+        Some(true) => s.push_str("Display mode: hybrid (an Intel or AMD GPU is present too).\n"),
     }
     s.push_str(match r.asleep {
         Some(true) => "dGPU: asleep (powered down).\n",
@@ -119,14 +127,14 @@ pub fn format_report(r: &Report) -> String {
     }
     if r.holders.is_empty() {
         s.push_str(if r.asleep == Some(false) {
-            "No app holds memory on it right now; it should power down within seconds \
-             unless something is polling it (monitoring tools, nvidia-smi).\n"
+            "No app shows dedicated memory on it. If it stays awake, something may be \
+             polling it (monitoring tools, nvidia-smi) or using it without dedicated memory.\n"
         } else {
-            "No app is using it.\n"
+            "No app shows dedicated memory on it.\n"
         });
         return s;
     }
-    s.push_str("Apps keeping it awake:\n");
+    s.push_str("Apps with dedicated memory on it:\n");
     for h in &r.holders {
         let n = h.pids.len();
         s.push_str(&format!(
@@ -150,7 +158,7 @@ pub fn format_report(r: &Report) -> String {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::{group_holders, parse_instance, Holder, Report};
+    use super::{group_holders, parse_instance, pdh_value_usable, Holder, Report};
     use windows::core::{w, GUID, PCWSTR, PWSTR};
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         CM_Get_DevNode_PropertyW, CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW,
@@ -297,7 +305,7 @@ mod imp {
                 let mut out = Vec::new();
                 for i in 0..count as usize {
                     let item = *items.add(i);
-                    if item.FmtValue.CStatus != 0 {
+                    if !pdh_value_usable(item.FmtValue.CStatus) {
                         continue;
                     }
                     let name = item.szName.to_string().unwrap_or_default();
@@ -434,7 +442,7 @@ mod tests {
         };
         let s = format_report(&r);
         assert!(s.contains("dGPU-only mode"));
-        assert!(!s.contains("Apps keeping it awake"));
+        assert!(!s.contains("Apps with dedicated memory"));
     }
 
     #[test]
@@ -453,5 +461,25 @@ mod tests {
         let s = format_report(&r);
         assert!(s.contains("dGPU: AWAKE"));
         assert!(s.contains("pythonw.exe x2  2 MB"));
+    }
+
+    #[test]
+    fn pdh_new_data_counts_as_a_value() {
+        assert!(pdh_value_usable(0)); // PDH_CSTATUS_VALID_DATA
+        assert!(pdh_value_usable(1)); // PDH_CSTATUS_NEW_DATA
+        assert!(!pdh_value_usable(0xC000_0BB8)); // PDH_CSTATUS_NO_OBJECT
+        assert!(!pdh_value_usable(0x8000_07D2)); // PDH_CSTATUS_INVALID_DATA
+    }
+
+    #[test]
+    fn an_empty_list_claims_no_more_than_it_saw() {
+        let r = Report {
+            hybrid: Some(true),
+            asleep: Some(false),
+            ..Default::default()
+        };
+        let s = format_report(&r);
+        assert!(s.contains("No app shows dedicated memory"));
+        assert!(!s.contains("Intel graphics drives"));
     }
 }
