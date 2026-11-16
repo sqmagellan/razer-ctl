@@ -855,10 +855,11 @@ impl DeviceStateDelta<GpuBoost> for DeviceState {
     }
 }
 
-/// One "Action" rule: while `process` is running, force `perf_mode`. This is the
-/// config-driven automation layer (cf. Legion Toolkit's Actions). Rules are matched in
-/// list order; the first running match wins. There's no in-app editor -- rules are
-/// hand-added to the config TOML -- so this stays opt-in (an empty list = no behavior).
+/// One "Action" rule: while `process` is running, force the fields it sets. This is the
+/// config-driven automation layer (cf. Legion Toolkit's Actions). Among running matches
+/// the highest `priority` wins, then file order (see `matching_app_profile`). Rules are
+/// added in the config TOML or the tray's rules window, and the Game rules menu turns them
+/// on and off. An empty list means no behavior.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppProfile {
     /// Executable name to match, case-insensitive, e.g. "cyberpunk2077.exe".
