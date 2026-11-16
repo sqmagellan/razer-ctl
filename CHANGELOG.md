@@ -12,14 +12,17 @@ laptop; thanks to Finesssee for writing them down and measuring them.
 **New**
 - **Game rules menu.** The tray menu lists each app rule with a check mark to turn it on or off,
   and marks the one in force "(running)". A click saves `enabled` in the config and starts or ends
-  the rule at once.
+  the rule at once. On `0x029F` (2026-11-15) unticking Longshot wrote `enabled = false` and a
+  stand-in `longshot.exe` changed nothing; ticking it switched to Performance within a second.
 - **Rules window.** "Rules window…" in that menu opens a plain Windows dialog: a list with a check
   box per rule (Rule, App, Power mode), the running rule marked, and Add, Edit and Delete. The rule
   dialog sets the name, the app (running programs, the ones using the NVIDIA GPU first, or Browse),
   the power mode with CPU and GPU boost for Custom, the fans (Auto or Max), "Only when plugged in"
   and the priority. Settings it doesn't show stay as the file has them. It saves through the same
   path as the menu, so it never writes over a hand edit. No UI framework: stock Windows controls;
-  the exe now carries a manifest for Common Controls 6.
+  the exe now carries a manifest for Common Controls 6. The window adds 116 KB to the exe. On
+  `0x029F` a rule added there for `ping.exe` switched to Performance when ping ran and was marked
+  "(running)"; unticking it went back to Balanced at once, and Delete removed it from the file.
 - **Edit rules…** opens the config in Notepad beside `game-rules-help.txt`, a plain-English guide
   to every rule setting with two worked examples. The tray rewrites the guide each time, since a
   save of the config drops comments. A test fails if a rule setting has no line in it.
@@ -41,7 +44,9 @@ laptop; thanks to Finesssee for writing them down and measuring them.
   shared by every razer-ctl process, so `razer-cli` can't read a reply meant for the tray (both use
   transaction id `0x1f`). A request waits at most 1 s for the lock; if another process still
   holds it, the request fails unsent and the tray retries on its next pass. From
-  Finesssee/razer-ctl, with the same lock file.
+  Finesssee/razer-ctl, with the same lock file. On `0x029F` two `auto json` loops of 80 reads
+  each ran through an app rule's start and end: no failures, the longest read 0.6 s, and the tray
+  switched and switched back on time.
 - **Max Fan changes only its own bit.** The EC byte behind Max Fan (`0x070f`) also holds other
   settings: `0x04` is a temporary full charge, and further bits are documented by
   [openblade-core](https://github.com/OpenBladeProject/openblade-core). Max Fan used to write the
@@ -65,7 +70,8 @@ laptop; thanks to Finesssee for writing them down and measuring them.
   failing the perf read; it is never sent. Status `0x04` is the EC's timeout: retried after 20 ms
   instead of 500 ms, and never re-sent by a raw `cmd` (Finesssee/razer-ctl).
 - **A saved config without rules takes a pasted rule.** It used to hold `app_profiles = []`, so a
-  rule pasted at the end made the file fail to parse.
+  rule pasted at the end made the file fail to parse ("duplicate key `app_profiles`"), which
+  happened on `0x029F` on 2026-11-06.
 
 **Not taken**
 - Finesssee/razer-ctl also writes perf and fan mode in one write and waits 200 ms after each,
