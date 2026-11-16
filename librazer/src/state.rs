@@ -1588,7 +1588,7 @@ mod tests {
     #[test]
     fn fit_tooltip_never_drops_priority_zero() {
         let layout = vec![
-            line(&[(0, "Custom (CPU Undervolt, GPU High)")]),
+            line(&[(0, "Custom (CPU Overclock, GPU High)")]),
             line(&[(1, "Fan Auto"), (3, "2600/2500")]),
             line(&[(4, "🔋 80%"), (5, "🔆 82%")]),
         ];

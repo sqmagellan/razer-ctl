@@ -175,7 +175,8 @@ perf_mode = "Performance"
         "Battery"  "Silent"  "Balanced"  "Performance"  "Hyperboost"
     or Custom, which takes a CPU boost and a GPU boost, in that order:
         perf_mode = { Custom = ["Boost", "High"] }
-    CPU boost: "Low"  "Medium"  "High"  "Boost"  "Undervolt"
+    CPU boost: "Low"  "Medium"  "High"  "Boost"  "Overclock"
+    ("Overclock" was called "Undervolt" before 0.9.8; both work.)
     GPU boost: "Low"  "Medium"  "High"
     A mode this laptop doesn't have does nothing.
 

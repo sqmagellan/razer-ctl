@@ -43,7 +43,13 @@ pub enum CpuBoost {
     Medium = 1,
     High = 2,
     Boost = 3,
-    Undervolt = 4,
+    /// The level above Boost. It is an overclock: the capture in `data/README.md` reads
+    /// "custom mode, cpu overclock", and Synapse's undervolting goes through Intel XTU, not
+    /// the EC (Finesssee/razer-ctl, MIT). It was called Undervolt until 0.9.8, so that name
+    /// still reads, in configs and on the command line.
+    #[serde(alias = "Undervolt")]
+    #[value(alias = "undervolt")]
+    Overclock = 4,
 }
 
 #[derive(EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize)]
@@ -276,7 +282,7 @@ impl TryFrom<u8> for CpuBoost {
             1 => Ok(Self::Medium),
             2 => Ok(Self::High),
             3 => Ok(Self::Boost),
-            4 => Ok(Self::Undervolt),
+            4 => Ok(Self::Overclock),
             _ => bail!("Failed to convert {} to CpuBoost", value),
         }
     }
@@ -543,7 +549,7 @@ mod tests {
             CpuBoost::Medium,
             CpuBoost::High,
             CpuBoost::Boost,
-            CpuBoost::Undervolt,
+            CpuBoost::Overclock,
         ] {
             assert_eq!(CpuBoost::try_from(v as u8).unwrap(), v);
         }
@@ -626,6 +632,25 @@ mod tests {
             MaxFanSpeedMode::try_from(0xff).unwrap(),
             MaxFanSpeedMode::Enable
         );
+    }
+
+    /// Value 4 is an overclock (data/README.md: "custom mode, cpu overclock"), so it is
+    /// named for that; configs and scripts that say "Undervolt" still work.
+    #[test]
+    fn cpu_boost_4_is_overclock_and_still_reads_undervolt() {
+        use clap::ValueEnum;
+        assert_eq!(format!("{:?}", CpuBoost::try_from(4).unwrap()), "Overclock");
+        for name in ["\"Overclock\"", "\"Undervolt\""] {
+            let b: CpuBoost = serde_json::from_str(name).unwrap();
+            assert_eq!(b as u8, 4, "{name}");
+        }
+        assert_eq!(
+            serde_json::to_string(&CpuBoost::Overclock).unwrap(),
+            "\"Overclock\""
+        );
+        for arg in ["overclock", "undervolt"] {
+            assert_eq!(CpuBoost::from_str(arg, true).unwrap() as u8, 4, "{arg}");
+        }
     }
 
     #[test]

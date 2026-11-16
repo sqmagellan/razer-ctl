@@ -1360,7 +1360,7 @@ mod tests {
     fn the_perf_mode_is_never_dropped() {
         let mut state = test_state(DeviceState {
             perf_mode: PerfMode::Custom(
-                librazer::types::CpuBoost::Undervolt,
+                librazer::types::CpuBoost::Overclock,
                 librazer::types::GpuBoost::High,
             ),
             ..DeviceState::default()

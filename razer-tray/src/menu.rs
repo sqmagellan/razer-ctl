@@ -178,7 +178,7 @@ pub fn build(
     let separator = PredefinedMenuItem::separator();
 
     // Disabled header items so the two boost groups are labeled -- without them the
-    // submenu is just "Low/Medium/High/Boost/Undervolt / --- / Low/Medium/High" and you
+    // submenu is just "Low/Medium/High/Boost/Overclock / --- / Low/Medium/High" and you
     // can't tell which axis is which. (HW-verified 2026-07-09: all five CPU levels and
     // all three GPU levels apply + read back on PID 0x029f.)
     let cpu_header = MenuItem::new("CPU boost", false, None);
