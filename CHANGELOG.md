@@ -4,6 +4,24 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
+## Unreleased
+On `0x029F` the CPU cap has run in a test tray since 2026-11-06 and the dGPU check since
+2026-10-25.
+
+**New**
+- **CPU speed cap in game rules.** `cpu_max_mhz` (800 or more) caps the CPU on AC while the rule
+  runs, through `PROCFREQMAX` and `PROCFREQMAX1` on the active Windows power plan. The old values
+  are saved to a file first and come back when the rule ends, on unplug and on Quit, or at the next
+  start after a crash. A value something else changed meanwhile is left alone. The rules window
+  has a "CPU speed limit" row. A Helldivers 2 rule held 3600 MHz for 28 minutes and put the
+  settings back when the game closed.
+- **"What's keeping the GPU awake?"** lists the apps holding memory on the NVIDIA GPU, from the
+  GPU Process Memory performance counters, matched to the dGPU by its adapter LUID. Neither read
+  wakes the GPU. In dGPU-only mode it says the GPU drives the display and can't sleep.
+  `razer-tray --gpu-report <file>` writes the same report.
+
+- Versions: `librazer` gains `cpu_cap`; `AppProfile` gains `cpu_max_mhz` (breaking).
+
 ## 0.9.8: game rules menu and window, app rules that end cleanly (2026-11-15)
 Built and tested on `0x029F` (2026-11-11 to 2026-11-15). Five changes come from
 [Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl) (MIT), a fork for the same laptop.
