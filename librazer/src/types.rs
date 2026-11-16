@@ -319,12 +319,15 @@ impl TryFrom<u8> for BatteryCare {
 impl TryFrom<u8> for MaxFanSpeedMode {
     type Error = anyhow::Error;
 
+    /// From the `0x078f` byte, which is a bitfield: Max Fan is its `0x02` bit. The others
+    /// (`0x01` CPU boost, `0x04` charge to full once, `0x08` local dimming, as
+    /// Finesssee/razer-ctl documents them) say nothing about Max Fan, so any value parses.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x02 => Ok(MaxFanSpeedMode::Enable),
-            0x00 => Ok(MaxFanSpeedMode::Disable),
-            _ => bail!("Failed to convert {} to MaxFanSpeedMode", value),
-        }
+        Ok(if value & MaxFanSpeedMode::Enable as u8 != 0 {
+            MaxFanSpeedMode::Enable
+        } else {
+            MaxFanSpeedMode::Disable
+        })
     }
 }
 
@@ -605,6 +608,24 @@ mod tests {
         assert_eq!((battery.kind(), battery.watts()), ("battery", None));
         let other = PowerSource::from_args(&[0x0d]); // a Blade 15 Base 2020 on its own charger
         assert_eq!((other.kind(), other.watts()), ("main", None));
+    }
+
+    /// 0x078f is a bitfield (0x01 CPU boost, 0x02 Max Fan, 0x04 charge-full-once, 0x08
+    /// local dimming, per Finesssee/razer-ctl): Max Fan is the 0x02 bit, whatever the rest.
+    #[test]
+    fn max_fan_reads_its_bit_whatever_the_other_bits_hold() {
+        assert_eq!(
+            MaxFanSpeedMode::try_from(0x0a).unwrap(),
+            MaxFanSpeedMode::Enable
+        );
+        assert_eq!(
+            MaxFanSpeedMode::try_from(0x0d).unwrap(),
+            MaxFanSpeedMode::Disable
+        );
+        assert_eq!(
+            MaxFanSpeedMode::try_from(0xff).unwrap(),
+            MaxFanSpeedMode::Enable
+        );
     }
 
     #[test]

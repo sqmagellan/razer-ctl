@@ -253,7 +253,8 @@ pub fn set_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode)
 ///
 /// `0x070f` writes a whole byte ("Power Mode Control"), and Max Fan is only its `0x02`
 /// bit: `0x04` is temporary full charge and other bits carry further options
-/// (OpenBladeProject/openblade-core's command notes, read 2026-11-11). So the byte is read
+/// (OpenBladeProject/openblade-core's command notes, read 2026-11-11; Finesssee/razer-ctl,
+/// MIT, names `0x01` CPU boost and `0x08` local dimming). So the byte is read
 /// first and only the Max Fan bit is changed. A laptop that can't read it ("not supported")
 /// gets the bare bit, as before.
 pub fn send_max_fan_speed_mode(device: &impl HidTransport, mode: MaxFanSpeedMode) -> Result<()> {
