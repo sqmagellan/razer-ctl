@@ -6,6 +6,7 @@
 // hidapi/winreg-backed transport -- is Windows/Linux-only.
 pub mod capture;
 pub mod command;
+pub mod cpu_cap;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod device;
 

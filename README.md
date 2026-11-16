@@ -42,7 +42,9 @@ history and measurements; `README.upstream.md` covers the original project.
   fields it sets, never the saved profile. Edits apply within a few seconds. The **Game rules** menu
   turns each rule on or off and marks the one running. **Rules window…** adds, edits and deletes
   rules in a standard Windows dialog; settings it doesn't show are kept. **Edit rules…** opens the
-  config in Notepad beside `game-rules-help.txt`, a guide to every rule setting.
+  config in Notepad beside `game-rules-help.txt`, a guide to every rule setting. On AC,
+  `cpu_max_mhz` (800 or more) caps the CPU speed through the active Windows power plan. The old
+  values come back when the rule ends or the tray quits, or at the next start after a crash.
 - **Perf-cycle hotkey** (off by default): `cycle_perf_hotkey = "Ctrl+Alt+P"` in the config acts like
   a left-click on the icon. Needs a modifier; read at startup.
 - **Undo changes made by Synapse** (off by default): puts perf mode, fan, logo and charge limit back

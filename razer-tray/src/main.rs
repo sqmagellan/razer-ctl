@@ -12,6 +12,7 @@ mod state;
 
 use anyhow::Result;
 
+use librazer::cpu_cap;
 use librazer::observe;
 use librazer::types::LightsAlwaysOn;
 use librazer::{command, device};
@@ -336,7 +337,12 @@ fn main() -> Result<()> {
     // Read-backs after an app rule starts or ends (see rule_checks.rs).
     let mut rule_checks = rule_checks::RuleChecks::default();
 
-    event_loop.run(move |_, _, control_flow| {
+    event_loop.run(move |event, _, control_flow| {
+        // Quit: a cap left on here would outlive the tray until its next start.
+        if matches!(event, tao::event::Event::LoopDestroyed) {
+            state.release_cpu_cap();
+            return;
+        }
         let now = std::time::Instant::now();
         *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
 
@@ -599,10 +605,11 @@ fn main() -> Result<()> {
                 }
             }
 
-            if !state.app_profiles.is_empty()
-                && now > last_app_scan_timestamp + std::time::Duration::from_secs(5)
-            {
+            let app_scan_due = now > last_app_scan_timestamp + std::time::Duration::from_secs(5);
+            if app_scan_due {
                 last_app_scan_timestamp = now;
+            }
+            if !state.app_profiles.is_empty() && app_scan_due {
                 app_scan_sys.refresh_processes();
                 let running: Vec<String> = app_scan_sys
                     .processes()
@@ -634,6 +641,14 @@ fn main() -> Result<()> {
                                 rule.priority,
                                 session.effective
                             );
+                            if rule.cpu_max_mhz.is_some() && cpu_cap::usable_cap(rule).is_none() {
+                                log::warn!(
+                                    "action: '{}' cpu_max_mhz {:?} ignored (minimum {})",
+                                    rule.label(),
+                                    rule.cpu_max_mhz,
+                                    cpu_cap::CPU_CAP_MIN_MHZ
+                                );
+                            }
                             state.action = Some(session);
                         }
                         None => {
@@ -654,6 +669,9 @@ fn main() -> Result<()> {
                     state.action = None;
                     state.rebuild_menu(Some(&tray_icon));
                 }
+            }
+            if app_scan_due {
+                state.sync_cpu_cap();
             }
 
             if let Ok(mut shared) = rules_shared.lock() {

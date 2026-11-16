@@ -91,10 +91,11 @@ fn file_name(path: &Path) -> String {
 /// The worked examples, as they would appear in the config. A test parses them, so they
 /// can't drift from what the tray accepts.
 const EXAMPLES: &str = r#"[[app_profiles]]
-name = "Helldivers 2: Custom boost"
+name = "Helldivers 2: Custom boost, CPU cap"
 process = "helldivers2.exe"
 require_ac = true
 perf_mode = { Custom = ["Boost", "High"] }
+cpu_max_mhz = 3600
 
 [[app_profiles]]
 name = "Longshot OoT: Performance mode"
@@ -147,9 +148,9 @@ Two rules, ready to copy:
 
 {examples}
 
-The first switches to Custom (CPU boost "Boost", GPU boost "High") while
-helldivers2.exe runs. The second switches to Performance while longshot.exe
-runs. Both apply only when plugged in.
+The first switches to Custom (CPU boost "Boost", GPU boost "High") and holds
+the CPU at 3600 MHz or less while helldivers2.exe runs. The second switches
+to Performance while longshot.exe runs. Both apply only when plugged in.
 
 
 WHAT EACH LINE MEANS
@@ -214,6 +215,11 @@ keyboard_color = "FollowPerfMode"
     keyboard colors. "FollowPerfMode" uses the color of the tray icon. For
     your own colors, give one per keyboard row, top to bottom (six rows):
         keyboard_color = { Rows = ["#ff0000", "#ff0000", "#ff0000", "#ff0000", "#ff0000", "#ff0000"] }
+
+cpu_max_mhz = 3600
+    The highest CPU speed in MHz, only when plugged in. Values under 800 are
+    ignored. The tray sets it through the Windows power plan and puts the old
+    values back when the rule ends.
 
 
 IF SOMETHING GOES WRONG
@@ -306,6 +312,7 @@ mod tests {
             keyboard_color: Some(KeyboardColor::FollowPerfMode),
             battery_care: Some(BatteryCare::from_percent(80).unwrap()),
             max_fan: Some(true),
+            cpu_max_mhz: Some(3600),
         };
         let toml::Value::Table(fields) = toml::Value::try_from(&full).unwrap() else {
             panic!("a rule serializes as a table");
@@ -377,6 +384,7 @@ mod tests {
             Some(PerfMode::Custom(CpuBoost::Boost, GpuBoost::High))
         );
         assert_eq!(helldivers.require_ac, Some(true));
+        assert_eq!(helldivers.cpu_max_mhz, Some(3600));
         assert!(helldivers.enabled);
         assert_eq!(longshot.process, "longshot.exe");
         assert_eq!(longshot.perf_mode, Some(PerfMode::Performance));

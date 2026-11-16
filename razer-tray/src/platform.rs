@@ -1301,6 +1301,175 @@ pub fn set_windows_power_mode(_perf: crate::state::PerfMode) -> Result<()> {
     Ok(())
 }
 
+/// The active power scheme's "maximum processor frequency" settings, for Action rules that
+/// cap the CPU. See `librazer::cpu_cap`, which decides when to touch them.
+pub struct PowerSettings;
+
+/// The processor power settings subgroup (`SUB_PROCESSOR`).
+#[cfg(target_os = "windows")]
+const SUB_PROCESSOR: windows::core::GUID =
+    windows::core::GUID::from_u128(0x54533251_82be_4824_96c1_47b60b740d00);
+/// `PROCFREQMAX`, and `PROCFREQMAX1` for efficiency class 1.
+#[cfg(target_os = "windows")]
+const PROCFREQMAX: windows::core::GUID =
+    windows::core::GUID::from_u128(0x75b0ae3f_bce0_45a7_8c89_c9611c25e100);
+#[cfg(target_os = "windows")]
+const PROCFREQMAX1: windows::core::GUID =
+    windows::core::GUID::from_u128(0x75b0ae3f_bce0_45a7_8c89_c9611c25e101);
+
+/// powrprof.dll's power scheme calls, resolved once like [`power_overlay_procs`]. The
+/// first argument of each is a registry root, which is always null.
+#[cfg(target_os = "windows")]
+mod powrprof {
+    use windows::core::GUID;
+    pub type Root = *const std::ffi::c_void;
+    pub type GetActive = unsafe extern "system" fn(Root, *mut *mut GUID) -> u32;
+    pub type SetActive = unsafe extern "system" fn(Root, *const GUID) -> u32;
+    pub type ReadAc =
+        unsafe extern "system" fn(Root, *const GUID, *const GUID, *const GUID, *mut u32) -> u32;
+    pub type WriteAc =
+        unsafe extern "system" fn(Root, *const GUID, *const GUID, *const GUID, u32) -> u32;
+}
+
+#[cfg(target_os = "windows")]
+struct SchemeProcs {
+    get_active: powrprof::GetActive,
+    set_active: powrprof::SetActive,
+    read_ac: powrprof::ReadAc,
+    write_ac: powrprof::WriteAc,
+}
+
+#[cfg(target_os = "windows")]
+fn scheme_procs() -> Result<&'static SchemeProcs> {
+    use std::mem::transmute;
+    use windows::core::{s, w};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    static PROCS: std::sync::OnceLock<Option<SchemeProcs>> = std::sync::OnceLock::new();
+    // SAFETY: each symbol has the documented signature its type declares.
+    PROCS
+        .get_or_init(|| unsafe {
+            let module = LoadLibraryW(w!("powrprof.dll")).ok()?;
+            let get_active: powrprof::GetActive =
+                transmute(GetProcAddress(module, s!("PowerGetActiveScheme"))?);
+            let set_active: powrprof::SetActive =
+                transmute(GetProcAddress(module, s!("PowerSetActiveScheme"))?);
+            let read_ac: powrprof::ReadAc =
+                transmute(GetProcAddress(module, s!("PowerReadACValueIndex"))?);
+            let write_ac: powrprof::WriteAc =
+                transmute(GetProcAddress(module, s!("PowerWriteACValueIndex"))?);
+            Some(SchemeProcs {
+                get_active,
+                set_active,
+                read_ac,
+                write_ac,
+            })
+        })
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("powrprof.dll power scheme calls not available"))
+}
+
+#[cfg(target_os = "windows")]
+fn scheme_guid(scheme: &str) -> Result<windows::core::GUID> {
+    librazer::cpu_cap::scheme_bits(scheme)
+        .map(windows::core::GUID::from_u128)
+        .ok_or_else(|| anyhow::anyhow!("bad power scheme {scheme:?}"))
+}
+
+#[cfg(target_os = "windows")]
+fn read_ac_value(
+    procs: &SchemeProcs,
+    scheme: &windows::core::GUID,
+    setting: &windows::core::GUID,
+) -> Result<u32> {
+    let mut value = 0;
+    // SAFETY: every pointer is valid for the call.
+    let status = unsafe {
+        (procs.read_ac)(
+            std::ptr::null(),
+            scheme,
+            &SUB_PROCESSOR,
+            setting,
+            &mut value,
+        )
+    };
+    anyhow::ensure!(status == 0, "PowerReadACValueIndex returned {status}");
+    Ok(value)
+}
+
+#[cfg(target_os = "windows")]
+impl librazer::cpu_cap::PowerPlan for PowerSettings {
+    fn active_scheme(&self) -> Result<String> {
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        let procs = scheme_procs()?;
+        let mut guid: *mut windows::core::GUID = std::ptr::null_mut();
+        // SAFETY: on success `guid` points to a GUID that LocalFree must release.
+        unsafe {
+            let status = (procs.get_active)(std::ptr::null(), &mut guid);
+            anyhow::ensure!(
+                status == 0 && !guid.is_null(),
+                "PowerGetActiveScheme returned {status}"
+            );
+            let scheme = *guid;
+            let _ = LocalFree(HLOCAL(guid as _));
+            Ok(format!("{scheme:?}").to_lowercase())
+        }
+    }
+
+    fn read(&self, scheme: &str) -> Result<librazer::cpu_cap::FreqMax> {
+        let procs = scheme_procs()?;
+        let guid = scheme_guid(scheme)?;
+        Ok(librazer::cpu_cap::FreqMax {
+            class0: read_ac_value(procs, &guid, &PROCFREQMAX)?,
+            class1: read_ac_value(procs, &guid, &PROCFREQMAX1)?,
+        })
+    }
+
+    fn write(&self, scheme: &str, values: librazer::cpu_cap::FreqMax) -> Result<()> {
+        let procs = scheme_procs()?;
+        let guid = scheme_guid(scheme)?;
+        let root = std::ptr::null();
+        // SAFETY: every pointer is valid for the call.
+        let (first, second) = unsafe {
+            (
+                (procs.write_ac)(root, &guid, &SUB_PROCESSOR, &PROCFREQMAX, values.class0),
+                (procs.write_ac)(root, &guid, &SUB_PROCESSOR, &PROCFREQMAX1, values.class1),
+            )
+        };
+        // Both are attempted, and a half-done write still activates: a restore must get as
+        // far as it can. A scheme that isn't active picks its values up when it next is.
+        if scheme_guid(&self.active_scheme()?)? == guid {
+            let power_mode = effective_power_mode_guid();
+            // SAFETY: the pointer is valid for the call.
+            let status = unsafe { (procs.set_active)(root, &guid) };
+            anyhow::ensure!(status == 0, "PowerSetActiveScheme returned {status}");
+            // Activating must not move the Settings slider, which the tray may be matching.
+            if let Some(mode) = power_mode {
+                set_power_overlay(mode, "the mode it had")?;
+            }
+        }
+        anyhow::ensure!(
+            first == 0 && second == 0,
+            "PowerWriteACValueIndex returned {first} and {second}"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl librazer::cpu_cap::PowerPlan for PowerSettings {
+    fn active_scheme(&self) -> Result<String> {
+        anyhow::bail!("the CPU cap needs Windows")
+    }
+
+    fn read(&self, _scheme: &str) -> Result<librazer::cpu_cap::FreqMax> {
+        anyhow::bail!("the CPU cap needs Windows")
+    }
+
+    fn write(&self, _scheme: &str, _values: librazer::cpu_cap::FreqMax) -> Result<()> {
+        anyhow::bail!("the CPU cap needs Windows")
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn set_windows_power_mode_named(_name: &str) -> Result<()> {
     Ok(())

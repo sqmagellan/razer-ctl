@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use librazer::command;
+use librazer::cpu_cap::{self, CpuCap};
 use librazer::device;
 use librazer::keyboard::{Frame, KeyboardPreset};
 use librazer::types::BatteryCare;
@@ -175,6 +176,8 @@ pub struct ProgramState {
     /// keeps it: it used to be a local in `main`, and recovery rebuilt everything else, so
     /// a recovered tray thought the rule was still applied while the device had dropped it.
     pub action: Option<ActionSession>,
+    /// The running Action's CPU frequency cap, and what to put back when it ends.
+    cpu_cap: CpuCap,
     /// Usable manual-fan RPM bounds for this chassis (from `Descriptor::fan_rpm_range`),
     /// captured once at startup so menu rebuilds don't need the `Device` on hand.
     pub fan_rpm_range: (u16, u16),
@@ -250,6 +253,7 @@ impl ProgramState {
                 running_rule: None,
             },
         )?;
+        let cpu_cap = CpuCap::open(config_file.path().with_file_name(cpu_cap::BASELINE_FILE));
         Ok(Self {
             device_state,
             observed: device_state,
@@ -273,6 +277,7 @@ impl ProgramState {
             reassert_on_resume: config.reassert_on_resume,
             app_profiles: config.app_profiles,
             action: None,
+            cpu_cap,
             fan_rpm_range,
             pid: 0,
             needs_sync: true,
@@ -472,6 +477,23 @@ impl ProgramState {
         // Whatever produced it, never aim at a state the EC cannot hold: that never
         // converges, and the loop would re-apply it every tick.
         .normalized(self.fan_rpm_range)
+    }
+
+    /// Bring the Windows CPU frequency settings in line with the running Action. Runs
+    /// after each process scan, so at startup a baseline left by a crash is put back only
+    /// once the scan has shown that no rule wants the cap. Independent of the device: its
+    /// failures are logged and never reach the rest of the rule.
+    pub fn sync_cpu_cap(&mut self) {
+        let rule = self.action.and_then(|a| self.app_profiles.get(a.rule));
+        let wanted = cpu_cap::wanted_cap(rule, self.ac_power);
+        self.cpu_cap
+            .reconcile(wanted, &crate::platform::PowerSettings);
+    }
+
+    /// The tray is exiting: nothing would put the settings back after this.
+    pub fn release_cpu_cap(&mut self) {
+        self.cpu_cap
+            .reconcile(None, &crate::platform::PowerSettings);
     }
 
     /// Push the current intent to the device and reconcile against a read-back. Used at

@@ -917,6 +917,11 @@ pub struct AppProfile {
     /// rejects it elsewhere -- so a rule setting this should set `perf_mode` to Custom too.
     #[serde(default)]
     pub max_fan: Option<bool>,
+    /// Maximum CPU frequency in MHz while it runs and the laptop is plugged in, through
+    /// the Windows power settings (see `cpu_cap`). Omit to leave it unchanged. Values
+    /// under [`crate::cpu_cap::CPU_CAP_MIN_MHZ`] are ignored.
+    #[serde(default)]
+    pub cpu_max_mhz: Option<u32>,
 }
 
 /// Hand-written, not derived: `#[derive(Default)]` would make `enabled` false, which is
@@ -937,6 +942,7 @@ impl Default for AppProfile {
             keyboard_color: None,
             battery_care: None,
             max_fan: None,
+            cpu_max_mhz: None,
         }
     }
 }
@@ -1834,6 +1840,36 @@ mod tests {
         assert_eq!(parsed.require_ac, None);
         assert!(parsed.processes.is_empty());
         assert_eq!(parsed.label(), "cyberpunk2077.exe");
+    }
+
+    #[test]
+    fn cpu_max_mhz_is_optional_in_the_config() {
+        let legacy: AppProfile = toml::from_str("process = \"game.exe\"\n").unwrap();
+        assert_eq!(legacy.cpu_max_mhz, None);
+        assert_eq!(
+            legacy,
+            AppProfile {
+                process: "game.exe".to_string(),
+                ..Default::default()
+            }
+        );
+
+        let capped: AppProfile =
+            toml::from_str("process = \"game.exe\"\ncpu_max_mhz = 3600\n").unwrap();
+        assert_eq!(capped.cpu_max_mhz, Some(3600));
+        let text = toml::to_string(&capped).unwrap();
+        assert_eq!(toml::from_str::<AppProfile>(&text).unwrap(), capped);
+    }
+
+    #[test]
+    fn cpu_max_mhz_leaves_the_device_state_alone() {
+        let base = DeviceState::default();
+        let rule = AppProfile {
+            process: "game.exe".to_string(),
+            cpu_max_mhz: Some(3600),
+            ..Default::default()
+        };
+        assert_eq!(rule.overlay(&base), base);
     }
 
     #[test]
