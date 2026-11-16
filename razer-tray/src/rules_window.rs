@@ -299,6 +299,8 @@ mod win {
     const LVM_INSERTITEMW: u32 = 0x104d;
     const LVM_INSERTCOLUMNW: u32 = 0x1061;
     const LVM_SETITEMTEXTW: u32 = 0x1074;
+    const LVM_SETCOLUMNWIDTH: u32 = 0x101e;
+    const LVSCW_AUTOSIZE_USEHEADER: isize = -2;
     const LVS_EX_CHECKBOXES: isize = 0x4;
     const LVS_EX_FULLROWSELECT: isize = 0x20;
     const LVS_EX_DOUBLEBUFFER: isize = 0x0001_0000;
@@ -513,7 +515,7 @@ mod win {
                         | DS_MODALFRAME
                         | DS_CENTER,
                     WS_EX_APPWINDOW,
-                    340,
+                    384,
                     214,
                 );
                 t.item(
@@ -522,7 +524,7 @@ mod win {
                     0xffff,
                     CHILD,
                     0,
-                    (7, 7, 326, 10),
+                    (7, 7, 370, 10),
                 )
                 .item(
                     Class::Name("SysListView32"),
@@ -536,7 +538,7 @@ mod win {
                         | LVS_SHOWSELALWAYS
                         | LVS_NOSORTHEADER,
                     0,
-                    (7, 21, 262, 150),
+                    (7, 21, 306, 150),
                 )
                 .item(
                     Class::Atom(BUTTON),
@@ -544,7 +546,7 @@ mod win {
                     ID_ADD,
                     CHILD | WS_TABSTOP,
                     0,
-                    (276, 21, 57, 14),
+                    (320, 21, 57, 14),
                 )
                 .item(
                     Class::Atom(BUTTON),
@@ -552,7 +554,7 @@ mod win {
                     ID_EDIT,
                     CHILD | WS_TABSTOP,
                     0,
-                    (276, 39, 57, 14),
+                    (320, 39, 57, 14),
                 )
                 .item(
                     Class::Atom(BUTTON),
@@ -560,7 +562,7 @@ mod win {
                     ID_DELETE,
                     CHILD | WS_TABSTOP,
                     0,
-                    (276, 57, 57, 14),
+                    (320, 57, 57, 14),
                 )
                 .item(
                     Class::Atom(STATIC),
@@ -568,7 +570,7 @@ mod win {
                     ID_STATUS,
                     CHILD,
                     0,
-                    (7, 176, 262, 10),
+                    (7, 176, 306, 10),
                 )
                 .item(
                     Class::Atom(BUTTON),
@@ -576,7 +578,7 @@ mod win {
                     IDCANCEL,
                     CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
                     0,
-                    (276, 193, 57, 14),
+                    (320, 193, 57, 14),
                 );
                 let ctx = Box::into_raw(Box::new(ListCtx {
                     link: link.clone(),
@@ -621,7 +623,7 @@ mod win {
                 };
                 let _ = windows::Win32::UI::WindowsAndMessaging::MapDialogRect(hwnd, &mut rect);
                 let unit = rect.right as f32 / 120.0;
-                for (i, (title, dlu)) in [("Rule", 118.0), ("App", 72.0), ("Power mode", 66.0)]
+                for (i, (title, dlu)) in [("Rule", 140.0), ("App", 70.0), ("Power mode", 80.0)]
                     .into_iter()
                     .enumerate()
                 {
@@ -634,6 +636,8 @@ mod win {
                     };
                     send(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
                 }
+                // The last column takes the rest of the list's width.
+                send(list, LVM_SETCOLUMNWIDTH, 2, LVSCW_AUTOSIZE_USEHEADER);
                 refresh(hwnd, c, true);
                 SetTimer(hwnd, TIMER, 1000, None);
                 1

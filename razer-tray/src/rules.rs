@@ -329,12 +329,24 @@ mod tests {
     /// on a config the tray saved with no rules in it, too.
     #[test]
     fn an_example_pasted_at_the_end_of_a_saved_config_with_no_rules_loads() {
-        for saved in [ConfigState::default(), ConfigState::first_run()] {
+        let with_a_rule = ConfigState {
+            app_profiles: vec![rule("old.exe", Some("Old"))],
+            ..ConfigState::default()
+        };
+        for saved in [
+            ConfigState::default(),
+            ConfigState::first_run(),
+            with_a_rule,
+        ] {
             let text = toml::to_string_pretty(&saved).unwrap();
             let pasted = format!("{text}\n{EXAMPLES}");
             let back: ConfigState =
                 toml::from_str(&pasted).unwrap_or_else(|e| panic!("{e}\n--- config ---\n{pasted}"));
-            assert_eq!(back.app_profiles.len(), 2);
+            assert_eq!(
+                back.app_profiles.len(),
+                saved.app_profiles.len() + 2,
+                "{pasted}"
+            );
         }
     }
 
