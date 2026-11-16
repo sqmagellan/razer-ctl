@@ -793,6 +793,8 @@ struct JsonStatus {
     charger_watts: Option<u16>,
     /// The EC's raw power source code, for codes nobody has mapped yet.
     charger_code: Option<u8>,
+    /// The charger the laptop recommends, from the second byte of `0x078c`.
+    charger_recommended_watts: Option<u16>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unsupported: Vec<&'static str>,
 }
@@ -982,6 +984,7 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         charger: power.map(|p| p.kind()),
         charger_watts: power.and_then(|p| p.watts()),
         charger_code: power.map(|p| p.code),
+        charger_recommended_watts: power.and_then(|p| p.recommended_watts()),
         unsupported,
     })
 }
@@ -1569,6 +1572,7 @@ mod tests {
                 "charger": "main",
                 "charger_watts": 330,
                 "charger_code": 0x12,
+                "charger_recommended_watts": 330,
             })
         );
         assert!(laptop.gaps().is_empty());

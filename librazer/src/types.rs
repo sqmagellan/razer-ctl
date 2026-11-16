@@ -337,21 +337,51 @@ impl TryFrom<u8> for MaxFanSpeedMode {
     }
 }
 
-/// What powers the laptop, as the EC reports it through `0x078c`. Codes from
-/// jdsgnrinfo/blade-control's table (MIT): 0 the battery, 0x02-0x07 USB-C at 45, 60, 65, 80,
-/// 90 and 100 W, 0x11 and 0x12 the main (barrel) charger at 280 and 330 W, any other the main
-/// charger. The reply repeats the code in its second byte; what that byte means alone is
-/// unknown. On `0x029F` (2026-10-22) on its barrel charger it read `[0x12, 0x12]`; no other
-/// state was seen here.
+/// What powers the laptop, as the EC reports it through `0x078c`: the first byte is the
+/// charger plugged in, the second the charger the laptop recommends. Both are levels of one
+/// table: 0 none (on battery), then 1-7 USB-C at 40, 45, 60, 65, 80, 90 and 100 W, and 8 and
+/// up the main (barrel) charger, 120 W to 400 W. The table is Synapse 4's as
+/// Finesssee/razer-ctl (MIT) lists it; jdsgnrinfo/blade-control (MIT) had 0x02-0x07, 0x11
+/// and 0x12. Two checks against hardware: `0x029F` on its 330 W charger reads
+/// `[0x12, 0x12]` (2026-10-22), and a Blade 15 Base 2020 on its own 230 W charger reports
+/// `0x0d`, which the table puts at 230 W.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerSource {
     pub code: u8,
+    /// The second byte, when the reply has one.
+    pub recommended: Option<u8>,
+}
+
+/// The wattage of a charger level in `0x078c`'s table.
+fn charger_level_watts(code: u8) -> Option<u16> {
+    Some(match code {
+        0x01 => 40,
+        0x02 => 45,
+        0x03 => 60,
+        0x04 => 65,
+        0x05 => 80,
+        0x06 => 90,
+        0x07 => 100,
+        0x08 => 120,
+        0x09 => 130,
+        0x0a => 150,
+        0x0b => 180,
+        0x0c => 200,
+        0x0d => 230,
+        0x0e => 250,
+        0x0f => 310,
+        0x11 => 280,
+        0x12 => 330,
+        0x13 => 400,
+        _ => return None,
+    })
 }
 
 impl PowerSource {
     pub fn from_args(args: &[u8]) -> Self {
         Self {
             code: args.first().copied().unwrap_or(0),
+            recommended: args.get(1).copied(),
         }
     }
 
@@ -359,32 +389,34 @@ impl PowerSource {
     pub fn kind(self) -> &'static str {
         match self.code {
             0x00 => "battery",
-            0x02..=0x07 => "usb-c",
+            0x01..=0x07 => "usb-c",
             _ => "main",
         }
     }
 
     /// The charger's rating, where the table knows the code.
     pub fn watts(self) -> Option<u16> {
-        match self.code {
-            0x02 => Some(45),
-            0x03 => Some(60),
-            0x04 => Some(65),
-            0x05 => Some(80),
-            0x06 => Some(90),
-            0x07 => Some(100),
-            0x11 => Some(280),
-            0x12 => Some(330),
-            _ => None,
-        }
+        charger_level_watts(self.code)
+    }
+
+    /// The rating of the charger the laptop recommends, where the table knows it.
+    pub fn recommended_watts(self) -> Option<u16> {
+        self.recommended.and_then(charger_level_watts)
     }
 }
 
 impl std::fmt::Display for PowerSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.watts() {
-            Some(w) => write!(f, "{} {w} W (code {:#04x})", self.kind(), self.code),
-            None => write!(f, "{} (code {:#04x})", self.kind(), self.code),
+            Some(w) => write!(f, "{} {w} W (code {:#04x})", self.kind(), self.code)?,
+            None => write!(f, "{} (code {:#04x})", self.kind(), self.code)?,
+        }
+        // Said only when it differs: a smaller charger than the laptop wants.
+        match (self.watts(), self.recommended_watts()) {
+            (Some(have), Some(want)) if have != want => {
+                write!(f, ", the laptop recommends {want} W")
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -613,7 +645,7 @@ mod tests {
         let battery = PowerSource::from_args(&[0, 0]);
         assert_eq!((battery.kind(), battery.watts()), ("battery", None));
         let other = PowerSource::from_args(&[0x0d]); // a Blade 15 Base 2020 on its own charger
-        assert_eq!((other.kind(), other.watts()), ("main", None));
+        assert_eq!((other.kind(), other.watts()), ("main", Some(230)));
     }
 
     /// 0x078f is a bitfield (0x01 CPU boost, 0x02 Max Fan, 0x04 charge-full-once, 0x08
@@ -651,6 +683,50 @@ mod tests {
         for arg in ["overclock", "undervolt"] {
             assert_eq!(CpuBoost::from_str(arg, true).unwrap() as u8, 4, "{arg}");
         }
+    }
+
+    /// The charger levels of Synapse 4 as Finesssee/razer-ctl lists them, and the second
+    /// byte as the level the laptop recommends.
+    #[test]
+    fn power_source_has_the_whole_charger_table_and_the_recommended_level() {
+        for (code, watts) in [
+            (0x01, 40),
+            (0x02, 45),
+            (0x03, 60),
+            (0x04, 65),
+            (0x05, 80),
+            (0x06, 90),
+            (0x07, 100),
+            (0x08, 120),
+            (0x09, 130),
+            (0x0a, 150),
+            (0x0b, 180),
+            (0x0c, 200),
+            (0x0d, 230),
+            (0x0e, 250),
+            (0x0f, 310),
+            (0x11, 280),
+            (0x12, 330),
+            (0x13, 400),
+        ] {
+            assert_eq!(
+                PowerSource::from_args(&[code, 0]).watts(),
+                Some(watts),
+                "{code:#x}"
+            );
+        }
+        assert_eq!(PowerSource::from_args(&[0x10, 0]).watts(), None);
+        assert_eq!(PowerSource::from_args(&[0x01, 0x12]).kind(), "usb-c");
+        let weak = PowerSource::from_args(&[0x07, 0x12]);
+        assert_eq!(weak.recommended_watts(), Some(330));
+        assert_eq!(
+            weak.to_string(),
+            "usb-c 100 W (code 0x07), the laptop recommends 330 W"
+        );
+        let seen = PowerSource::from_args(&[0x12, 0x12]);
+        assert_eq!(seen.recommended_watts(), Some(330));
+        assert_eq!(seen.to_string(), "main 330 W (code 0x12)");
+        assert_eq!(PowerSource::from_args(&[0x12]).recommended_watts(), None);
     }
 
     #[test]
