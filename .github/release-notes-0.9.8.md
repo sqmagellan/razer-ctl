@@ -1,11 +1,11 @@
 ## What's new in 0.9.8
 
-- **Game rules in the tray menu.** Each app rule has a check mark to turn it on or off, and the one in force says "(running)". "Rules window…" adds, edits and deletes rules in a plain Windows dialog: the app (running programs, ones using the graphics card first), power mode, CPU and GPU boost for Custom, fans, plugged in only and priority. "Edit rules…" opens the config in Notepad beside a plain-English guide with two worked examples.
-- **App rules end cleanly.** After a rule ends, the tray reads the laptop again at 3 s and 15 s and puts back anything that drifted, and the fan write no longer restores a perf mode it read a moment too early. Before, a game closing during Modern Standby could leave the laptop in Performance.
-- **The CLI and the tray take turns.** Each request to the laptop's controller holds a lock shared by every razer-ctl process, so `razer-cli` can't read a reply meant for the tray. A request waits at most 1 s for its turn; past that it fails unsent and is tried again.
-- **Charger details.** The full charger table (40 W USB-C to 400 W barrel), and the charger the laptop recommends: `auto info` says when a smaller one is plugged in; `auto json` adds `charger_recommended_watts`.
-- **CPU boost "Undervolt" is now "Overclock",** which is what level 4 does. Old configs and scripts that say Undervolt still work.
-- **Protocol fixes.** Max Fan changes and reads only its own bit of a shared byte; a charge limit is read back until it shows; fan mode 2 and the controller's timeout status are understood. Five of these changes come from Finesssee's fork (MIT); thanks to Finesssee for writing them down and measuring them.
+- **Game rules menu.** Each app rule has a check mark to turn it on or off. The rule in force shows "(running)".
+- **Rules window.** Add, edit and delete rules in a standard Windows dialog. Pick the app from running programs or browse for it. "Edit rules…" opens the config beside a plain-English guide.
+- **App rules end cleanly.** A game closing during Modern Standby could leave the laptop in Performance. The tray now checks the laptop 3 s and 15 s after a rule starts or ends and fixes any drift.
+- **CLI and tray take turns.** A lock shared by every razer-ctl process keeps `razer-cli` from reading a reply meant for the tray.
+- **Charger details.** The full charger table, 40 W USB-C to 400 W. `auto info` says when the charger is smaller than the laptop recommends.
+- **Protocol fixes.** Max Fan changes only its own bit. `razer-cli` reads a charge limit back until it shows. CPU boost level 4 is now Overclock; "Undervolt" still works. Five changes come from [Finesssee's fork](https://github.com/Finesssee/razer-ctl) (MIT). Thanks to Finesssee for documenting and measuring them.
 
 Full details in [CHANGELOG.md](https://github.com/sqmagellan/razer-ctl/blob/main/CHANGELOG.md).
 

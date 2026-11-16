@@ -112,18 +112,18 @@ back when the program closes.
 The rules live in {config_name}, the other file that just opened:
     {config}
 
-This file is only a guide. The tray writes a new copy of it each time you pick
-"Edit rules...", so anything you change here is not kept.
+This guide is rewritten each time you pick "Edit rules...". Changes here are
+not kept.
 
 
 TURNING A RULE ON OR OFF
 ------------------------
-Use the check marks in the tray menu under "Game rules". You don't need to
-edit anything for that. The rule that is in force right now says "(running)".
+Use the check marks under "Game rules" in the tray menu. The rule in force
+says "(running)".
 
-"Rules window..." in the same menu adds, changes and deletes rules without
-editing this file by hand. Use the file for the settings the window doesn't
-show (lighting, charge limit, more than one app); the window keeps them.
+"Rules window..." in the same menu adds, changes and deletes rules. Edit the
+file only for settings the window doesn't show (lighting, charge limit, more
+than one app); the window keeps them.
 
 
 ADDING OR CHANGING A RULE
@@ -132,8 +132,8 @@ ADDING OR CHANGING A RULE
 2. Copy one of the examples below, starting at its [[app_profiles]] line.
 3. Change the values. Keep the double quotes around text.
 4. Save the file (Ctrl+S).
-5. The tray checks the file every 5 seconds and picks up the change. The
-   rule then shows in the tray menu under "Game rules".
+5. The tray checks the file every 5 seconds. The rule then shows under
+   "Game rules" in the tray menu.
 
 Each rule starts with the line [[app_profiles]]. The lines under it belong to
 that rule, up to the next line that starts with [ or [[.
@@ -147,9 +147,9 @@ Two rules, ready to copy:
 
 {examples}
 
-The first one switches to Custom (CPU boost "Boost", GPU boost "High") while
-helldivers2.exe runs, only when the laptop is plugged in. The second one
-switches to Performance while longshot.exe runs, also only when plugged in.
+The first switches to Custom (CPU boost "Boost", GPU boost "High") while
+helldivers2.exe runs. The second switches to Performance while longshot.exe
+runs. Both apply only when plugged in.
 
 
 WHAT EACH LINE MEANS
@@ -218,14 +218,13 @@ keyboard_color = "FollowPerfMode"
 
 IF SOMETHING GOES WRONG
 -----------------------
-- If you save a mistake (a missing quote, a misspelled value) while the tray
-  runs, it keeps the rules it had and doesn't save over the file until the
-  mistake is fixed. If the tray starts with a mistake in the file, it uses
-  no rules and says so at the top of its menu. Either way the log says what
-  is wrong:
+- A mistake in the file (a missing quote, a misspelled value): a running
+  tray keeps its old rules and won't save over the file until it's fixed. A
+  tray that starts with the mistake uses no rules and says so at the top of
+  its menu. The log names the problem:
       {log}
-- Don't keep notes in {config_name}. The tray saves that file again when
-  you change a setting from its menu, and lines that start with # are lost.
+- Don't keep notes in {config_name}. The tray saves the file when you change
+  a setting from its menu, and lines starting with # are lost.
 "##;
 
 #[cfg(test)]
