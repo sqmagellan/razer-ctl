@@ -1073,6 +1073,19 @@ pub struct ConfigState {
     /// not changed. On by default; written to the file only when turned off.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub weak_charger_guard: bool,
+    /// Raise a manual fan to full speed while the laptop is hot, and give the set point
+    /// back once it cools; see `crate::guard::FanGuardLimits`. Never touches Auto. On by
+    /// default; written to the file only when turned off.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub fan_guard: bool,
+    /// The fan guard's CPU trigger in °C (the EC's CPU-side sensor, not the die), when
+    /// not the default (72). It releases 14 °C below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_guard_cpu_c: Option<u8>,
+    /// The fan guard's GPU trigger in °C, when not the default (87). It releases 20 °C
+    /// below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_guard_gpu_c: Option<u8>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -1224,6 +1237,9 @@ impl Default for ConfigState {
             ac_state_unset: false,
             battery_state_unset: false,
             weak_charger_guard: true,
+            fan_guard: true,
+            fan_guard_cpu_c: None,
+            fan_guard_gpu_c: None,
         }
     }
 }
@@ -2923,15 +2939,19 @@ mod tests {
     #[test]
     fn the_guards_default_on_and_only_a_change_is_written() {
         let cfg: ConfigState = toml::from_str("enforce = true\n").unwrap();
-        assert!(cfg.weak_charger_guard);
+        assert!(cfg.weak_charger_guard && cfg.fan_guard);
+        assert_eq!((cfg.fan_guard_cpu_c, cfg.fan_guard_gpu_c), (None, None));
         let text = toml::to_string(&ConfigState::default()).unwrap();
         assert!(!text.contains("guard"), "{text}");
         let off = ConfigState {
             weak_charger_guard: false,
+            fan_guard: false,
+            fan_guard_cpu_c: Some(80),
             ..ConfigState::default()
         };
         let text = toml::to_string(&off).unwrap();
         assert!(text.contains("weak_charger_guard = false"), "{text}");
+        assert!(text.contains("fan_guard_cpu_c = 80"), "{text}");
         assert_eq!(toml::from_str::<ConfigState>(&text).unwrap(), off);
     }
 

@@ -755,10 +755,19 @@ fn main() -> Result<()> {
                 );
             }
 
-            // The weak-charger guard (see librazer::guard): read the charger every 30 s while
-            // plugged in; a change moves the target below.
-            if io_ok && state.charger_read_due(now) {
-                state.read_charger(&device, Some(&tray_icon));
+            // The guards (see librazer::guard): read the charger every 30 s while plugged in,
+            // and the EC temperatures every 5 s while the fan guard watches a manual fan; a
+            // change in either moves the target below.
+            if io_ok {
+                if state.charger_read_due(now) {
+                    state.read_charger(&device, Some(&tray_icon));
+                }
+                if state.fan_guard_read_due(now) {
+                    state.read_fan_guard_temps(&device);
+                }
+            }
+            if state.update_fan_guard(now) {
+                state.rebuild_menu(Some(&tray_icon));
             }
 
             // Converge the device on what it should be now: the Action session, else the

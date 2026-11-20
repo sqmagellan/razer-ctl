@@ -23,9 +23,17 @@ unless a user report is cited.
   `weak_charger_guard = false` turns it off. Idea from
   [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). On `0x029F` the 330 W
   barrel charger reads `[0x12, 0x12]` and nothing is held; the USB-C path is tested in code only.
+- **Fan guard.** While the tray holds a manual fan speed (a profile's or a rule's) and the EC's CPU
+  sensor reads 72 °C or the awake dGPU 87 °C, the fans go to the model's top manual speed. The set
+  point comes back once every sensor read is under 58 and 67 °C for 30 s of readings. A reading
+  older than 15 s changes nothing. Auto is never touched. The menu and tooltip say when it is on.
+  `fan_guard = false` turns it off; `fan_guard_cpu_c` and `fan_guard_gpu_c` move the triggers. Idea
+  from blade-lite. On `0x029F` the CPU sensor peaked at 70 °C with all 32 threads busy and a 2000
+  RPM set point, and the EC then lifted the fans to 4500 by itself; the guard has not engaged on
+  hardware.
 
-- Versions: `librazer` gains `guard` and `panel`; `ConfigState` gains `weak_charger_guard`
-  (breaking for struct literals).
+- Versions: `librazer` gains `guard` and `panel`; `ConfigState` gains `weak_charger_guard`,
+  `fan_guard`, `fan_guard_cpu_c` and `fan_guard_gpu_c` (breaking for struct literals).
 
 ## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)
 Built and tested on `0x029F` (2026-11-11 to 2026-11-15). The CPU cap ran in a test tray from

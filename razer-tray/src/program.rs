@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use librazer::command;
 use librazer::cpu_cap::{self, CpuCap};
 use librazer::device;
-use librazer::guard;
+use librazer::guard::{self, FanGuard, FanGuardChange, FanGuardLimits, GuardReading};
 use librazer::keyboard::{Frame, KeyboardPreset};
 use librazer::panel::PanelMode;
 use librazer::types::{BatteryCare, PowerSource};
@@ -117,6 +117,9 @@ const CHARGER_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// failed read must not lift the clamp (a Performance write) only for the next to put it
 /// back (a Balanced write).
 const CHARGER_FRESH: std::time::Duration = std::time::Duration::from_secs(95);
+/// How often the fan guard reads the EC temperatures while it watches a manual fan,
+/// whether or not anyone is at the keyboard (a game on a controller makes no input).
+const FAN_GUARD_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The Mini-LED panel's firmware selection (see `librazer::panel`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -247,6 +250,15 @@ pub struct ProgramState {
     charger_unsupported: bool,
     /// A failed charger read has been logged since the last good one.
     charger_failure_logged: bool,
+    /// Raise a manual fan while hot (config `fan_guard`), and where.
+    fan_guard_on: bool,
+    fan_guard_limits: FanGuardLimits,
+    /// The triggers as the config gave them, so a save writes them back as they were.
+    fan_guard_cpu_c: Option<u8>,
+    fan_guard_gpu_c: Option<u8>,
+    fan_guard: FanGuard,
+    /// No fan guard temperature read before this.
+    fan_guard_next: Option<std::time::Instant>,
     /// The Mini-LED dual-mode panel, on a laptop that has one; set by `main`.
     pub panel: Option<PanelState>,
     /// The state the menu was last built from. Its handlers are this state with one field
@@ -266,6 +278,16 @@ fn perf_name(perf: PerfMode) -> &'static str {
         PerfMode::Hyperboost => "Hyperboost",
         PerfMode::Custom(..) => "Custom",
     }
+}
+
+/// The fan guard's lines from the config, logging triggers it ignores.
+fn fan_guard_limits(config: &ConfigState) -> FanGuardLimits {
+    let (limits, ignored) =
+        FanGuardLimits::from_config(config.fan_guard_cpu_c, config.fan_guard_gpu_c);
+    if let Some(ignored) = ignored {
+        log::warn!("fan guard: {ignored}");
+    }
+    limits
 }
 
 impl ProgramState {
@@ -306,6 +328,7 @@ impl ProgramState {
             },
         )?;
         let cpu_cap = CpuCap::open(config_file.path().with_file_name(cpu_cap::BASELINE_FILE));
+        let limits = fan_guard_limits(&config);
         Ok(Self {
             device_state,
             observed: device_state,
@@ -350,6 +373,12 @@ impl ProgramState {
             charger_next: None,
             charger_unsupported: false,
             charger_failure_logged: false,
+            fan_guard_on: config.fan_guard,
+            fan_guard_limits: limits,
+            fan_guard_cpu_c: config.fan_guard_cpu_c,
+            fan_guard_gpu_c: config.fan_guard_gpu_c,
+            fan_guard: FanGuard::default(),
+            fan_guard_next: None,
             panel: None,
             menu_base: device_state,
             guard_notes: Vec::new(),
@@ -527,7 +556,7 @@ impl ProgramState {
 
     /// What the device should be in right now: [`Self::intent`] as the guards allow it.
     /// Every path that converges, enforces or reconciles aims at this (through
-    /// `device_state`), so none of them "repairs" a held perf mode.
+    /// `device_state`), so none of them "repairs" a held perf mode or a raised fan.
     pub fn target(&self) -> DeviceState {
         self.guarded(self.intent())
     }
@@ -551,9 +580,15 @@ impl ProgramState {
         .normalized(self.fan_rpm_range)
     }
 
-    /// `state` as the guards allow it now: the weak-charger clamp.
+    /// `state` as the guards allow it now: the weak-charger clamp, then the fan guard.
     fn guarded(&self, state: DeviceState) -> DeviceState {
-        self.charger_guarded(state).normalized(self.fan_rpm_range)
+        let state = self.charger_guarded(state);
+        if self.fan_guard.engaged() {
+            guard::raise_fan_for_heat(state, self.fan_rpm_range)
+        } else {
+            state
+        }
+        .normalized(self.fan_rpm_range)
     }
 
     fn charger_guarded(&self, state: DeviceState) -> DeviceState {
@@ -590,6 +625,12 @@ impl ProgramState {
                     perf_name(intent.perf_mode)
                 ));
             }
+        }
+        if self.fan_guard.engaged() {
+            out.push(format!(
+                "Hot: fans at {} RPM until it cools",
+                self.fan_rpm_range.1
+            ));
         }
         out
     }
@@ -742,6 +783,87 @@ impl ProgramState {
         // The clicked item toggled itself; the rebuilt menu shows the firmware's selection.
         self.rebuild_menu(Some(tray_icon));
         result.map(|w| w == librazer::panel::PanelWrite::Changed)
+    }
+
+    // ---- fan guard ----------------------------------------------------------------
+
+    /// Whether the fan guard watches now: on, the config applied, and the intent (as the
+    /// charger allows it) holding a manual set point it could raise.
+    fn fan_guard_watches(&self) -> bool {
+        self.fan_guard_on
+            && self.mode().writes_config()
+            && guard::fan_guard_applies(&self.charger_guarded(self.intent()), self.fan_rpm_range)
+    }
+
+    /// Whether the fan guard wants a fresh EC temperature read now.
+    pub fn fan_guard_read_due(&self, now: std::time::Instant) -> bool {
+        self.fan_guard_watches()
+            && !self.ec_temps_unsupported
+            && self.fan_guard_next.is_none_or(|next| now >= next)
+    }
+
+    /// Read the EC temperatures for the fan guard (they also feed the tooltip).
+    pub fn read_fan_guard_temps(&mut self, device: &device::Device) {
+        let now = std::time::Instant::now();
+        self.fan_guard_next = Some(now + FAN_GUARD_EVERY);
+        self.refresh_ec_temps(device, now);
+    }
+
+    /// The GPU temperature for the fan guard: only while the dGPU is awake, which is when
+    /// Windows' telemetry has one; the higher of it and the EC's byte, which runs 1-2 °C
+    /// under the driver on `0x029F`.
+    fn guard_gpu_c(ec_gpu_c: Option<u8>) -> Option<u8> {
+        let (driver_c, _) = crate::platform::gpu_telemetry()?;
+        let driver_c = u8::try_from(driver_c).unwrap_or(u8::MAX);
+        Some(ec_gpu_c.map_or(driver_c, |ec| ec.max(driver_c)))
+    }
+
+    /// Feed the fan guard the latest reading. Returns whether it engaged or released (the
+    /// convergence step then writes the raised fan or the set point back). Logs both.
+    pub fn update_fan_guard(&mut self, now: std::time::Instant) -> bool {
+        if !self.fan_guard_watches() {
+            if self.fan_guard.reset() {
+                log::info!("fan guard: released (no manual set point to raise now)");
+                return true;
+            }
+            return false;
+        }
+        // Each sensor on its own: the EC's packet when it is fresh, the awake dGPU from
+        // Windows whatever the EC did. No sensor at all changes nothing.
+        let ec = self
+            .ec_temps
+            .filter(|(_, at)| now.saturating_duration_since(*at) <= guard::FAN_GUARD_STALE)
+            .map(|(t, _)| t);
+        let cpu_c = ec.and_then(|t| t.cpu_c);
+        let gpu_c = Self::guard_gpu_c(ec.and_then(|t| t.gpu_c));
+        let reading = (cpu_c.is_some() || gpu_c.is_some()).then_some(GuardReading {
+            at: now,
+            cpu_c,
+            gpu_c,
+        });
+        let limits = self.fan_guard_limits;
+        match self.fan_guard.update(now, reading, limits) {
+            Some(FanGuardChange::Engaged { cpu_c, gpu_c }) => {
+                log::info!(
+                    "fan guard: hot (CPU {cpu_c:?} °C, GPU {gpu_c:?} °C; triggers {}/{} °C): \
+                     fans to {} RPM until both are under {}/{} °C for {:?}",
+                    limits.cpu_hot_c,
+                    limits.gpu_hot_c,
+                    self.fan_rpm_range.1,
+                    limits.cpu_cool_c,
+                    limits.gpu_cool_c,
+                    guard::FAN_GUARD_COOL_HOLD
+                );
+                true
+            }
+            Some(FanGuardChange::Released { cpu_c, gpu_c }) => {
+                log::info!(
+                    "fan guard: cooled (CPU {cpu_c:?} °C, GPU {gpu_c:?} °C); the set point is back"
+                );
+                true
+            }
+            None => false,
+        }
     }
 
     /// Bring the Windows CPU frequency settings in line with the running Action. Runs
@@ -900,6 +1022,9 @@ impl ProgramState {
             keyboard_presets: self.keyboard_presets.clone(),
             keyboard_battery_bar: self.battery_bar,
             weak_charger_guard: self.weak_charger_guard,
+            fan_guard: self.fan_guard_on,
+            fan_guard_cpu_c: self.fan_guard_cpu_c,
+            fan_guard_gpu_c: self.fan_guard_gpu_c,
         }
     }
 
@@ -948,6 +1073,7 @@ impl ProgramState {
     }
 
     fn adopt_config(&mut self, disk: ConfigState) {
+        let limits = fan_guard_limits(&disk);
         self.unset = disk.unset();
         self.ac_state = disk.ac_state.normalized(self.fan_rpm_range);
         self.battery_state = disk.battery_state.normalized(self.fan_rpm_range);
@@ -959,6 +1085,10 @@ impl ProgramState {
         self.keyboard_presets = disk.keyboard_presets;
         self.battery_bar = disk.keyboard_battery_bar;
         self.weak_charger_guard = disk.weak_charger_guard;
+        self.fan_guard_on = disk.fan_guard;
+        self.fan_guard_limits = limits;
+        self.fan_guard_cpu_c = disk.fan_guard_cpu_c;
+        self.fan_guard_gpu_c = disk.fan_guard_gpu_c;
         // Keep a running Action whose rule is unchanged at the same index; any other
         // change ends it, and the next process scan starts afresh.
         if let Some(session) = &self.action {
@@ -1099,6 +1229,10 @@ impl ProgramState {
                 match mode_floor {
                     Some(mode_floor) => format!("Fan {mode_floor} floor"),
                     None if rpm < floor => format!("Fan {floor} floor"),
+                    // The fan guard raised it for the heat.
+                    None if self.fan_guard.engaged() && rpm == self.fan_rpm_range.1 => {
+                        format!("Fan {rpm} hot")
+                    }
                     None => format!("Fan {rpm} set"),
                 }
             }
@@ -1979,9 +2113,105 @@ mod tests {
         );
     }
 
-    /// The weak-charger marker fits the tooltip with every perf mode.
+    fn ec(
+        cpu_c: u8,
+        at: std::time::Instant,
+    ) -> (librazer::types::EcTemperatures, std::time::Instant) {
+        (
+            librazer::types::EcTemperatures {
+                cpu_c: Some(cpu_c),
+                gpu_c: None,
+            },
+            at,
+        )
+    }
+
+    fn manual(rpm: u16) -> DeviceState {
+        DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Manual(rpm),
+            ..DeviceState::default()
+        }
+    }
+
     #[test]
-    fn the_charger_marker_fits_the_tooltip_budget() {
+    fn the_fan_guard_raises_a_manual_fan_while_hot_and_gives_it_back() {
+        let t0 = std::time::Instant::now();
+        let secs = |n| t0 + std::time::Duration::from_secs(n);
+        let mut state = guarded_state("fan-guard", manual(3000));
+        let hot = state.fan_guard_limits.cpu_hot_c;
+        let cool = state.fan_guard_limits.cpu_cool_c - 1;
+        assert!(state.fan_guard_read_due(t0));
+        state.ec_temps = Some(ec(hot, t0));
+        assert!(state.update_fan_guard(t0), "engaged");
+        assert_eq!(state.target().fan_speed, FanSpeed::Manual(RANGE.1));
+        assert_eq!(
+            state.ac_state.fan_speed,
+            FanSpeed::Manual(3000),
+            "saved as picked"
+        );
+        assert_eq!(
+            state.guard_lines(),
+            vec![format!("Hot: fans at {} RPM until it cools", RANGE.1)]
+        );
+        // The device aimed at the raised fan: the menu still shows the set point, and the
+        // tooltip says why the fans are up.
+        state.device_state = state.target();
+        state.observed = state.device_state;
+        state.rebuild_menu(None);
+        assert_eq!(state.menu_base.fan_speed, FanSpeed::Manual(3000));
+        assert!(state
+            .tooltip()
+            .unwrap()
+            .contains(&format!("Fan {} hot", RANGE.1)));
+        // Held while it cools, then released after the hold.
+        for n in [5, 10, 20, 30] {
+            state.ec_temps = Some(ec(cool, secs(n)));
+            assert!(!state.update_fan_guard(secs(n)), "{n}");
+        }
+        state.ec_temps = Some(ec(cool, secs(40)));
+        assert!(state.update_fan_guard(secs(40)), "released");
+        assert_eq!(state.target().fan_speed, FanSpeed::Manual(3000));
+        assert!(state.guard_lines().is_empty());
+    }
+
+    #[test]
+    fn the_fan_guard_leaves_auto_alone_and_ignores_stale_readings() {
+        let t0 = std::time::Instant::now();
+        let mut state = guarded_state("fan-guard-auto", DeviceState::default());
+        let hot = state.fan_guard_limits.cpu_hot_c;
+        assert_eq!(state.ac_state.fan_speed, FanSpeed::Auto);
+        assert!(!state.fan_guard_read_due(t0), "nothing to watch in Auto");
+        state.ec_temps = Some(ec(hot + 5, t0));
+        assert!(!state.update_fan_guard(t0));
+        assert_eq!(state.target().fan_speed, FanSpeed::Auto);
+
+        // A hot reading that is too old engages nothing.
+        state.ac_state = manual(3000);
+        if let Some(old) =
+            t0.checked_sub(guard::FAN_GUARD_STALE + std::time::Duration::from_secs(1))
+        {
+            state.ec_temps = Some(ec(hot + 5, old));
+            assert!(!state.update_fan_guard(t0));
+            assert_eq!(state.target().fan_speed, FanSpeed::Manual(3000));
+        }
+        // Engaged, then the user goes to Auto: released at once, Auto untouched.
+        state.ec_temps = Some(ec(hot, t0));
+        assert!(state.update_fan_guard(t0));
+        state.ac_state = DeviceState::default();
+        assert!(state.update_fan_guard(t0), "released");
+        assert_eq!(state.target().fan_speed, FanSpeed::Auto);
+        // Off in the config: never engages.
+        state.ac_state = manual(3000);
+        state.fan_guard_on = false;
+        assert!(!state.fan_guard_read_due(t0));
+        assert!(!state.update_fan_guard(t0));
+        assert_eq!(state.target().fan_speed, FanSpeed::Manual(3000));
+    }
+
+    /// Both guards' markers fit the tooltip with every perf mode.
+    #[test]
+    fn the_guard_markers_fit_the_tooltip_budget() {
         use librazer::types::{CpuBoost, GpuBoost};
         use strum::IntoEnumIterator;
         let now = std::time::Instant::now();
@@ -1998,8 +2228,16 @@ mod tests {
             }
         }
         for perf in modes {
-            let mut state = guarded_state("tooltip-guards", with_perf(perf));
+            let mut state = guarded_state(
+                "tooltip-guards",
+                DeviceState {
+                    perf_mode: perf,
+                    ..manual(3000)
+                },
+            );
             state.note_charger(usb_c_65w(), now);
+            state.ec_temps = Some(ec(state.fan_guard_limits.cpu_hot_c, now));
+            state.update_fan_guard(now);
             state.fan_actual = Some(FanRpm {
                 fan1: 5000,
                 fan2: 5000,
@@ -2022,6 +2260,7 @@ mod tests {
                 held,
                 "{perf:?}: {tip:?}"
             );
+            assert!(tip.contains("hot"), "{perf:?}: {tip:?}");
         }
     }
 

@@ -42,6 +42,9 @@ history and measurements; `README.upstream.md` covers the original project.
 - **Weak-charger guard** (on by default): on a USB-C charger the tray holds Performance, Hyperboost
   and Custom to Balanced while plugged in, as Synapse does. The saved profile and game rules keep
   their mode, and the menu says what is held. `weak_charger_guard = false` turns it off.
+- **Fan guard** (on by default): while the tray holds a manual fan speed and the laptop gets hot,
+  the fans go to full speed until it cools, then back to the set point. Auto is never touched.
+  `fan_guard = false` turns it off; `fan_guard_cpu_c` and `fan_guard_gpu_c` move the triggers.
 - **Match Windows power to Razer performance mode** (off by default): Battery and Silent → Best power
   efficiency, Balanced → Balanced, the rest → Best performance. Turning it off restores each source's
   earlier mode.
@@ -126,8 +129,8 @@ missing. Expect perf modes and fans to work. If you try one, please
 
 - **Temperature-driven fan curves.** A CPU die temperature on Windows needs a kernel driver. The
   usual one (WinRing0) has CVE-2020-14979, and Defender has quarantined it since March 2025. The ACPI
-  thermal zones are stubs. The EC's sensor needs no driver, but it isn't the die, and its lag under
-  load hasn't been measured.
+  thermal zones are stubs. The EC's sensor needs no driver, but it isn't the die and lags it. The
+  fan guard uses it for one coarse step only: a manual fan to full speed while hot.
 - **Cloud profiles, macros and a per-key lighting editor.**
 
 ## Install
@@ -187,6 +190,10 @@ GitHub Actions builds every release binary from a tag. None is uploaded by hand.
 - **The weak-charger guard trusts the EC's charger code.** `0x078c` codes 1-7 are USB-C (40-100
   W). The tray reads it at start, 5 s after a plug and every 30 s on AC. A model that can't report
   its charger is never held. Only the barrel charger has been seen on `0x029F` (`0x12`, 330 W).
+- **The fan guard reads the EC's CPU-side sensor and the dGPU.** Hot is CPU 72 °C or GPU 87 °C;
+  cool is under 58 and 67 °C for 30 s. The GPU counts only while it is awake. A reading older than
+  15 s changes nothing. The CPU sensor reads far under the die: on `0x029F` it peaked at 70 °C
+  with all 32 threads busy. That EC also lifts a low manual fan under load by itself.
 - **Panel mode is firmware state.** Windows keeps the old resolution until the restart, and the
   menu marks a pending choice "(after restart)".
 - **The tooltip refreshes on hover.** A background poll still drives "Undo changes made by Synapse"
@@ -216,8 +223,8 @@ Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/raze
 fork by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). Both MIT; so is this
 fork. Protocol notes and fixes from Finesssee ([Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl),
 MIT). The Mini-LED panel protocol is from Paul Rodriguez's
-[razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). The weak-charger guard
-idea is from [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). Maintained by
+[razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). The weak-charger and fan guard
+ideas are from [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). Maintained by
 sqmagellan, developed with Claude Opus 5.5.
 
 Protocol facts (command IDs, the checksum, `0x0004` being device mode) came from reading
