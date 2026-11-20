@@ -6,8 +6,10 @@ unless a user report is cited.
 
 ## Unreleased
 
-Tested on `0x029F` (2026-11-19): panel mode writes and reads back both ways; the 330 W charger reads
-`0x12` and nothing is held. Not yet seen on hardware: a USB-C charger, the fan guard engaging.
+Tested on `0x029F` (2026-11-19 and 20): panel mode writes and reads back both ways. Two Apple USB-C
+chargers (140 W and 96 W) both read as 65 W, and the hold and its notice work. A 5300 RPM write
+reads back, but the fans stop at 5000, so the limit stays 5000. The fan guard has not engaged on
+hardware yet.
 
 **New**
 - **Mini-LED panel mode.** On a Blade 16 (2023) with the dual-mode panel, pick 3840x2400 at 120 Hz

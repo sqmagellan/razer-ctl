@@ -166,6 +166,9 @@ GitHub Actions builds every release binary from a tag. None is uploaded by hand.
   back as written while the fans settle at 3800; Balanced follows 2000–5000. The menu marks those
   presets "(runs at 3800)", and `razer-cli` says so. Measured on an `RZ09-0483U`; the Black edition
   shares its PID and gets the same handling, untested.
+- **The EC can run fan 1 above a low set point.** At 2000 RPM, idle (fan 1/fan 2): Balanced
+  3400/2000, Performance 4600/4000, Custom 4400/3900. A 5300 write reads back, but the fans stop at
+  5000.
 - **Undo changes made by Synapse is last-writer-wins.** It beats occasional changes, not a tool that
   writes constantly.
 - **Close apps using the GPU is conservative.** It skips session-critical processes and anything
