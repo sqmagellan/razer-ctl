@@ -200,6 +200,84 @@ pub fn open_in_editor(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Show `text` as a notification from razer-tray's own tray icon: a balloon
+/// (`Shell_NotifyIconW`, `NIF_INFO`), which Windows 10/11 shows as a toast from the app,
+/// with `NIIF_NOSOUND` and `NIIF_RESPECT_QUIET_TIME` set. Returns whether Windows took it.
+/// `tray-icon` 0.19 has no notification API and keeps its window and icon id private, so
+/// this finds the icon's window (class `tray_icon_app`, this process) and tries the first
+/// few ids; Windows refuses a modify for an icon that isn't there. A failure is logged.
+#[cfg(target_os = "windows")]
+pub fn notify(text: &str) -> bool {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::Shell::{
+        Shell_NotifyIconW, NIF_INFO, NIIF_INFO, NIIF_NOSOUND, NIIF_RESPECT_QUIET_TIME, NIM_MODIFY,
+        NOTIFYICONDATAW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowThreadProcessId,
+    };
+
+    unsafe extern "system" fn ours(hwnd: HWND, found: LPARAM) -> BOOL {
+        let mut pid = 0u32;
+        // SAFETY: a window handle from EnumWindows and an out-pointer to a local.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        let mut class = [0u16; 64];
+        // SAFETY: as above; the buffer's length bounds the copy.
+        let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+        // SAFETY: `found` is the address of the caller's `HWND`, alive for the whole enum.
+        if pid == unsafe { GetCurrentProcessId() }
+            && String::from_utf16_lossy(&class[..n.min(class.len())]) == "tray_icon_app"
+        {
+            unsafe { *(found.0 as *mut HWND) = hwnd };
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+
+    let mut hwnd = HWND(0);
+    // SAFETY: the callback writes only through the pointer to `hwnd`, which outlives it.
+    let _ = unsafe { EnumWindows(Some(ours), LPARAM(&mut hwnd as *mut HWND as isize)) };
+    if hwnd.0 == 0 {
+        log::warn!("notice: the tray icon's window wasn't found; not shown");
+        return false;
+    }
+    let copy = |dst: &mut [u16], s: &str| {
+        for (d, c) in dst
+            .iter_mut()
+            .zip(s.encode_utf16().chain(std::iter::once(0)))
+        {
+            *d = c;
+        }
+        if let Some(last) = dst.last_mut() {
+            *last = 0;
+        }
+    };
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME,
+        ..Default::default()
+    };
+    copy(&mut nid.szInfo, text);
+    copy(&mut nid.szInfoTitle, "razer-tray");
+    for id in 1..=8 {
+        nid.uID = id;
+        // SAFETY: a fully initialized NOTIFYICONDATAW with its own size in cbSize.
+        if unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) }.as_bool() {
+            return true;
+        }
+    }
+    log::warn!("notice: Windows refused it for every icon id tried; not shown");
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn notify(_text: &str) -> bool {
+    false
+}
+
 /// Ask whether to restart Windows now, Yes/No with **No** the default (Enter or a stray
 /// click on the default keeps working), and restart on Yes. Blocks: call it off the tray's
 /// event loop. For the Mini-LED panel mode, which the firmware applies only at a start.

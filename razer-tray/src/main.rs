@@ -781,6 +781,13 @@ fn main() -> Result<()> {
                 log::info!("new_device_state 3 {:?}", target);
                 state.update_transient(&mut tray_icon, target, &device)?;
             }
+            // After convergence, so the notice never comes before the mode it describes.
+            if state.device_state == state.target() {
+                if let Some(text) = state.charger_notice() {
+                    log::info!("notice: {text}");
+                    state.notice_shown(platform::notify(&text));
+                }
+            }
 
             // Wake handling, rebuilt around what Modern Standby actually delivers. The Blade
             // sleeps in S0 Low Power Idle: 69 standby cycles in 17 days against 5 real

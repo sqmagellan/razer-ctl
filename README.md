@@ -37,7 +37,7 @@ history and measurements; `README.upstream.md` covers the original project.
 - **Panel mode** (Blade 16 2023, dual-mode panel): 3840x2400 at 120 Hz or 1920x1200 at 240 Hz, after
   a restart. `razer-cli auto panel [set uhd|fhd]`.
 - **Weak-charger guard** (on by default): on a USB-C charger, Performance and up run as Balanced.
-  `weak_charger_guard = false` turns it off.
+  A notification and the menu say so. `weak_charger_guard = false` turns it off.
 - **Fan guard** (on by default): a manual fan goes to full speed while the laptop is hot. `fan_guard
   = false` turns it off; `fan_guard_cpu_c` and `fan_guard_gpu_c` set the triggers.
 - **Match Windows power to Razer performance mode** (off by default): Battery and Silent → Best power

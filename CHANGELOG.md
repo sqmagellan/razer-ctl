@@ -16,7 +16,9 @@ Tested on `0x029F` (2026-11-19): panel mode writes and reads back both ways; the
   reset. Protocol from Paul Rodriguez's [razer-helper](https://github.com/Paulrod20/razer-helper)
   (MIT).
 - **Weak-charger guard.** On a USB-C charger, Performance, Hyperboost and Custom run as Balanced, as
-  in Synapse. Saved profiles keep their mode. `weak_charger_guard = false` turns it off.
+  in Synapse. Saved profiles keep their mode. `weak_charger_guard = false` turns it off. A Windows
+  notification says so when the charger starts holding the picked mode (plug, start or pick), and
+  the menu marks held modes "(Balanced on USB-C)".
 - **Fan guard.** With a manual fan speed set, the fans go to full when the CPU sensor reaches 72 °C
   or the dGPU 87 °C. They return to the set point once that sensor stays under 58 or 67 °C for 30 s.
   `fan_guard = false` turns it off. Both guards are ideas from

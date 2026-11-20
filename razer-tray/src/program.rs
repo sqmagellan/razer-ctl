@@ -127,6 +127,8 @@ const CHARGER_PENDING_MAX: std::time::Duration = std::time::Duration::from_secs(
 /// While the first read is pending, a failed one is retried after this, not after
 /// [`CHARGER_EVERY`].
 const CHARGER_PENDING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Tries at showing one notice before the tray gives up on it.
+const NOTICE_TRIES: u8 = 3;
 /// How often the fan guard reads the EC temperatures while it watches a manual fan,
 /// whether or not anyone is at the keyboard (a game on a controller makes no input).
 const FAN_GUARD_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -288,6 +290,16 @@ pub struct ProgramState {
     menu_base: DeviceState,
     /// The disabled lines at the top of the menu that say what a guard holds.
     guard_notes: Vec<String>,
+    /// The menu was built with the USB-C labels ("Performance (Balanced on USB-C)").
+    menu_usb_c: bool,
+    /// The USB-C charger and the held mode last notified about; `None` while nothing is held.
+    /// A notice goes out when this changes to something held: once per plug or pick.
+    notice_key: Option<PerfMode>,
+    /// Failed tries at showing the pending notice.
+    notice_tries: u8,
+    /// Test hook: make the next menu build fail.
+    #[cfg(test)]
+    fail_menu_build: bool,
 }
 
 /// Which Mini-LED panel mode Windows is running, from the modes it offers on the internal
@@ -364,6 +376,7 @@ impl ProgramState {
                 running_rule: None,
                 guard_notes: &[],
                 panel: None,
+                usb_c_hold: false,
             },
         )?;
         let cpu_cap = CpuCap::open(config_file.path().with_file_name(cpu_cap::BASELINE_FILE));
@@ -422,6 +435,11 @@ impl ProgramState {
             panel: None,
             menu_base: device_state,
             guard_notes: Vec::new(),
+            menu_usb_c: false,
+            notice_key: None,
+            notice_tries: 0,
+            #[cfg(test)]
+            fail_menu_build: false,
         })
     }
 
@@ -449,6 +467,7 @@ impl ProgramState {
             running_rule: self.action.map(|a| a.rule),
             guard_notes: &self.guard_notes,
             panel: self.panel,
+            usb_c_hold: self.weak_charger().is_some(),
         }
     }
 
@@ -457,17 +476,31 @@ impl ProgramState {
     /// several call sites.
     pub fn rebuild_menu(&mut self, tray_icon: Option<&tray_icon::TrayIcon>) {
         let base = self.menu_state();
-        self.guard_notes = self.guard_lines();
-        match menu::build(&base, &self.menu_options()) {
+        // The lines and labels count as shown only once a menu with them is built, so a
+        // failed build is tried again on the next tick.
+        let lines = self.guard_lines();
+        let old_notes = std::mem::replace(&mut self.guard_notes, lines);
+        let built = menu::build(&base, &self.menu_options());
+        #[cfg(test)]
+        let built = if std::mem::take(&mut self.fail_menu_build) {
+            Err(anyhow::anyhow!("test: menu build fails"))
+        } else {
+            built
+        };
+        match built {
             Ok((m, h)) => {
                 self.menu = m;
                 self.event_handlers = h;
                 self.menu_base = base;
+                self.menu_usb_c = self.weak_charger().is_some();
                 if let Some(tray) = tray_icon {
                     tray.set_menu(Some(Box::new(self.menu.clone())));
                 }
             }
-            Err(e) => log::warn!("menu rebuild failed: {e:?}"),
+            Err(e) => {
+                self.guard_notes = old_notes;
+                log::warn!("menu rebuild failed: {e:?}");
+            }
         }
     }
 
@@ -720,7 +753,64 @@ impl ProgramState {
                 }
             }
         }
-        self.guard_lines() != self.guard_notes
+        self.guard_lines() != self.guard_notes || self.weak_charger().is_some() != self.menu_usb_c
+    }
+
+    /// The held mode the user should be told about now: on a USB-C charger, the picked
+    /// mode (profile or rule) when the charger holds it to Balanced. `None` otherwise. The
+    /// pending re-read of the charger is `Err`: no news, so nothing changes.
+    fn notice_want(&self) -> Result<Option<PerfMode>, ()> {
+        let intent = self.intent().perf_mode;
+        match self.charger_hold() {
+            Some(ChargerHold::Pending) => Err(()),
+            Some(ChargerHold::UsbC(_)) => Ok(guard::weak_charger_perf(intent).map(|_| intent)),
+            None => Ok(None),
+        }
+    }
+
+    /// The Windows notice to show now, if any: when a USB-C charger starts holding the
+    /// picked mode, after a plug, a tray start or a pick. Keyed on what the user sees (on
+    /// USB-C, and which mode is held), so the same charger read again doesn't fire it twice,
+    /// and nothing changes while the charger is still being read. Report the outcome with
+    /// [`Self::notice_shown`]; until then it is offered again, up to [`NOTICE_TRIES`] times.
+    pub fn charger_notice(&mut self) -> Option<String> {
+        let want = self.notice_want().ok()?;
+        if want == self.notice_key {
+            return None;
+        }
+        let Some(mode) = want else {
+            self.notice_key = None;
+            self.notice_tries = 0;
+            return None;
+        };
+        if self.notice_tries >= NOTICE_TRIES {
+            log::warn!("notice: not shown after {NOTICE_TRIES} tries; giving up on it");
+            self.notice_key = want;
+            self.notice_tries = 0;
+            return None;
+        }
+        let watts = match self.charger_hold() {
+            Some(ChargerHold::UsbC(source)) => source
+                .watts()
+                .map(|w| format!(" ({w} W)"))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        Some(format!(
+            "USB-C charger{watts}: running Balanced. {} comes back on the Razer charger.",
+            perf_name(mode)
+        ))
+    }
+
+    /// Whether the notice from [`Self::charger_notice`] was shown. Shown, it is not offered
+    /// again until what the user sees changes; not shown, it is offered on the next tick.
+    pub fn notice_shown(&mut self, shown: bool) {
+        if shown {
+            self.notice_key = self.notice_want().ok().flatten();
+            self.notice_tries = 0;
+        } else {
+            self.notice_tries += 1;
+        }
     }
 
     /// The USB-C charger the clamp is holding the perf mode for, if it is: the guard on,
@@ -2131,6 +2221,121 @@ mod tests {
             perf_mode,
             ..DeviceState::default()
         }
+    }
+
+    /// Ask for the notice and report it shown, as main does.
+    fn notice(state: &mut ProgramState) -> Option<String> {
+        let text = state.charger_notice();
+        if text.is_some() {
+            state.notice_shown(true);
+        }
+        text
+    }
+
+    #[test]
+    fn the_usb_c_notice_goes_out_once_per_plug_or_pick() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-notice", with_perf(PerfMode::Performance));
+        // While the charger is still being read: held, but no notice.
+        state.expect_charger_read();
+        assert_eq!(notice(&mut state), None);
+        // The read says USB-C: one notice, naming the mode and the watts.
+        state.note_charger(usb_c_65w(), now);
+        assert_eq!(
+            notice(&mut state).as_deref(),
+            Some("USB-C charger (65 W): running Balanced. Performance comes back on the Razer charger.")
+        );
+        for _ in 0..3 {
+            assert_eq!(notice(&mut state), None, "not again while nothing changes");
+        }
+        // Another USB-C code (same plug, a different reading) is not news to the user.
+        state.note_charger(Ok(PowerSource::from_args(&[0x07, 0x12])), now);
+        assert_eq!(notice(&mut state), None);
+        // A pick of another held mode: a new notice.
+        state.ac_state = with_perf(PerfMode::Hyperboost);
+        assert!(notice(&mut state)
+            .unwrap()
+            .contains("Hyperboost comes back"));
+        // Balanced is not held: nothing, and the next pick above it notifies again.
+        state.ac_state = with_perf(PerfMode::Balanced);
+        assert_eq!(notice(&mut state), None);
+        state.ac_state = with_perf(PerfMode::Performance);
+        assert!(notice(&mut state).is_some());
+        // Unplugged and plugged into USB-C again: once more, after the read.
+        state.ac_power = false;
+        state.charger_power_changed(now);
+        assert_eq!(notice(&mut state), None);
+        state.ac_power = true;
+        state.charger_power_changed(now);
+        assert_eq!(notice(&mut state), None, "pending");
+        state.note_charger(usb_c_65w(), now);
+        assert!(notice(&mut state).is_some());
+        // The barrel charger: nothing.
+        state.note_charger(barrel(), now);
+        assert_eq!(notice(&mut state), None);
+    }
+
+    #[test]
+    fn a_pending_reread_of_the_same_charger_does_not_fire_it_again() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-reread", with_perf(PerfMode::Performance));
+        state.note_charger(usb_c_65w(), now);
+        assert!(notice(&mut state).is_some());
+        // The source is read again (pending), then answers the same: no second notice.
+        state.charger_power_changed(now);
+        assert_eq!(state.charger_hold(), Some(ChargerHold::Pending));
+        assert_eq!(notice(&mut state), None);
+        state.note_charger(usb_c_65w(), now);
+        assert_eq!(notice(&mut state), None);
+    }
+
+    #[test]
+    fn a_notice_windows_refused_is_offered_again_a_few_times() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-retry", with_perf(PerfMode::Performance));
+        state.note_charger(usb_c_65w(), now);
+        for _ in 0..NOTICE_TRIES {
+            assert!(state.charger_notice().is_some());
+            state.notice_shown(false);
+        }
+        assert_eq!(state.charger_notice(), None, "given up");
+        assert_eq!(state.charger_notice(), None, "and stays given up");
+        // A new pick is a new notice, with its own tries.
+        state.ac_state = with_perf(PerfMode::Hyperboost);
+        assert!(state.charger_notice().is_some());
+        state.notice_shown(true);
+        assert_eq!(state.charger_notice(), None);
+    }
+
+    #[test]
+    fn a_failed_menu_build_is_tried_again() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-menu-fail", with_perf(PerfMode::Performance));
+        state.rebuild_menu(None);
+        state.note_charger(usb_c_65w(), now);
+        state.fail_menu_build = true;
+        state.rebuild_menu(None);
+        assert!(
+            state.tick_guards(),
+            "the failed build left the old labels and lines"
+        );
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards());
+    }
+
+    #[test]
+    fn the_menu_is_rebuilt_when_the_usb_c_labels_change() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-labels", with_perf(PerfMode::Balanced));
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards());
+        state.note_charger(usb_c_65w(), now);
+        assert!(state.tick_guards(), "labels on");
+        assert!(state.menu_options().usb_c_hold);
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards());
+        state.note_charger(barrel(), now);
+        assert!(state.tick_guards(), "labels off");
     }
 
     #[test]

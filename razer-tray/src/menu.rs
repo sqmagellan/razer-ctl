@@ -59,6 +59,17 @@ pub struct MenuOptions<'a> {
     pub guard_notes: &'a [String],
     /// The Mini-LED panel's firmware selection, on a laptop with the dual-mode panel.
     pub panel: Option<crate::program::PanelState>,
+    /// On a USB-C charger: the modes it holds to Balanced are labeled so.
+    pub usb_c_hold: bool,
+}
+
+/// A perf mode's menu label, marked when a USB-C charger holds it to Balanced.
+pub fn perf_label(label: &str, mode: PerfMode, usb_c_hold: bool) -> String {
+    if usb_c_hold && librazer::guard::weak_charger_perf(mode).is_some() {
+        format!("{label} (Balanced on USB-C)")
+    } else {
+        label.to_string()
+    }
 }
 
 /// The menu id of a Mini-LED panel mode item.
@@ -110,6 +121,7 @@ pub fn build(
         running_rule,
         guard_notes,
         panel,
+        usb_c_hold,
     } = *opts;
     // A setting this laptop lacks keeps its submenu, disabled, so the menu says why it
     // does nothing instead of hiding it.
@@ -171,7 +183,7 @@ pub fn build(
         let id = format!("{:?}", mode);
         perf_modes.append(&CheckMenuItem::with_id(
             id.clone(),
-            label,
+            perf_label(label, mode, usb_c_hold),
             dstate.perf_mode != mode,
             dstate.perf_mode == mode,
             None,
@@ -253,7 +265,12 @@ pub fn build(
         .chain(std::iter::once(&max_fan_item as &dyn IsMenuItem))
         .collect();
 
-    perf_modes.append(&Submenu::with_items("Custom", true, &custom_items)?)?;
+    let custom_label = perf_label(
+        "Custom",
+        PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+        usb_c_hold,
+    );
+    perf_modes.append(&Submenu::with_items(custom_label, true, &custom_items)?)?;
 
     // Couple the Windows power mode to the perf mode (opt-in). Next to the choice it
     // follows, and while on, a line says what Windows is actually set to.
@@ -805,6 +822,17 @@ mod tests {
 
     fn label(pid: u16, perf_mode: PerfMode, rpm: u16) -> String {
         label_with(pid, perf_mode, false, rpm)
+    }
+
+    #[test]
+    fn modes_a_usb_c_charger_holds_are_labeled_only_while_held() {
+        for mode in [PerfMode::Performance, PerfMode::Hyperboost, CUSTOM] {
+            assert_eq!(perf_label("X", mode, true), "X (Balanced on USB-C)");
+            assert_eq!(perf_label("X", mode, false), "X");
+        }
+        for mode in [PerfMode::Battery, PerfMode::Silent, PerfMode::Balanced] {
+            assert_eq!(perf_label("X", mode, true), "X");
+        }
     }
 
     #[test]
