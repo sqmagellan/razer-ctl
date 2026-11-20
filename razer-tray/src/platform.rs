@@ -261,7 +261,7 @@ pub fn notify(text: &str) -> bool {
         ..Default::default()
     };
     copy(&mut nid.szInfo, text);
-    copy(&mut nid.szInfoTitle, "razer-tray");
+    copy(&mut nid.szInfoTitle, "Razer Tray");
     for id in 1..=8 {
         nid.uID = id;
         // SAFETY: a fully initialized NOTIFYICONDATAW with its own size in cbSize.
@@ -294,7 +294,7 @@ pub fn offer_restart(text: &str) {
         MessageBoxW(
             HWND(0),
             &HSTRING::from(text),
-            &HSTRING::from("razer-tray"),
+            &HSTRING::from("Razer Tray"),
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND,
         )
     };
