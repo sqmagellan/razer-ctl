@@ -183,35 +183,36 @@ pub fn get_fan_rpm(device: &impl HidTransport, fan_zone: FanZone) -> Result<u16>
     Ok(response.get_args()[2] as u16 * 100)
 }
 
-/// Whether the manual set points have left `intended_rpm`, given that a zone 1 read just
-/// made matched it (`DeviceState::read` reports only zone 1).
+/// The manual fan set point, from zone 2.
 ///
-/// Every write here sets both zones to the same value, so a difference means something
-/// else wrote one zone (another tool), or a two-zone write was cut off between the zones
-/// (a process killed mid-write). A zone-1-only read cannot see either, so Enforce never
-/// repaired it. Reported by upstream (blauzim/razer-ctl 435c870).
-///
-/// A difference is re-read once, both zones, before it is believed: another process's
-/// two-zone write can land between our reads, as with the perf zones in `get_perf_mode`.
-/// The re-read is compared with `intended_rpm`, not only zone against zone, so a write
-/// that moved both zones together between our reads is drift too.
-/// Costs one extra read when the zones agree. Returns a bool rather than a typed error on
-/// purpose: unlike the perf zones, divergence here is treated as drift (repaired only
-/// where the caller already writes), because zone 2's set-point read-back is measured on
-/// `0x029F` only (2026-10-14, echoes zone 1).
-pub fn fan_setpoint_zones_differ(device: &impl HidTransport, intended_rpm: u16) -> Result<bool> {
-    if get_fan_rpm(device, FanZone::Zone2)? == intended_rpm {
+/// Zone 1's register is not only ours: on `0x029F` the EC runs fan 1 faster than a low set
+/// point and writes its own value into zone 1's register (2026-11-20, idle: a 2000 set
+/// point read 3500 on zone 1 in Balanced, 4600 in Performance, 4400 in Custom; zone 2 kept
+/// 2000). Read from zone 1, that looked like drift, and Enforce wrote the fan again on every
+/// poll. Earlier runs (2026-10-14, 3000 and 4000) read the same on both zones. A model
+/// without the zone 2 read gets zone 1.
+pub fn get_fan_setpoint(device: &impl HidTransport) -> Result<u16> {
+    match get_fan_rpm(device, FanZone::Zone2) {
+        Err(e) if crate::error::is_not_supported(&e) => get_fan_rpm(device, FanZone::Zone1),
+        other => other,
+    }
+}
+
+/// Whether zone 1's set point is below `intended_rpm` while zone 2 (which
+/// [`get_fan_setpoint`] reports) matches it: a two-zone write cut off between the zones, or
+/// another tool. Reported by upstream (blauzim/razer-ctl 435c870) for the other zone. Above
+/// `intended_rpm` is the EC raising fan 1 (see [`get_fan_setpoint`]), not drift. A low read
+/// is read once more before it is believed, as another process's write can be in flight.
+pub fn fan_zone1_below(device: &impl HidTransport, intended_rpm: u16) -> Result<bool> {
+    if get_fan_rpm(device, FanZone::Zone1)? >= intended_rpm {
         return Ok(false);
     }
     let zone1 = get_fan_rpm(device, FanZone::Zone1)?;
-    let zone2 = get_fan_rpm(device, FanZone::Zone2)?;
-    let drifted = zone1 != intended_rpm || zone2 != intended_rpm;
-    if drifted {
-        log::warn!(
-            "fan set points off target {intended_rpm} RPM: zone 1 = {zone1} RPM, zone 2 = {zone2} RPM"
-        );
+    let below = zone1 < intended_rpm;
+    if below {
+        log::warn!("fan 1 set point {zone1} RPM is below the intended {intended_rpm} RPM");
     }
-    Ok(drifted)
+    Ok(below)
 }
 
 pub fn get_fan_actual_rpm(device: &impl HidTransport, fan_zone: FanZone) -> Result<u16> {
@@ -1106,43 +1107,58 @@ mod tests {
         assert_eq!(get_fan_rpm(&mock, FanZone::Zone1).unwrap(), 3000);
     }
 
-    #[test]
-    fn fan_setpoint_zones_agreeing_cost_one_read() {
-        let mock = MockTransport::with_responder(|req| reply(&[0, req.get_args()[1], 30]));
-        assert!(!fan_setpoint_zones_differ(&mock, 3000).unwrap());
-        assert_eq!(mock.sent(), vec![(0x0d81, vec![0, 2, 0])], "zone 2 only");
+    /// 0x029F 2026-11-20: the EC wrote 35 into zone 1 over a 2000 set point; zone 2 kept 20.
+    fn lifted(req: &Packet) -> Packet {
+        let zone = req.get_args()[1];
+        reply(&[0, zone, if zone == 1 { 35 } else { 20 }])
     }
 
     #[test]
-    fn fan_setpoint_zones_persistently_diverged_are_reported() {
-        // Zone 1 at 3000, zone 2 left at 4000 by a write cut off between the zones.
+    fn the_set_point_comes_from_zone_2() {
+        let mock = MockTransport::with_responder(lifted);
+        assert_eq!(get_fan_setpoint(&mock).unwrap(), 2000);
+        assert_eq!(mock.sent(), vec![(0x0d81, vec![0, 2, 0])]);
+        // A model without the zone 2 read gets zone 1.
+        let mock = MockTransport::with_fallible_responder(|req| {
+            if req.get_args()[1] == 2 {
+                Err(anyhow::Error::new(
+                    crate::packet::ResponseError::NotSupported,
+                ))
+            } else {
+                Ok(reply(&[0, 1, 30]))
+            }
+        });
+        assert_eq!(get_fan_setpoint(&mock).unwrap(), 3000);
+    }
+
+    #[test]
+    fn fan_1_raised_by_the_ec_is_not_drift() {
+        let mock = MockTransport::with_responder(lifted);
+        assert!(!fan_zone1_below(&mock, 2000).unwrap());
+        assert_eq!(mock.sent_count(), 1, "one read when zone 1 is at or above");
+        let equal = MockTransport::with_responder(|req| reply(&[0, req.get_args()[1], 30]));
+        assert!(!fan_zone1_below(&equal, 3000).unwrap());
+    }
+
+    #[test]
+    fn fan_1_left_below_the_set_point_is_drift() {
+        // Zone 1 still at 2000 after a write of 3000 was cut off before it.
         let mock = MockTransport::with_responder(|req| {
             let zone = req.get_args()[1];
-            reply(&[0, zone, if zone == 1 { 30 } else { 40 }])
+            reply(&[0, zone, if zone == 1 { 20 } else { 30 }])
         });
-        assert!(fan_setpoint_zones_differ(&mock, 3000).unwrap());
-        assert_eq!(mock.sent_count(), 3, "zone 2, then both zones to confirm");
+        assert!(fan_zone1_below(&mock, 3000).unwrap());
+        assert_eq!(mock.sent_count(), 2, "read again before it is believed");
     }
 
     #[test]
-    fn fan_setpoint_zones_moved_together_off_target_are_reported() {
-        // Another process moves both zones from 3000 to 4000 between the caller's zone 1
-        // read and our zone 2 read; the re-read sees both at 4000, which is not the
-        // intended 3000.
-        let mock = MockTransport::with_responder(|req| reply(&[0, req.get_args()[1], 40]));
-        assert!(fan_setpoint_zones_differ(&mock, 3000).unwrap());
-        assert_eq!(mock.sent_count(), 3);
-    }
-
-    #[test]
-    fn fan_setpoint_zones_back_on_target_after_a_race_are_not_reported() {
-        // Zone 2 reads 4000 once (a write in flight), then both zones settle at 3000.
+    fn fan_1_low_once_during_a_write_is_not_drift() {
         let n = std::cell::Cell::new(0);
         let mock = MockTransport::with_responder(move |req| {
             n.set(n.get() + 1);
-            reply(&[0, req.get_args()[1], if n.get() == 1 { 40 } else { 30 }])
+            reply(&[0, req.get_args()[1], if n.get() == 1 { 20 } else { 30 }])
         });
-        assert!(!fan_setpoint_zones_differ(&mock, 3000).unwrap());
+        assert!(!fan_zone1_below(&mock, 3000).unwrap());
     }
 
     #[test]

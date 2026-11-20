@@ -172,8 +172,8 @@ pub struct PerfRetry {
 pub struct ProgramState {
     pub device_state: DeviceState,
     pub observed: DeviceState,
-    /// Turns off the zone 2 fan drift check if repairing it stops working.
-    pub zone2_guard: librazer::state::Zone2DriftGuard,
+    /// Turns off the fan 1 drift check if repairing it stops working.
+    pub zone_guard: librazer::state::ZoneDriftGuard,
     pub perf_retry: PerfRetry,
     pub ac_state: DeviceState,
     pub battery_state: DeviceState,
@@ -371,7 +371,7 @@ impl ProgramState {
         Ok(Self {
             device_state,
             observed: device_state,
-            zone2_guard: Default::default(),
+            zone_guard: Default::default(),
             perf_retry: PerfRetry::default(),
             ac_state,
             battery_state,
@@ -1774,7 +1774,7 @@ impl ProgramState {
             Ok(observed) => {
                 self.track_unsupported(device, Some(tray_icon));
                 self.observe(observed, Some(tray_icon));
-                observed.drifted_from(&self.device_state, device, &mut self.zone2_guard)
+                observed.drifted_from(&self.device_state, device, &mut self.zone_guard)
             }
             Err(e)
                 if e.downcast_ref::<librazer::error::PerfZonesDiverged>()

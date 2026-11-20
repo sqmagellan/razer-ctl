@@ -4,7 +4,7 @@ use laptop::{Backend, Laptop};
 use librazer::command;
 use librazer::feature;
 use librazer::types::{
-    BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
+    BatteryCare, CpuBoost, FanMode, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode,
     MaxFanSpeedMode, PerfMode,
 };
 
@@ -480,7 +480,7 @@ fn fan_handle(
                     // The set-point register reads back whatever was written, even a
                     // value the EC is ignoring, so it is labeled as a set point, never
                     // as the speed.
-                    match command::get_fan_rpm(device, FanZone::Zone1) {
+                    match command::get_fan_setpoint(device) {
                         Ok(0) => out(format!("Fan: {:?} (no set point yet)", fan_mode)),
                         Ok(rpm) => {
                             out(format!("Fan: {:?}, set point {} RPM", fan_mode, rpm));
@@ -969,7 +969,7 @@ fn json_status(device: &Laptop) -> Result<JsonStatus> {
         Some((_, FanMode::Manual)) => json_read(
             &mut unsupported,
             "fan_setpoint_rpm",
-            command::get_fan_rpm(device, FanZone::Zone1),
+            command::get_fan_setpoint(device),
         )?,
         _ => None,
     };

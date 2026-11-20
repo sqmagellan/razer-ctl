@@ -372,8 +372,8 @@ impl DeviceState {
         let fan_speed = match raw_fan_mode {
             FanMode::Auto => FanSpeed::Auto,
             FanMode::Manual => {
-                let rpm = command::get_fan_rpm(device, crate::types::FanZone::Zone1)?;
-                FanSpeed::Manual(rpm)
+                // Zone 2: the EC can rewrite zone 1 (see `command::get_fan_setpoint`).
+                FanSpeed::Manual(command::get_fan_setpoint(device)?)
             }
         };
         // Placeholders for a setting this laptop lacks are never written (see
@@ -771,30 +771,30 @@ impl DeviceState {
     }
 
     /// [`Self::enforced_fields_differ`], for a state just read from `device`, plus what
-    /// [`Self::read`] cannot see: in Manual, a zone 2 set point off target (see
-    /// [`command::fan_setpoint_zones_differ`]). Costs one extra read in Manual when the
-    /// enforced fields match, none otherwise. A failed zone 2 read is not drift: like every
-    /// other failed poll, it leaves the last decision standing. `guard` stops the zone 2
-    /// check after repairs stop working (see [`Zone2DriftGuard`]).
+    /// [`Self::read`] cannot see: in Manual, a zone 1 set point left below target (see
+    /// [`command::fan_zone1_below`]). Zone 1 above target is the EC's, not drift. Costs one
+    /// extra read in Manual when the enforced fields match, none otherwise. A failed read
+    /// is not drift: like every other failed poll, it leaves the last decision standing.
+    /// `guard` stops the zone 1 check after repairs stop working (see [`ZoneDriftGuard`]).
     pub fn drifted_from(
         &self,
         intended: &DeviceState,
         device: &impl HidTransport,
-        guard: &mut Zone2DriftGuard,
+        guard: &mut ZoneDriftGuard,
     ) -> bool {
         if self.enforced_fields_differ_on(intended, device) {
             return true;
         }
         match self.fan_speed {
             FanSpeed::Manual(rpm) if !guard.given_up => {
-                match command::fan_setpoint_zones_differ(device, rpm) {
+                match command::fan_zone1_below(device, rpm) {
                     Ok(true) => guard.drift_seen(),
                     Ok(false) => {
                         guard.unrepaired = 0;
                         false
                     }
                     Err(e) => {
-                        log::debug!("zone 2 fan set point read failed: {e:?}");
+                        log::debug!("zone 1 fan set point read failed: {e:?}");
                         false
                     }
                 }
@@ -1379,31 +1379,31 @@ pub fn sample_fan_rpm(device: &impl HidTransport, max_reads: usize) -> Result<(F
     Ok((last, false))
 }
 
-/// Stops counting a zone 2 fan set point as drift once repairing it stops working.
+/// Stops counting zone 1's fan set point as drift once repairing it stops working.
 ///
-/// Zone 2's set point reads back as written on `0x029F` (2026-10-14: 3000 and 4000 RPM both
-/// echoed on both zones), and is unmeasured everywhere else. If a chassis reports it
-/// differently from what was written, every check would see drift and every repair would
-/// rewrite the whole enforced profile, forever. So after [`ZONE2_MAX_REPAIRS`] detections in a
-/// row with no agreeing read between them, the zone 2 check is off until the tray restarts,
-/// with one warning in the log. Drift in any other field is unaffected.
+/// The set point is read from zone 2 (see [`command::get_fan_setpoint`]); zone 1 is checked
+/// only for being left below it. If a chassis reports zone 1 low whatever is written, every
+/// check would see drift and every repair would rewrite the whole enforced profile, forever.
+/// So after [`ZONE_MAX_REPAIRS`] detections in a row with no agreeing read between them, the
+/// zone 1 check is off until the tray restarts, with one warning in the log. Drift in any
+/// other field is unaffected.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Zone2DriftGuard {
+pub struct ZoneDriftGuard {
     unrepaired: u8,
     given_up: bool,
 }
 
-/// Zone 2 repairs in a row that may fail before [`Zone2DriftGuard`] stops checking.
-pub const ZONE2_MAX_REPAIRS: u8 = 3;
+/// Zone 1 repairs in a row that may fail before [`ZoneDriftGuard`] stops checking.
+pub const ZONE_MAX_REPAIRS: u8 = 3;
 
-impl Zone2DriftGuard {
-    /// Record one zone 2 drift detection; returns whether to treat it as drift.
+impl ZoneDriftGuard {
+    /// Record one zone 1 drift detection; returns whether to treat it as drift.
     fn drift_seen(&mut self) -> bool {
-        if self.unrepaired >= ZONE2_MAX_REPAIRS {
+        if self.unrepaired >= ZONE_MAX_REPAIRS {
             self.given_up = true;
             log::warn!(
-                "zone 2 fan set point still off target after {ZONE2_MAX_REPAIRS} repairs; \
-                 no longer checking zone 2 until the tray restarts"
+                "fan 1 set point still below target after {ZONE_MAX_REPAIRS} repairs; \
+                 no longer checking it until the tray restarts"
             );
             return false;
         }
@@ -2132,37 +2132,69 @@ mod tests {
     }
 
     #[test]
-    fn drifted_from_sees_a_zone_2_set_point_left_behind() {
-        // Zone 1 at 3000 as intended, zone 2 still at 4000: a zone-1-only read matched
-        // intent, so Enforce never repaired it.
+    fn drifted_from_sees_fan_1_left_below_the_set_point() {
+        // Zone 2 at 3000 as intended (what `read` reports), zone 1 still at 2000.
         let mock = MockTransport::with_responder(|req| {
             let zone = req.get_args()[1];
-            reply(&[0, zone, if zone == 1 { 30 } else { 40 }])
+            reply(&[0, zone, if zone == 1 { 20 } else { 30 }])
         });
         let s = dstate(PerfMode::Silent, FanSpeed::Manual(3000), 0);
         assert!(!s.enforced_fields_differ(&s));
-        assert!(s.drifted_from(&s, &mock, &mut Zone2DriftGuard::default()));
+        assert!(s.drifted_from(&s, &mock, &mut ZoneDriftGuard::default()));
+    }
+
+    /// 0x029F 2026-11-20: a 2000 set point, and the EC wrote 35 into zone 1 (fan 1 at
+    /// 3400). The tray used to read 3500, call it drift, and rewrite the fan every poll.
+    #[test]
+    fn the_ecs_raised_fan_1_reads_as_the_set_point_and_is_not_drift() {
+        use crate::types::{FanMode, PerfMode as Wire};
+        let mock = MockTransport::with_responder(|req| match req.command() {
+            0x0d82 => reply(&[
+                0,
+                req.get_args()[1],
+                Wire::Balanced as u8,
+                FanMode::Manual as u8,
+            ]),
+            0x0d81 => {
+                let zone = req.get_args()[1];
+                reply(&[0, zone, if zone == 1 { 35 } else { 20 }])
+            }
+            0x0380 => reply(&[1, 4, 0]),
+            0x0383 => reply(&[1, 5, 200]),
+            0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),
+            0x0f82 => reply(&[1, 5, 0x03]),
+            0x0792 => reply(&[BatteryCare::from_percent(80).unwrap().wire_byte()]),
+            other => panic!("unexpected command {other:#06x}"),
+        });
+        let read = DeviceState::read(&mock).unwrap();
+        assert_eq!(read.fan_speed, FanSpeed::Manual(2000));
+        let intended = DeviceState {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Manual(2000),
+            ..read
+        };
+        assert!(!read.drifted_from(&intended, &mock, &mut ZoneDriftGuard::default()));
     }
 
     #[test]
     fn drifted_from_reads_nothing_more_outside_manual_or_on_known_drift() {
         let mock = MockTransport::echo();
         let auto = dstate(PerfMode::Silent, FanSpeed::Auto, 0);
-        assert!(!auto.drifted_from(&auto, &mock, &mut Zone2DriftGuard::default()));
+        assert!(!auto.drifted_from(&auto, &mock, &mut ZoneDriftGuard::default()));
         let manual = dstate(PerfMode::Silent, FanSpeed::Manual(3000), 0);
-        assert!(manual.drifted_from(&auto, &mock, &mut Zone2DriftGuard::default()));
+        assert!(manual.drifted_from(&auto, &mock, &mut ZoneDriftGuard::default()));
         assert_eq!(mock.sent_count(), 0);
     }
 
     #[test]
-    fn zone_2_check_stops_after_repairs_fail_and_resumes_counting_after_agreement() {
+    fn zone_1_check_stops_after_repairs_fail_and_resumes_counting_after_agreement() {
         let off = MockTransport::with_responder(|req| {
             let zone = req.get_args()[1];
-            reply(&[0, zone, if zone == 1 { 30 } else { 40 }])
+            reply(&[0, zone, if zone == 1 { 20 } else { 30 }])
         });
         let s = dstate(PerfMode::Silent, FanSpeed::Manual(3000), 0);
-        let mut guard = Zone2DriftGuard::default();
-        for _ in 0..ZONE2_MAX_REPAIRS {
+        let mut guard = ZoneDriftGuard::default();
+        for _ in 0..ZONE_MAX_REPAIRS {
             assert!(s.drifted_from(&s, &off, &mut guard));
         }
         assert!(
@@ -2172,12 +2204,12 @@ mod tests {
         assert!(guard.given_up());
         let before = off.sent_count();
         assert!(!s.drifted_from(&s, &off, &mut guard));
-        assert_eq!(off.sent_count(), before, "no zone 2 reads once given up");
+        assert_eq!(off.sent_count(), before, "no zone 1 reads once given up");
 
         // An agreeing read in between resets the count.
         let ok = MockTransport::with_responder(|req| reply(&[0, req.get_args()[1], 30]));
-        let mut guard = Zone2DriftGuard::default();
-        for _ in 0..ZONE2_MAX_REPAIRS {
+        let mut guard = ZoneDriftGuard::default();
+        for _ in 0..ZONE_MAX_REPAIRS {
             assert!(s.drifted_from(&s, &off, &mut guard));
         }
         assert!(!s.drifted_from(&s, &ok, &mut guard));
@@ -2186,11 +2218,11 @@ mod tests {
     }
 
     #[test]
-    fn drifted_from_treats_a_failed_zone_2_read_as_no_drift() {
+    fn drifted_from_treats_a_failed_zone_1_read_as_no_drift() {
         // The set-point getter demands the zone echoed back; a wrong one is a failed read.
         let mock = MockTransport::with_responder(|_| reply(&[0, 9, 40]));
         let s = dstate(PerfMode::Silent, FanSpeed::Manual(3000), 0);
-        assert!(!s.drifted_from(&s, &mock, &mut Zone2DriftGuard::default()));
+        assert!(!s.drifted_from(&s, &mock, &mut ZoneDriftGuard::default()));
     }
 
     #[test]
@@ -3198,7 +3230,7 @@ colors = ["#ffffff"]
             "plain compare sees it"
         );
         assert!(!observed.enforced_fields_differ_on(&intended, &mock));
-        assert!(!observed.drifted_from(&intended, &mock, &mut Zone2DriftGuard::default()));
+        assert!(!observed.drifted_from(&intended, &mock, &mut ZoneDriftGuard::default()));
 
         intended.perf_mode = PerfMode::Silent;
         assert!(

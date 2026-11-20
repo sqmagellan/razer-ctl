@@ -214,7 +214,7 @@ mod tests {
         use crate::types::PerfMode as Wire;
         MockTransport::with_responder(move |req| match req.command() {
             0x0d82 => reply(&[0, 0, Wire::Performance as u8, FanMode::Manual as u8]),
-            0x0d81 => reply(&[0, 1, (rpm / 100) as u8]),
+            0x0d81 => reply(&[0, req.get_args()[1], (rpm / 100) as u8]),
             0x0380 => reply(&[1, 4, 0]),
             0x0383 => reply(&[1, 5, 200]),
             0x0084 => reply(&[LightsAlwaysOn::Disable as u8, 0]),

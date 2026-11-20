@@ -22,8 +22,15 @@ Tested on `0x029F` (2026-11-19): panel mode writes and reads back both ways; the
   `fan_guard = false` turns it off. Both guards are ideas from
   [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT).
 
-- Versions: `librazer` adds `guard` and `panel`; `ConfigState` gains `weak_charger_guard`,
-  `fan_guard`, `fan_guard_cpu_c` and `fan_guard_gpu_c` (breaking for struct literals).
+**Fixes**
+- **Manual fan read from fan 2.** On `0x029F` the EC runs fan 1 faster than a low set point, and
+  once (raw writes) put its own number in fan 1's set point. The set point now comes from fan 2,
+  and fan 1 counts as drift only when it is below it.
+
+- Versions: `librazer` adds `guard`, `panel` and `command::get_fan_setpoint`; `ConfigState`
+  gains `weak_charger_guard`, `fan_guard`, `fan_guard_cpu_c` and `fan_guard_gpu_c`; breaking:
+  `Zone2DriftGuard` is now `ZoneDriftGuard`, `fan_setpoint_zones_differ` is now
+  `fan_zone1_below`.
 
 ## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)
 Built and tested on `0x029F` (2026-11-11 to 2026-11-15). The CPU cap ran in a test tray from

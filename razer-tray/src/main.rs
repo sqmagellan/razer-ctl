@@ -956,7 +956,7 @@ fn main() -> Result<()> {
                             && state.observed.drifted_from(
                                 &state.device_state,
                                 &device,
-                                &mut state.zone2_guard,
+                                &mut state.zone_guard,
                             )
                         {
                             log::info!("enforce: device drifted; re-asserting intended state");
