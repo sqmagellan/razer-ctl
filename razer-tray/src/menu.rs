@@ -54,6 +54,9 @@ pub struct MenuOptions<'a> {
     pub rules: &'a [AppProfile],
     /// The rule in force now (an index into `rules`), marked "(running)".
     pub running_rule: Option<usize>,
+    /// What the guards hold (a USB-C charger, the fan guard), one disabled line each under
+    /// the header.
+    pub guard_notes: &'a [String],
     /// The Mini-LED panel's firmware selection, on a laptop with the dual-mode panel.
     pub panel: Option<crate::program::PanelState>,
 }
@@ -105,6 +108,7 @@ pub fn build(
         ac_power,
         rules,
         running_rule,
+        guard_notes,
         panel,
     } = *opts;
     // A setting this laptop lacks keeps its submenu, disabled, so the menu says why it
@@ -148,6 +152,9 @@ pub fn build(
         false,
         None,
     ))?;
+    for note in guard_notes {
+        menu.append(&MenuItem::new(note, false, None))?;
+    }
     menu.append(&PredefinedMenuItem::separator())?;
 
     // perf

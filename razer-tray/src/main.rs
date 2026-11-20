@@ -277,6 +277,11 @@ fn main() -> Result<()> {
     state.pid = device.info().pid;
     // Read only. The panel mode is never written at startup.
     state.detect_panel(&device);
+    // Before the first sync, so a USB-C charger's clamp is in the first write rather than
+    // a Performance write followed by a Balanced one.
+    if state.charger_read_due(std::time::Instant::now()) {
+        state.read_charger(&device, None);
+    }
     state.rebuild_menu(Some(&tray_icon));
     if first_run {
         // confy used to create the file on first run; people look for it to add Actions.
@@ -593,6 +598,9 @@ fn main() -> Result<()> {
                 }
                 state.ac_power = ac_now;
                 state.adopt_not_before = Some(now + POWER_SETTLE);
+                // The old charger reading says nothing about the new source; read it again
+                // once the EC has settled (no clamp until then).
+                state.charger_power_changed(now + POWER_SETTLE);
                 // The header names the profile picks go to.
                 state.rebuild_menu(Some(&tray_icon));
                 last_app_scan_timestamp = now - std::time::Duration::from_secs(10);
@@ -747,8 +755,15 @@ fn main() -> Result<()> {
                 );
             }
 
+            // The weak-charger guard (see librazer::guard): read the charger every 30 s while
+            // plugged in; a change moves the target below.
+            if io_ok && state.charger_read_due(now) {
+                state.read_charger(&device, Some(&tray_icon));
+            }
+
             // Converge the device on what it should be now: the Action session, else the
-            // saved profile for the power source. Transient, because neither needs saving.
+            // saved profile for the power source, as the guards allow it. Transient, because
+            // none of them needs saving.
             // Only while the config is applied: otherwise the target is defaults (a file
             // that doesn't parse or can't be read) or a placeholder (a profile not yet read).
             let target = state.target();

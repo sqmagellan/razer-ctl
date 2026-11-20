@@ -15,8 +15,17 @@ unless a user report is cited.
   Protocol from Paul Rodriguez's [razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). On
   `0x029F` the SKU byte reads `0x03` and the mode `0x00` (UHD+); FHD+ read back `0x01` and UHD+
   again `0x00`, without a restart (2026-11-19).
+- **Weak-charger guard.** On a USB-C charger (`0x078c` codes 1-7, 40-100 W) the tray holds
+  Performance, Hyperboost and Custom to Balanced while plugged in, as Synapse does. Battery, Silent
+  and Balanced are left alone, and the saved profile and game rules keep their mode. The menu says
+  "USB-C charger (65 W): Performance held to Balanced", the tooltip "Balanced (USB-C)". The charger
+  is read at start, 5 s after a plug and every 30 s on AC. A model without the read is never held.
+  `weak_charger_guard = false` turns it off. Idea from
+  [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). On `0x029F` the 330 W
+  barrel charger reads `[0x12, 0x12]` and nothing is held; the USB-C path is tested in code only.
 
-- Versions: `librazer` gains `panel`.
+- Versions: `librazer` gains `guard` and `panel`; `ConfigState` gains `weak_charger_guard`
+  (breaking for struct literals).
 
 ## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)
 Built and tested on `0x029F` (2026-11-11 to 2026-11-15). The CPU cap ran in a test tray from

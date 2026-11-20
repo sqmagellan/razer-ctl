@@ -9,9 +9,10 @@ use std::collections::HashMap;
 use librazer::command;
 use librazer::cpu_cap::{self, CpuCap};
 use librazer::device;
+use librazer::guard;
 use librazer::keyboard::{Frame, KeyboardPreset};
 use librazer::panel::PanelMode;
-use librazer::types::BatteryCare;
+use librazer::types::{BatteryCare, PowerSource};
 use librazer::unsupported::{Optional, Unsupported};
 use tray_icon::menu::Menu;
 
@@ -108,6 +109,14 @@ const EC_TEMP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 const EC_TEMP_PAUSE: std::time::Duration = FAN_READ_PAUSE;
 /// Older than this, an EC temperature is left out of the tooltip rather than shown stale.
 const EC_TEMP_STALE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How often the charger (`0x078c`) is read while plugged in: one HID round trip (about
+/// 4 ms on `0x029F`), so a USB-C monitor's charger is noticed within half a minute.
+const CHARGER_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a charger reading stands when the reads after it fail: three missed reads. One
+/// failed read must not lift the clamp (a Performance write) only for the next to put it
+/// back (a Balanced write).
+const CHARGER_FRESH: std::time::Duration = std::time::Duration::from_secs(95);
 
 /// The Mini-LED panel's firmware selection (see `librazer::panel`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,8 +236,36 @@ pub struct ProgramState {
     /// forces the next paint. Frames cannot be read back, so this is the only record.
     painted: Option<Frame>,
     config_file: ConfigFile,
+    /// Hold the perf mode to Balanced on a USB-C charger (config `weak_charger_guard`).
+    pub weak_charger_guard: bool,
+    /// The charger as the EC last reported it, and when. Read only while plugged in;
+    /// cleared at every power-source change until the next read.
+    charger: Option<(PowerSource, std::time::Instant)>,
+    /// No charger read before this; `None` = read now.
+    charger_next: Option<std::time::Instant>,
+    /// The EC lacks `0x078c`: never ask again, and never clamp (as before the guard).
+    charger_unsupported: bool,
+    /// A failed charger read has been logged since the last good one.
+    charger_failure_logged: bool,
     /// The Mini-LED dual-mode panel, on a laptop that has one; set by `main`.
     pub panel: Option<PanelState>,
+    /// The state the menu was last built from. Its handlers are this state with one field
+    /// changed, so it is what [`Self::update`] compares a pick with.
+    menu_base: DeviceState,
+    /// The disabled lines at the top of the menu that say what a guard holds.
+    guard_notes: Vec<String>,
+}
+
+/// The perf mode's name, for a menu line.
+fn perf_name(perf: PerfMode) -> &'static str {
+    match perf {
+        PerfMode::Battery => "Battery",
+        PerfMode::Silent => "Silent",
+        PerfMode::Balanced => "Balanced",
+        PerfMode::Performance => "Performance",
+        PerfMode::Hyperboost => "Hyperboost",
+        PerfMode::Custom(..) => "Custom",
+    }
 }
 
 impl ProgramState {
@@ -264,6 +301,7 @@ impl ProgramState {
                 ac_power,
                 rules: &config.app_profiles,
                 running_rule: None,
+                guard_notes: &[],
                 panel: None,
             },
         )?;
@@ -307,7 +345,14 @@ impl ProgramState {
             battery_bar: config.keyboard_battery_bar,
             painted: None,
             config_file,
+            weak_charger_guard: config.weak_charger_guard,
+            charger: None,
+            charger_next: None,
+            charger_unsupported: false,
+            charger_failure_logged: false,
             panel: None,
+            menu_base: device_state,
+            guard_notes: Vec::new(),
         })
     }
 
@@ -333,6 +378,7 @@ impl ProgramState {
             ac_power: self.ac_power,
             rules: &self.app_profiles,
             running_rule: self.action.map(|a| a.rule),
+            guard_notes: &self.guard_notes,
             panel: self.panel,
         }
     }
@@ -341,10 +387,13 @@ impl ProgramState {
     /// The one place the menu is rebuilt, so a new option can't be forgotten at one of
     /// several call sites.
     pub fn rebuild_menu(&mut self, tray_icon: Option<&tray_icon::TrayIcon>) {
-        match menu::build(&self.device_state, &self.menu_options()) {
+        let base = self.menu_state();
+        self.guard_notes = self.guard_lines();
+        match menu::build(&base, &self.menu_options()) {
             Ok((m, h)) => {
                 self.menu = m;
                 self.event_handlers = h;
+                self.menu_base = base;
                 if let Some(tray) = tray_icon {
                     tray.set_menu(Some(Box::new(self.menu.clone())));
                 }
@@ -476,9 +525,16 @@ impl ProgramState {
         }
     }
 
-    /// What the device should be in right now: the running Action's session state when
-    /// one is active and allowed on this power source, else the saved profile.
+    /// What the device should be in right now: [`Self::intent`] as the guards allow it.
+    /// Every path that converges, enforces or reconciles aims at this (through
+    /// `device_state`), so none of them "repairs" a held perf mode.
     pub fn target(&self) -> DeviceState {
+        self.guarded(self.intent())
+    }
+
+    /// What the user asked for: the running Action's session state when one is active and
+    /// allowed on this power source, else the saved profile. The menu shows this.
+    fn intent(&self) -> DeviceState {
         match &self.action {
             Some(session)
                 if self
@@ -493,6 +549,135 @@ impl ProgramState {
         // Whatever produced it, never aim at a state the EC cannot hold: that never
         // converges, and the loop would re-apply it every tick.
         .normalized(self.fan_rpm_range)
+    }
+
+    /// `state` as the guards allow it now: the weak-charger clamp.
+    fn guarded(&self, state: DeviceState) -> DeviceState {
+        self.charger_guarded(state).normalized(self.fan_rpm_range)
+    }
+
+    fn charger_guarded(&self, state: DeviceState) -> DeviceState {
+        if self.weak_charger().is_some() {
+            guard::clamp_for_weak_charger(state)
+        } else {
+            state
+        }
+    }
+
+    /// What the menu shows: while the config is applied, the user's choice (so a held
+    /// Performance stays checked, with a line saying it is held), even in the tick before
+    /// the device is converged on a new target; otherwise the state the tray follows.
+    fn menu_state(&self) -> DeviceState {
+        if self.mode().writes_config() {
+            self.intent()
+        } else {
+            self.device_state
+        }
+    }
+
+    /// The disabled menu lines for the guards in force.
+    fn guard_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let intent = self.intent();
+        if let Some(source) = self.weak_charger() {
+            if guard::weak_charger_perf(intent.perf_mode).is_some() {
+                let watts = source
+                    .watts()
+                    .map(|w| format!(" ({w} W)"))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "USB-C charger{watts}: {} held to Balanced",
+                    perf_name(intent.perf_mode)
+                ));
+            }
+        }
+        out
+    }
+
+    // ---- weak-charger guard -------------------------------------------------------
+
+    /// The USB-C charger the clamp is holding the perf mode for, if it is: the guard on,
+    /// plugged in, and the EC's last reading (no older than [`CHARGER_FRESH`]) a USB-C one.
+    /// A model that can't report its charger, or a read that keeps failing, is never
+    /// clamped: the tray then behaves as it did before the guard.
+    pub fn weak_charger(&self) -> Option<PowerSource> {
+        if !self.weak_charger_guard || !self.ac_power {
+            return None;
+        }
+        self.charger
+            .filter(|(_, at)| at.elapsed() <= CHARGER_FRESH)
+            .map(|(source, _)| source)
+            .filter(|source| guard::is_weak_charger(*source))
+    }
+
+    /// Whether the charger should be read now: guard on, plugged in, the model has the
+    /// command, and the last read was [`CHARGER_EVERY`] ago (or a power change asked).
+    pub fn charger_read_due(&self, now: std::time::Instant) -> bool {
+        self.weak_charger_guard
+            && self.ac_power
+            && !self.charger_unsupported
+            && self.charger_next.is_none_or(|next| now >= next)
+    }
+
+    /// Read the charger from the EC and take the reading in; rebuild the menu when what
+    /// the guard holds changed. The convergence step applies the new target.
+    pub fn read_charger(
+        &mut self,
+        device: &device::Device,
+        tray_icon: Option<&tray_icon::TrayIcon>,
+    ) {
+        let read = command::get_power_source(device);
+        if self.note_charger(read, std::time::Instant::now()) {
+            self.rebuild_menu(tray_icon);
+        }
+    }
+
+    /// Take in a charger read. Returns whether the clamp changed. Logs a new charger, the
+    /// first failure since a good read, and a model without the command (once).
+    pub fn note_charger(&mut self, read: Result<PowerSource>, now: std::time::Instant) -> bool {
+        let before = self.weak_charger();
+        self.charger_next = Some(now + CHARGER_EVERY);
+        match read {
+            Ok(source) => {
+                if self.charger.map(|(s, _)| s) != Some(source) {
+                    log::info!(
+                        "charger (EC): {source}{}",
+                        if self.weak_charger_guard && guard::is_weak_charger(source) {
+                            "; holding Performance and up to Balanced while on it"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                self.charger = Some((source, now));
+                self.charger_failure_logged = false;
+            }
+            Err(e) if librazer::error::is_not_supported(&e) => {
+                log::info!(
+                    "charger: this model doesn't report it (0x078c not supported); no \
+                     weak-charger guard"
+                );
+                self.charger = None;
+                self.charger_unsupported = true;
+            }
+            Err(e) => {
+                if !self.charger_failure_logged {
+                    log::warn!(
+                        "charger read failed, keeping the last reading for up to \
+                         {CHARGER_FRESH:?}: {e:#}"
+                    );
+                    self.charger_failure_logged = true;
+                }
+            }
+        }
+        before != self.weak_charger()
+    }
+
+    /// The power source changed: the old charger reading no longer says anything, and the
+    /// next read waits until `read_at`, after the EC has settled.
+    pub fn charger_power_changed(&mut self, read_at: std::time::Instant) {
+        self.charger = None;
+        self.charger_next = Some(read_at);
     }
 
     // ---- Mini-LED panel ------------------------------------------------------------
@@ -714,6 +899,7 @@ impl ProgramState {
             cycle_perf_hotkey: self.cycle_perf_hotkey.clone(),
             keyboard_presets: self.keyboard_presets.clone(),
             keyboard_battery_bar: self.battery_bar,
+            weak_charger_guard: self.weak_charger_guard,
         }
     }
 
@@ -772,6 +958,7 @@ impl ProgramState {
         self.cycle_perf_hotkey = disk.cycle_perf_hotkey;
         self.keyboard_presets = disk.keyboard_presets;
         self.battery_bar = disk.keyboard_battery_bar;
+        self.weak_charger_guard = disk.weak_charger_guard;
         // Keep a running Action whose rule is unchanged at the same index; any other
         // change ends it, and the next process scan starts afresh.
         if let Some(session) = &self.action {
@@ -847,12 +1034,13 @@ impl ProgramState {
         self.event_handlers.get(event_id).copied()
     }
 
-    /// The next perf mode after the one on the device's intent. `normalized` in `update`
-    /// clears max fan when the cycle leaves Custom, which the plain struct update did not.
+    /// The next perf mode after the one the menu shows (the user's choice, not a mode a
+    /// guard holds the device at). `normalized` in `update` clears max fan when the cycle
+    /// leaves Custom, which the plain struct update did not.
     pub fn get_next_perf_mode(&self) -> DeviceState {
         DeviceState {
-            perf_mode: crate::state::next_perf_mode(self.device_state.perf_mode),
-            ..self.device_state
+            perf_mode: crate::state::next_perf_mode(self.menu_base.perf_mode),
+            ..self.menu_base
         }
     }
 
@@ -875,7 +1063,13 @@ impl ProgramState {
         const P_GPU_WATTS: u8 = 7;
         const P_LOGO: u8 = 8;
 
+        // A mode the weak-charger guard holds is marked, so a Performance profile showing
+        // Balanced doesn't read as the tray failing. Only once the device is there.
+        let held = s.perf_mode == PerfMode::Balanced
+            && self.weak_charger().is_some()
+            && guard::weak_charger_perf(self.intent().perf_mode).is_some();
         let mode = match s.perf_mode {
+            PerfMode::Balanced if held => "Balanced (USB-C)".to_string(),
             PerfMode::Battery => "Battery".to_string(),
             PerfMode::Silent => "Silent".to_string(),
             PerfMode::Balanced => "Balanced".to_string(),
@@ -1154,13 +1348,15 @@ impl ProgramState {
         pick: Pick,
         device: &device::Device,
     ) -> Result<()> {
+        // What the menu was built from: its difference from `picked` is exactly what the
+        // user changed. See `DeviceState::carry_changes`. Taken before the reload below,
+        // which rebuilds the menu. While a guard holds the device, the menu shows the
+        // user's choice, not the held state, so a pick carries nothing a guard put there.
+        let before = self.menu_base;
         // Adopt a hand edit first, so the pick lands on top of it instead of the save
         // that follows either overwriting the edit or discarding the pick.
         self.reload_config_if_changed(tray_icon);
         let picked = picked.normalized(self.fan_rpm_range);
-        // What the menu was built from: its difference from `picked` is exactly what the
-        // user changed. See `DeviceState::carry_changes`.
-        let before = self.device_state;
         let for_saved = match (pick, &self.action) {
             (Pick::Cycle, Some(_)) => DeviceState {
                 perf_mode: before.perf_mode,
@@ -1186,11 +1382,22 @@ impl ProgramState {
         if let Some(session) = &mut self.action {
             session.pick(picked);
         }
-        self.device_state = picked;
+        // The pick as the guards allow it: a Performance picked on a USB-C charger is saved
+        // as Performance and runs as Balanced until the charger changes. While the config is
+        // applied that is the target recomputed from the saved profile or session, which
+        // also holds whatever a hand edit adopted above changed besides the pick.
+        self.device_state = if mode.writes_config() {
+            self.target()
+        } else {
+            self.guarded(picked)
+        };
         if let Err(e) = self.persist() {
             log::warn!("could not save the config: {e:?}");
         }
         log::info!("state updated to {:?} ({pick:?})", picked);
+        if self.device_state != picked {
+            log::info!("applying {:?} (guards, hand edit)", self.device_state);
+        }
         self.apply_and_refresh(tray_icon, device)
     }
 
@@ -1588,6 +1795,233 @@ mod tests {
             state.observe(reading(PerfMode::Silent), None);
             assert_eq!(state.device_state, intent, "a reading only displays");
             assert_eq!(state.observed, reading(PerfMode::Silent));
+        }
+    }
+
+    // ---- guards: a weak charger, the fan guard ------------------------------------
+
+    /// An applied config (a valid file in its own scratch directory) with this AC profile,
+    /// plugged in, and the device converged on the target.
+    fn guarded_state(name: &str, ac_state: DeviceState) -> ProgramState {
+        let path = scratch_config(name);
+        ConfigFile::at(path.clone())
+            .store(&ConfigState {
+                ac_state,
+                ..ConfigState::default()
+            })
+            .unwrap();
+        let mut file = ConfigFile::at(path);
+        let config = file.load();
+        let mut state = ProgramState::new(config, file, Some(true), RANGE).unwrap();
+        assert_eq!(state.mode(), Mode::Apply);
+        state.device_state = state.target();
+        state
+    }
+
+    fn usb_c_65w() -> Result<PowerSource> {
+        Ok(PowerSource::from_args(&[0x04, 0x12]))
+    }
+
+    fn barrel() -> Result<PowerSource> {
+        Ok(PowerSource::from_args(&[0x12, 0x12]))
+    }
+
+    fn not_supported() -> Result<PowerSource> {
+        Err(anyhow::Error::new(
+            librazer::packet::ResponseError::NotSupported,
+        ))
+    }
+
+    fn with_perf(perf_mode: PerfMode) -> DeviceState {
+        DeviceState {
+            perf_mode,
+            ..DeviceState::default()
+        }
+    }
+
+    #[test]
+    fn a_usb_c_charger_holds_performance_to_balanced_and_the_profile_keeps_it() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c", with_perf(PerfMode::Performance));
+        assert!(state.charger_read_due(now), "read at startup");
+        assert!(
+            state.note_charger(usb_c_65w(), now),
+            "the clamp is a change"
+        );
+        assert!(!state.charger_read_due(now), "next read in 30 s");
+        assert!(state.charger_read_due(now + CHARGER_EVERY));
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+        assert_eq!(
+            state.ac_state.perf_mode,
+            PerfMode::Performance,
+            "saved as picked"
+        );
+        assert_eq!(state.intent().perf_mode, PerfMode::Performance);
+        assert_eq!(
+            state.guard_lines(),
+            vec!["USB-C charger (65 W): Performance held to Balanced".to_string()]
+        );
+        // The menu shows the choice once the device is aimed at the held state, and the
+        // left-click cycle goes on from it.
+        state.device_state = state.target();
+        state.rebuild_menu(None);
+        assert_eq!(state.menu_base.perf_mode, PerfMode::Performance);
+        assert_eq!(state.get_next_perf_mode().perf_mode, PerfMode::Hyperboost);
+        // The same reading again changes nothing; the barrel charger lifts it.
+        assert!(!state.note_charger(usb_c_65w(), now));
+        assert!(state.note_charger(barrel(), now));
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert!(state.guard_lines().is_empty());
+    }
+
+    #[test]
+    fn every_mode_above_balanced_and_custom_is_held_and_the_rest_are_not() {
+        use librazer::types::{CpuBoost, GpuBoost};
+        let now = std::time::Instant::now();
+        let custom = DeviceState {
+            perf_mode: PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            max_fan: true,
+            ..DeviceState::default()
+        };
+        let mut state = guarded_state("usb-c-modes", custom);
+        state.note_charger(usb_c_65w(), now);
+        let held = state.target();
+        assert_eq!(held.perf_mode, PerfMode::Balanced);
+        assert!(!held.max_fan, "Max Fan is Custom-only");
+        for perf in [PerfMode::Hyperboost, PerfMode::Performance] {
+            state.ac_state = with_perf(perf);
+            assert_eq!(state.target().perf_mode, PerfMode::Balanced, "{perf:?}");
+        }
+        for perf in [PerfMode::Battery, PerfMode::Silent, PerfMode::Balanced] {
+            state.ac_state = with_perf(perf);
+            assert_eq!(state.target().perf_mode, perf, "{perf:?}");
+            assert!(
+                state.guard_lines().is_empty(),
+                "{perf:?}: nothing held, no line"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clamp_needs_the_guard_on_and_the_laptop_plugged_in() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-off", with_perf(PerfMode::Performance));
+        state.note_charger(usb_c_65w(), now);
+        state.weak_charger_guard = false;
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert!(
+            !state.charger_read_due(now + CHARGER_EVERY),
+            "off: no reads"
+        );
+        state.weak_charger_guard = true;
+        state.ac_power = false;
+        assert_eq!(state.weak_charger(), None);
+        assert!(
+            !state.charger_read_due(now + CHARGER_EVERY),
+            "battery: no reads"
+        );
+        // Plugged in again: no clamp until the new source is read after it settles.
+        state.ac_power = true;
+        state.charger_power_changed(now + std::time::Duration::from_secs(5));
+        assert_eq!(state.weak_charger(), None);
+        assert!(!state.charger_read_due(now));
+        assert!(state.charger_read_due(now + std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_failed_or_unsupported_charger_read_never_clamps() {
+        let now = std::time::Instant::now();
+        // A model without 0x078c: no clamp, and never asked again.
+        let mut state = guarded_state("charger-unsupported", with_perf(PerfMode::Performance));
+        assert!(!state.note_charger(not_supported(), now));
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert!(!state.charger_read_due(now + CHARGER_EVERY * 10));
+        // Bus trouble before any reading: no clamp, and read again later.
+        let mut state = guarded_state("charger-busy", with_perf(PerfMode::Performance));
+        let busy = || Err(anyhow::Error::new(librazer::packet::ResponseError::Busy));
+        assert!(!state.note_charger(busy(), now));
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert!(state.charger_read_due(now + CHARGER_EVERY));
+        // After a USB-C reading, one failed read keeps the clamp: lifting it would write
+        // Performance only for the next good read to write Balanced again.
+        state.note_charger(usb_c_65w(), now);
+        assert!(!state.note_charger(busy(), now + CHARGER_EVERY));
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+    }
+
+    #[test]
+    fn an_app_rule_is_held_too_and_keeps_its_own_mode() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-rule", with_perf(PerfMode::Silent));
+        let rule = AppProfile {
+            process: "game.exe".into(),
+            perf_mode: Some(PerfMode::Hyperboost),
+            ..AppProfile::default()
+        };
+        state.app_profiles = vec![rule.clone()];
+        state.action = Some(ActionSession::start(
+            0,
+            &rule,
+            &state.saved_profile(),
+            RANGE,
+        ));
+        assert_eq!(state.target().perf_mode, PerfMode::Hyperboost);
+        state.note_charger(usb_c_65w(), now);
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+        assert_eq!(
+            state.action.unwrap().effective.perf_mode,
+            PerfMode::Hyperboost,
+            "the session is not rewritten"
+        );
+        assert_eq!(
+            state.guard_lines(),
+            vec!["USB-C charger (65 W): Hyperboost held to Balanced".to_string()]
+        );
+    }
+
+    /// The weak-charger marker fits the tooltip with every perf mode.
+    #[test]
+    fn the_charger_marker_fits_the_tooltip_budget() {
+        use librazer::types::{CpuBoost, GpuBoost};
+        use strum::IntoEnumIterator;
+        let now = std::time::Instant::now();
+        let mut modes = vec![
+            PerfMode::Battery,
+            PerfMode::Silent,
+            PerfMode::Balanced,
+            PerfMode::Performance,
+            PerfMode::Hyperboost,
+        ];
+        for cpu in CpuBoost::iter() {
+            for gpu in GpuBoost::iter() {
+                modes.push(PerfMode::Custom(cpu, gpu));
+            }
+        }
+        for perf in modes {
+            let mut state = guarded_state("tooltip-guards", with_perf(perf));
+            state.note_charger(usb_c_65w(), now);
+            state.fan_actual = Some(FanRpm {
+                fan1: 5000,
+                fan2: 5000,
+            });
+            state.device_state = state.target();
+            for observed in [state.device_state, state.intent()] {
+                state.observed = observed;
+                let tip = state.tooltip().unwrap();
+                let units = librazer::state::utf16_units(&tip);
+                assert!(
+                    units <= TOOLTIP_MAX_UTF16,
+                    "{perf:?}: {units} units: {tip:?}"
+                );
+            }
+            state.observed = state.device_state;
+            let tip = state.tooltip().unwrap();
+            let held = guard::weak_charger_perf(perf).is_some();
+            assert_eq!(
+                tip.starts_with("Balanced (USB-C)"),
+                held,
+                "{perf:?}: {tip:?}"
+            );
         }
     }
 

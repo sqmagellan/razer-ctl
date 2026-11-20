@@ -1068,10 +1068,19 @@ pub struct ConfigState {
     /// As `ac_state_unset`, for `battery_state` and running on battery.
     #[serde(default, skip_serializing_if = "is_false")]
     pub battery_state_unset: bool,
+    /// On a USB-C charger (the EC's `0x078c`), hold Performance, Hyperboost and Custom to
+    /// Balanced while plugged in, as Synapse does; see `crate::guard`. The saved profile is
+    /// not changed. On by default; written to the file only when turned off.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub weak_charger_guard: bool,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 impl ConfigState {
@@ -1214,6 +1223,7 @@ impl Default for ConfigState {
             keyboard_battery_bar: false,
             ac_state_unset: false,
             battery_state_unset: false,
+            weak_charger_guard: true,
         }
     }
 }
@@ -2908,6 +2918,21 @@ mod tests {
         cfg.keyboard_battery_bar = true;
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(toml::from_str::<ConfigState>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn the_guards_default_on_and_only_a_change_is_written() {
+        let cfg: ConfigState = toml::from_str("enforce = true\n").unwrap();
+        assert!(cfg.weak_charger_guard);
+        let text = toml::to_string(&ConfigState::default()).unwrap();
+        assert!(!text.contains("guard"), "{text}");
+        let off = ConfigState {
+            weak_charger_guard: false,
+            ..ConfigState::default()
+        };
+        let text = toml::to_string(&off).unwrap();
+        assert!(text.contains("weak_charger_guard = false"), "{text}");
+        assert_eq!(toml::from_str::<ConfigState>(&text).unwrap(), off);
     }
 
     #[test]

@@ -39,6 +39,9 @@ history and measurements; `README.upstream.md` covers the original project.
   change is read back the tray asks whether to restart now (No is the default).
   `razer-cli auto panel` prints it, `razer-cli auto panel set uhd|fhd` sets it. Shown only on
   `0x029F` when the SKU byte has the panel bit. Never set at startup, by a profile or by a reset.
+- **Weak-charger guard** (on by default): on a USB-C charger the tray holds Performance, Hyperboost
+  and Custom to Balanced while plugged in, as Synapse does. The saved profile and game rules keep
+  their mode, and the menu says what is held. `weak_charger_guard = false` turns it off.
 - **Match Windows power to Razer performance mode** (off by default): Battery and Silent → Best power
   efficiency, Balanced → Balanced, the rest → Best performance. Turning it off restores each source's
   earlier mode.
@@ -181,6 +184,9 @@ GitHub Actions builds every release binary from a tag. None is uploaded by hand.
   until the new limit shows.
 - **The tooltip holds 63 characters, not 128** (`tray-icon` 0.19 leaves `cbSize` at 0). Less
   important fields drop out when a long `Custom (CPU …, GPU …)` label needs the room.
+- **The weak-charger guard trusts the EC's charger code.** `0x078c` codes 1-7 are USB-C (40-100
+  W). The tray reads it at start, 5 s after a plug and every 30 s on AC. A model that can't report
+  its charger is never held. Only the barrel charger has been seen on `0x029F` (`0x12`, 330 W).
 - **Panel mode is firmware state.** Windows keeps the old resolution until the restart, and the
   menu marks a pending choice "(after restart)".
 - **The tooltip refreshes on hover.** A background poll still drives "Undo changes made by Synapse"
@@ -210,7 +216,8 @@ Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/raze
 fork by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). Both MIT; so is this
 fork. Protocol notes and fixes from Finesssee ([Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl),
 MIT). The Mini-LED panel protocol is from Paul Rodriguez's
-[razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). Maintained by
+[razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). The weak-charger guard
+idea is from [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). Maintained by
 sqmagellan, developed with Claude Opus 5.5.
 
 Protocol facts (command IDs, the checksum, `0x0004` being device mode) came from reading
