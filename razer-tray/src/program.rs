@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use librazer::command;
 use librazer::cpu_cap::{self, CpuCap};
 use librazer::device;
-use librazer::guard::{self, FanGuard, FanGuardChange, FanGuardLimits, GuardReading};
+use librazer::guard::{self, FanGuard, FanGuardChange, FanGuardLimits, GuardReading, Observation};
 use librazer::keyboard::{Frame, KeyboardPreset};
 use librazer::panel::PanelMode;
 use librazer::types::{BatteryCare, PowerSource};
@@ -117,9 +117,28 @@ const CHARGER_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// failed read must not lift the clamp (a Performance write) only for the next to put it
 /// back (a Balanced write).
 const CHARGER_FRESH: std::time::Duration = std::time::Duration::from_secs(95);
+/// Plugged in with the charger not read yet (at start, after a plug): the perf mode is held
+/// to Balanced until a read answers, for at most this long. A USB-C plug used to run the
+/// AC profile's Performance for the 5 s before the first read, then drop to Balanced. A
+/// model without the read answers "not supported" at once and is never held; one whose
+/// reads keep failing is held this long, then left unheld (as before the guard) with a
+/// line in the log.
+const CHARGER_PENDING_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+/// While the first read is pending, a failed one is retried after this, not after
+/// [`CHARGER_EVERY`].
+const CHARGER_PENDING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// How often the fan guard reads the EC temperatures while it watches a manual fan,
 /// whether or not anyone is at the keyboard (a game on a controller makes no input).
 const FAN_GUARD_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why the weak-charger guard holds the perf mode to Balanced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChargerHold {
+    /// The EC reports a USB-C charger.
+    UsbC(PowerSource),
+    /// Plugged in, and the first charger read on this source hasn't answered yet.
+    Pending,
+}
 
 /// The Mini-LED panel's firmware selection (see `librazer::panel`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -250,6 +269,9 @@ pub struct ProgramState {
     charger_unsupported: bool,
     /// A failed charger read has been logged since the last good one.
     charger_failure_logged: bool,
+    /// Since when the first charger read on this power source is awaited; the perf mode
+    /// is held to Balanced meanwhile (see [`CHARGER_PENDING_MAX`]).
+    charger_pending_since: Option<std::time::Instant>,
     /// Raise a manual fan while hot (config `fan_guard`), and where.
     fan_guard_on: bool,
     fan_guard_limits: FanGuardLimits,
@@ -266,6 +288,23 @@ pub struct ProgramState {
     menu_base: DeviceState,
     /// The disabled lines at the top of the menu that say what a guard holds.
     guard_notes: Vec<String>,
+}
+
+/// Which Mini-LED panel mode Windows is running, from the modes it offers on the internal
+/// panel: a 3840x2400 mode is there only in UHD+, and a 1920x1200 mode at 240 Hz or more
+/// only in FHD+ (the two native modes razer-helper documents). Each is one matching mode,
+/// never maxima taken separately. Both or neither (a panel this doesn't describe) is
+/// `None`, and the caller takes the firmware's selection instead.
+pub fn panel_running(modes: &[(u32, u32, u32)]) -> Option<PanelMode> {
+    let uhd = modes.iter().any(|&(w, h, _)| (w, h) == (3840, 2400));
+    let fhd = modes
+        .iter()
+        .any(|&(w, h, hz)| (w, h) == (1920, 1200) && hz >= 240);
+    match (uhd, fhd) {
+        (true, false) => Some(PanelMode::Uhd120),
+        (false, true) => Some(PanelMode::Fhd240),
+        _ => None,
+    }
 }
 
 /// The perf mode's name, for a menu line.
@@ -373,6 +412,7 @@ impl ProgramState {
             charger_next: None,
             charger_unsupported: false,
             charger_failure_logged: false,
+            charger_pending_since: None,
             fan_guard_on: config.fan_guard,
             fan_guard_limits: limits,
             fan_guard_cpu_c: config.fan_guard_cpu_c,
@@ -592,7 +632,7 @@ impl ProgramState {
     }
 
     fn charger_guarded(&self, state: DeviceState) -> DeviceState {
-        if self.weak_charger().is_some() {
+        if self.charger_hold().is_some() {
             guard::clamp_for_weak_charger(state)
         } else {
             state
@@ -614,16 +654,20 @@ impl ProgramState {
     fn guard_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let intent = self.intent();
-        if let Some(source) = self.weak_charger() {
-            if guard::weak_charger_perf(intent.perf_mode).is_some() {
-                let watts = source
-                    .watts()
-                    .map(|w| format!(" ({w} W)"))
-                    .unwrap_or_default();
-                out.push(format!(
-                    "USB-C charger{watts}: {} held to Balanced",
-                    perf_name(intent.perf_mode)
-                ));
+        if guard::weak_charger_perf(intent.perf_mode).is_some() {
+            let perf = perf_name(intent.perf_mode);
+            match self.charger_hold() {
+                Some(ChargerHold::UsbC(source)) => {
+                    let watts = source
+                        .watts()
+                        .map(|w| format!(" ({w} W)"))
+                        .unwrap_or_default();
+                    out.push(format!("USB-C charger{watts}: {perf} held to Balanced"));
+                }
+                Some(ChargerHold::Pending) => {
+                    out.push(format!("Reading the charger: {perf} held to Balanced"));
+                }
+                None => {}
             }
         }
         if self.fan_guard.engaged() {
@@ -636,6 +680,48 @@ impl ProgramState {
     }
 
     // ---- weak-charger guard -------------------------------------------------------
+
+    /// Why the perf mode is held to Balanced now, if it is: a USB-C charger
+    /// ([`Self::weak_charger`]), or plugged in with the first charger read still awaited
+    /// (no longer than [`CHARGER_PENDING_MAX`]).
+    pub fn charger_hold(&self) -> Option<ChargerHold> {
+        if let Some(source) = self.weak_charger() {
+            return Some(ChargerHold::UsbC(source));
+        }
+        let pending = self.weak_charger_guard
+            && self.ac_power
+            && !self.charger_unsupported
+            && self
+                .charger_pending_since
+                .is_some_and(|since| since.elapsed() < CHARGER_PENDING_MAX);
+        pending.then_some(ChargerHold::Pending)
+    }
+
+    /// Plugged in at start: hold the perf mode until the charger is read. Before the
+    /// first sync, so nothing above Balanced is written while the read is outstanding.
+    pub fn expect_charger_read(&mut self) {
+        if self.weak_charger_guard && self.ac_power && !self.charger_unsupported {
+            self.charger_pending_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Once a tick: end a pending hold that ran out (logged once), and say whether the
+    /// guard lines in the menu are out of date (a USB-C reading that expired, a hold that
+    /// ended) so the caller rebuilds it.
+    pub fn tick_guards(&mut self) -> bool {
+        if let Some(since) = self.charger_pending_since {
+            if since.elapsed() >= CHARGER_PENDING_MAX {
+                self.charger_pending_since = None;
+                if self.ac_power && self.weak_charger_guard {
+                    log::warn!(
+                        "charger: no answer within {CHARGER_PENDING_MAX:?}; not holding the perf \
+                         mode (reads go on every {CHARGER_EVERY:?})"
+                    );
+                }
+            }
+        }
+        self.guard_lines() != self.guard_notes
+    }
 
     /// The USB-C charger the clamp is holding the perf mode for, if it is: the guard on,
     /// plugged in, and the EC's last reading (no older than [`CHARGER_FRESH`]) a USB-C one.
@@ -676,7 +762,7 @@ impl ProgramState {
     /// Take in a charger read. Returns whether the clamp changed. Logs a new charger, the
     /// first failure since a good read, and a model without the command (once).
     pub fn note_charger(&mut self, read: Result<PowerSource>, now: std::time::Instant) -> bool {
-        let before = self.weak_charger();
+        let before = self.charger_hold();
         self.charger_next = Some(now + CHARGER_EVERY);
         match read {
             Ok(source) => {
@@ -692,6 +778,7 @@ impl ProgramState {
                 }
                 self.charger = Some((source, now));
                 self.charger_failure_logged = false;
+                self.charger_pending_since = None;
             }
             Err(e) if librazer::error::is_not_supported(&e) => {
                 log::info!(
@@ -700,8 +787,13 @@ impl ProgramState {
                 );
                 self.charger = None;
                 self.charger_unsupported = true;
+                self.charger_pending_since = None;
             }
             Err(e) => {
+                // While the first read is awaited the hold stands, so try again soon.
+                if self.charger_pending_since.is_some() {
+                    self.charger_next = Some(now + CHARGER_PENDING_RETRY);
+                }
                 if !self.charger_failure_logged {
                     log::warn!(
                         "charger read failed, keeping the last reading for up to \
@@ -711,7 +803,7 @@ impl ProgramState {
                 }
             }
         }
-        before != self.weak_charger()
+        before != self.charger_hold()
     }
 
     /// The power source changed: the old charger reading no longer says anything, and the
@@ -719,6 +811,9 @@ impl ProgramState {
     pub fn charger_power_changed(&mut self, read_at: std::time::Instant) {
         self.charger = None;
         self.charger_next = Some(read_at);
+        // Plugged in: held to Balanced until that read answers. Unplugged: nothing to hold.
+        self.charger_pending_since = None;
+        self.expect_charger_read();
     }
 
     // ---- Mini-LED panel ------------------------------------------------------------
@@ -728,9 +823,25 @@ impl ProgramState {
     pub fn detect_panel(&mut self, device: &device::Device) {
         match librazer::panel::get_panel_mode(device, self.pid) {
             Ok(Some(mode)) => {
-                log::info!("Mini-LED panel: the firmware has {mode} selected");
+                // The mode the panel runs in now, from what Windows offers; the firmware's
+                // selection may be waiting for a restart (set before this tray started).
+                let modes = crate::platform::internal_panel_modes();
+                let running = modes.as_deref().and_then(panel_running);
+                match (&modes, running) {
+                    (_, Some(now)) => log::info!(
+                        "Mini-LED panel: the firmware has {mode} selected; the panel runs {now}"
+                    ),
+                    (None, None) => log::info!(
+                        "Mini-LED panel: the firmware has {mode} selected; no internal display \
+                         is active (lid closed?), so taking that as what it runs"
+                    ),
+                    (Some(_), None) => log::info!(
+                        "Mini-LED panel: the firmware has {mode} selected; the internal panel's \
+                         modes match neither, so taking that as what it runs"
+                    ),
+                }
                 self.panel = Some(PanelState {
-                    at_start: mode,
+                    at_start: running.unwrap_or(mode),
                     selected: mode,
                 });
             }
@@ -809,17 +920,45 @@ impl ProgramState {
         self.refresh_ec_temps(device, now);
     }
 
-    /// The GPU temperature for the fan guard: only while the dGPU is awake, which is when
-    /// Windows' telemetry has one; the higher of it and the EC's byte, which runs 1-2 °C
-    /// under the driver on `0x029F`.
-    fn guard_gpu_c(ec_gpu_c: Option<u8>) -> Option<u8> {
-        let (driver_c, _) = crate::platform::gpu_telemetry()?;
-        let driver_c = u8::try_from(driver_c).unwrap_or(u8::MAX);
-        Some(ec_gpu_c.map_or(driver_c, |ec| ec.max(driver_c)))
+    /// The GPU's observation for the fan guard, and whether the dGPU is known asleep.
+    ///
+    /// - Asleep (Windows' PnP power state says D3): no reading, and that counts as cool.
+    /// - Awake: the higher of Windows' reading (D3DKMT or `nvidia-smi`) and the EC's GPU
+    ///   byte, which runs 1-2 °C under the driver on `0x029F`, each with the time it was
+    ///   taken. When Windows has none, the EC byte alone.
+    /// - Unknown (no NVIDIA dGPU found, or not yet polled): Windows' reading only. The EC's
+    ///   byte means nothing on a machine without a dGPU awake to report.
+    fn gpu_observation(
+        now: std::time::Instant,
+        asleep: Option<bool>,
+        driver: Option<(u32, std::time::Instant)>,
+        ec: Option<(u8, std::time::Instant)>,
+    ) -> (Option<Observation>, bool) {
+        // Stale ones out first: an old hot EC byte must not hide a fresh driver reading.
+        let fresh =
+            |at: std::time::Instant| now.saturating_duration_since(at) <= guard::FAN_GUARD_STALE;
+        let driver = driver
+            .filter(|&(_, at)| fresh(at))
+            .map(|(c, at)| Observation {
+                c: u8::try_from(c).unwrap_or(u8::MAX),
+                at,
+            });
+        let ec = ec
+            .filter(|&(_, at)| fresh(at))
+            .map(|(c, at)| Observation { c, at });
+        match asleep {
+            Some(true) => (None, true),
+            Some(false) => match (driver, ec) {
+                (Some(d), Some(e)) => (Some(if e.c > d.c { e } else { d }), false),
+                (d, e) => (d.or(e), false),
+            },
+            None => (driver, false),
+        }
     }
 
-    /// Feed the fan guard the latest reading. Returns whether it engaged or released (the
-    /// convergence step then writes the raised fan or the set point back). Logs both.
+    /// Feed the fan guard what the sensors have. Returns whether it engaged or released
+    /// (the convergence step then writes the raised fan or the set point back). Logs every
+    /// change, and a lost sensor once.
     pub fn update_fan_guard(&mut self, now: std::time::Instant) -> bool {
         if !self.fan_guard_watches() {
             if self.fan_guard.reset() {
@@ -828,25 +967,29 @@ impl ProgramState {
             }
             return false;
         }
-        // Each sensor on its own: the EC's packet when it is fresh, the awake dGPU from
-        // Windows whatever the EC did. No sensor at all changes nothing.
-        let ec = self
+        // Each sensor with the time it was read: the guard counts an observation once,
+        // however often the loop looks at it, and ignores one older than FAN_GUARD_STALE.
+        let cpu = self
             .ec_temps
-            .filter(|(_, at)| now.saturating_duration_since(*at) <= guard::FAN_GUARD_STALE)
-            .map(|(t, _)| t);
-        let cpu_c = ec.and_then(|t| t.cpu_c);
-        let gpu_c = Self::guard_gpu_c(ec.and_then(|t| t.gpu_c));
-        let reading = (cpu_c.is_some() || gpu_c.is_some()).then_some(GuardReading {
-            at: now,
-            cpu_c,
-            gpu_c,
-        });
+            .and_then(|(t, at)| t.cpu_c.map(|c| Observation { c, at }));
+        let ec_gpu = self.ec_temps.and_then(|(t, at)| t.gpu_c.map(|c| (c, at)));
+        let (gpu, gpu_asleep) = Self::gpu_observation(
+            now,
+            crate::platform::dgpu_asleep(),
+            crate::platform::gpu_temperature_sample(),
+            ec_gpu,
+        );
+        let reading = GuardReading {
+            cpu,
+            gpu,
+            gpu_asleep,
+        };
         let limits = self.fan_guard_limits;
         match self.fan_guard.update(now, reading, limits) {
             Some(FanGuardChange::Engaged { cpu_c, gpu_c }) => {
                 log::info!(
                     "fan guard: hot (CPU {cpu_c:?} °C, GPU {gpu_c:?} °C; triggers {}/{} °C): \
-                     fans to {} RPM until both are under {}/{} °C for {:?}",
+                     fans to {} RPM until the hot sensor is under {}/{} °C for {:?}",
                     limits.cpu_hot_c,
                     limits.gpu_hot_c,
                     self.fan_rpm_range.1,
@@ -859,6 +1002,23 @@ impl ProgramState {
             Some(FanGuardChange::Released { cpu_c, gpu_c }) => {
                 log::info!(
                     "fan guard: cooled (CPU {cpu_c:?} °C, GPU {gpu_c:?} °C); the set point is back"
+                );
+                true
+            }
+            Some(FanGuardChange::Blind) => {
+                log::warn!(
+                    "fan guard: no fresh temperature; keeping the fans at {} RPM, for up to {:?} \
+                     without one",
+                    self.fan_rpm_range.1,
+                    guard::FAN_GUARD_BLIND_RELEASE
+                );
+                false
+            }
+            Some(FanGuardChange::ReleasedBlind) => {
+                log::warn!(
+                    "fan guard: no temperature for {:?}; the set point is back (a hot reading \
+                     raises the fans again)",
+                    guard::FAN_GUARD_BLIND_RELEASE
                 );
                 true
             }
@@ -2110,6 +2270,174 @@ mod tests {
         assert_eq!(
             state.guard_lines(),
             vec!["USB-C charger (65 W): Hyperboost held to Balanced".to_string()]
+        );
+    }
+
+    #[test]
+    fn plugged_in_with_the_charger_unread_holds_balanced_until_it_answers() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("charger-pending", with_perf(PerfMode::Performance));
+        // Startup on AC (main calls this before the first sync), and the read succeeds.
+        state.expect_charger_read();
+        assert_eq!(
+            state.target().perf_mode,
+            PerfMode::Balanced,
+            "nothing above Balanced"
+        );
+        assert_eq!(
+            state.guard_lines(),
+            vec!["Reading the charger: Performance held to Balanced".to_string()]
+        );
+        assert!(
+            state.note_charger(barrel(), now),
+            "the barrel charger lifts the hold"
+        );
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+
+        // A plug: held until the read 5 s later. A USB-C answer keeps it, now as USB-C.
+        state.ac_power = false;
+        state.charger_power_changed(now);
+        assert_eq!(state.charger_hold(), None, "on battery nothing is held");
+        state.ac_power = true;
+        state.charger_power_changed(now + std::time::Duration::from_secs(5));
+        assert_eq!(state.charger_hold(), Some(ChargerHold::Pending));
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+        assert!(state.note_charger(usb_c_65w(), now), "the line changes");
+        assert!(matches!(state.charger_hold(), Some(ChargerHold::UsbC(_))));
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+    }
+
+    #[test]
+    fn a_model_without_the_read_is_never_held_and_a_failing_one_only_for_a_while() {
+        let now = std::time::Instant::now();
+        // No 0x078c: the first read answers "not supported" and the hold ends at once.
+        let mut state = guarded_state("pending-unsupported", with_perf(PerfMode::Performance));
+        state.expect_charger_read();
+        assert!(state.note_charger(not_supported(), now));
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        state.charger_power_changed(now);
+        assert_eq!(state.charger_hold(), None, "never held again");
+
+        // Reads that fail: held, retried after 5 s, and let go after CHARGER_PENDING_MAX.
+        let mut state = guarded_state("pending-busy", with_perf(PerfMode::Performance));
+        state.expect_charger_read();
+        let busy = || Err(anyhow::Error::new(librazer::packet::ResponseError::Busy));
+        assert!(!state.note_charger(busy(), now));
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+        assert!(!state.charger_read_due(now + std::time::Duration::from_secs(4)));
+        assert!(state.charger_read_due(now + CHARGER_PENDING_RETRY));
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards(), "the menu already says so");
+        let Some(long_ago) = std::time::Instant::now()
+            .checked_sub(CHARGER_PENDING_MAX + std::time::Duration::from_secs(1))
+        else {
+            return;
+        };
+        state.charger_pending_since = Some(long_ago);
+        assert!(state.tick_guards(), "the line must go");
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert_eq!(state.charger_pending_since, None);
+    }
+
+    #[test]
+    fn an_expired_usb_c_reading_clears_the_menu_line() {
+        let now = std::time::Instant::now();
+        let mut state = guarded_state("usb-c-expiry", with_perf(PerfMode::Performance));
+        state.note_charger(usb_c_65w(), now);
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards());
+        assert_eq!(state.target().perf_mode, PerfMode::Balanced);
+        // The reads failed for longer than CHARGER_FRESH: the reading lapses.
+        let Some(old) = now.checked_sub(CHARGER_FRESH + std::time::Duration::from_secs(1)) else {
+            return;
+        };
+        state.charger = state.charger.map(|(source, _)| (source, old));
+        assert_eq!(state.target().perf_mode, PerfMode::Performance);
+        assert!(state.tick_guards(), "the USB-C line is stale");
+        state.rebuild_menu(None);
+        assert!(!state.tick_guards());
+        assert!(state.guard_lines().is_empty());
+    }
+
+    #[test]
+    fn the_gpu_observation_follows_the_power_state() {
+        let t = std::time::Instant::now();
+        let ec = Some((60u8, t));
+        let driver = Some((62u32, t));
+        // Asleep: nothing to read, and cool.
+        assert_eq!(
+            ProgramState::gpu_observation(t, Some(true), driver, ec),
+            (None, true)
+        );
+        // Awake: the higher of the two; the EC byte alone when Windows has none.
+        let (o, asleep) = ProgramState::gpu_observation(t, Some(false), driver, Some((70, t)));
+        assert_eq!((o.map(|o| o.c), asleep), (Some(70), false));
+        let (o, _) = ProgramState::gpu_observation(t, Some(false), driver, ec);
+        assert_eq!(o.map(|o| o.c), Some(62));
+        let (o, _) = ProgramState::gpu_observation(t, Some(false), None, ec);
+        assert_eq!(o.map(|o| o.c), Some(60));
+        // Unknown (no NVIDIA dGPU found): Windows only, never the EC byte.
+        assert_eq!(
+            ProgramState::gpu_observation(t, None, None, ec),
+            (None, false)
+        );
+        let (o, _) = ProgramState::gpu_observation(t, None, driver, ec);
+        assert_eq!(o.map(|o| o.c), Some(62));
+        // A stale EC byte, however hot, gives way to a fresh driver reading.
+        let late = t + guard::FAN_GUARD_STALE + std::time::Duration::from_secs(1);
+        let (o, _) =
+            ProgramState::gpu_observation(late, Some(false), Some((88, late)), Some((90, t)));
+        assert_eq!(o.map(|o| o.c), Some(88));
+        let (o, _) = ProgramState::gpu_observation(late, Some(false), None, Some((90, t)));
+        assert_eq!(o, None);
+    }
+
+    #[test]
+    fn a_cached_ec_reading_looked_at_again_does_not_count_as_cooling() {
+        let t0 = std::time::Instant::now();
+        let secs = |n| t0 + std::time::Duration::from_secs(n);
+        let mut state = guarded_state("fan-guard-reused", manual(3000));
+        let hot = state.fan_guard_limits.cpu_hot_c;
+        let cool = state.fan_guard_limits.cpu_cool_c - 1;
+        state.ec_temps = Some(ec(hot, t0));
+        assert!(state.update_fan_guard(t0));
+        // One cool read at 5 s, then the reads stop (paused after a failure) while the
+        // loop keeps looking every second: never 30 s of observations.
+        state.ec_temps = Some(ec(cool, secs(5)));
+        for n in 5..=60 {
+            assert!(!state.update_fan_guard(secs(n)), "{n}");
+        }
+        assert!(state.fan_guard.engaged());
+        assert_eq!(state.target().fan_speed, FanSpeed::Manual(RANGE.1));
+    }
+
+    #[test]
+    fn the_running_panel_mode_comes_from_a_matching_mode() {
+        use librazer::panel::PanelMode;
+        let uhd = [
+            (3840, 2400, 120),
+            (3840, 2400, 60),
+            (1920, 1200, 120),
+            (1280, 800, 60),
+        ];
+        let fhd = [(1920, 1200, 240), (1920, 1200, 60), (1280, 800, 240)];
+        assert_eq!(panel_running(&uhd), Some(PanelMode::Uhd120));
+        assert_eq!(panel_running(&fhd), Some(PanelMode::Fhd240));
+        // 1920x1200 only at 60 Hz plus some other mode at 240 Hz is not FHD+: the
+        // resolution and the rate must come from one mode.
+        assert_eq!(panel_running(&[(1920, 1200, 60), (1280, 720, 240)]), None);
+        // A list that fits neither, or both, is no answer.
+        assert_eq!(panel_running(&[(2560, 1600, 165)]), None);
+        assert_eq!(panel_running(&[(3840, 2400, 120), (1920, 1200, 240)]), None);
+        assert_eq!(panel_running(&[]), None);
+        // A pending change survives a tray restart: UHD+ runs, FHD+ is selected.
+        let state = PanelState {
+            at_start: panel_running(&uhd).unwrap(),
+            selected: PanelMode::Fhd240,
+        };
+        assert_eq!(
+            crate::menu::panel_label(PanelMode::Fhd240, state),
+            "1920x1200, 240 Hz (after restart)"
         );
     }
 

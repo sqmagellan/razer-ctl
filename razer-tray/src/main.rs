@@ -279,6 +279,7 @@ fn main() -> Result<()> {
     state.detect_panel(&device);
     // Before the first sync, so a USB-C charger's clamp is in the first write rather than
     // a Performance write followed by a Balanced one.
+    state.expect_charger_read();
     if state.charger_read_due(std::time::Instant::now()) {
         state.read_charger(&device, None);
     }
@@ -766,7 +767,7 @@ fn main() -> Result<()> {
                     state.read_fan_guard_temps(&device);
                 }
             }
-            if state.update_fan_guard(now) {
+            if state.update_fan_guard(now) | state.tick_guards() {
                 state.rebuild_menu(Some(&tray_icon));
             }
 

@@ -6,33 +6,23 @@ unless a user report is cited.
 
 ## Unreleased
 
-**New**
-- **Mini-LED panel mode.** On a Blade 16 (2023) with the dual-mode panel, "Panel mode" in the menu
-  and `razer-cli auto panel [set uhd|fhd]` pick 3840x2400 at 120 Hz or 1920x1200 at 240 Hz for the
-  next start (the BIOS "Max Refresh Rate Mode"). Offered only on `0x029F` with the panel bit
-  (`0x02`) in the SKU byte (`0x0d8f`). A write is confirmed by the getter (`0x0d8e`); then the tray
-  asks "Restart now?" with No as the default. Never written at startup, by a profile or by a reset.
-  Protocol from Paul Rodriguez's [razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). On
-  `0x029F` the SKU byte reads `0x03` and the mode `0x00` (UHD+); FHD+ read back `0x01` and UHD+
-  again `0x00`, without a restart (2026-11-19).
-- **Weak-charger guard.** On a USB-C charger (`0x078c` codes 1-7, 40-100 W) the tray holds
-  Performance, Hyperboost and Custom to Balanced while plugged in, as Synapse does. Battery, Silent
-  and Balanced are left alone, and the saved profile and game rules keep their mode. The menu says
-  "USB-C charger (65 W): Performance held to Balanced", the tooltip "Balanced (USB-C)". The charger
-  is read at start, 5 s after a plug and every 30 s on AC. A model without the read is never held.
-  `weak_charger_guard = false` turns it off. Idea from
-  [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT). On `0x029F` the 330 W
-  barrel charger reads `[0x12, 0x12]` and nothing is held; the USB-C path is tested in code only.
-- **Fan guard.** While the tray holds a manual fan speed (a profile's or a rule's) and the EC's CPU
-  sensor reads 72 °C or the awake dGPU 87 °C, the fans go to the model's top manual speed. The set
-  point comes back once every sensor read is under 58 and 67 °C for 30 s of readings. A reading
-  older than 15 s changes nothing. Auto is never touched. The menu and tooltip say when it is on.
-  `fan_guard = false` turns it off; `fan_guard_cpu_c` and `fan_guard_gpu_c` move the triggers. Idea
-  from blade-lite. On `0x029F` the CPU sensor peaked at 70 °C with all 32 threads busy and a 2000
-  RPM set point, and the EC then lifted the fans to 4500 by itself; the guard has not engaged on
-  hardware.
+Tested on `0x029F` (2026-11-19): panel mode writes and reads back both ways; the 330 W charger reads
+`0x12` and nothing is held. Not yet seen on hardware: a USB-C charger, the fan guard engaging.
 
-- Versions: `librazer` gains `guard` and `panel`; `ConfigState` gains `weak_charger_guard`,
+**New**
+- **Mini-LED panel mode.** On a Blade 16 (2023) with the dual-mode panel, pick 3840x2400 at 120 Hz
+  or 1920x1200 at 240 Hz from the menu or with `razer-cli auto panel set uhd|fhd`. It takes effect
+  after a restart, which the tray offers (default No). Never set at startup, by a profile or by a
+  reset. Protocol from Paul Rodriguez's [razer-helper](https://github.com/Paulrod20/razer-helper)
+  (MIT).
+- **Weak-charger guard.** On a USB-C charger, Performance, Hyperboost and Custom run as Balanced, as
+  in Synapse. Saved profiles keep their mode. `weak_charger_guard = false` turns it off.
+- **Fan guard.** With a manual fan speed set, the fans go to full when the CPU sensor reaches 72 °C
+  or the dGPU 87 °C. They return to the set point once that sensor stays under 58 or 67 °C for 30 s.
+  `fan_guard = false` turns it off. Both guards are ideas from
+  [nezinomas/blade-lite](https://github.com/nezinomas/blade-lite) (MIT).
+
+- Versions: `librazer` adds `guard` and `panel`; `ConfigState` gains `weak_charger_guard`,
   `fan_guard`, `fan_guard_cpu_c` and `fan_guard_gpu_c` (breaking for struct literals).
 
 ## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)

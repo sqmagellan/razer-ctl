@@ -462,6 +462,63 @@ pub fn gpu_telemetry() -> Option<(u32, f32)> {
     None
 }
 
+/// The dGPU's power state as the telemetry monitor last saw it (PnP, which doesn't wake
+/// it): 0 unknown (no NVIDIA dGPU found, or not polled yet), 1 awake, 2 powered down.
+#[cfg(target_os = "windows")]
+static DGPU_POWER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The dGPU temperature and when it was taken, as one value, for the fan guard (which
+/// counts each observation once). Under one lock, so a reader never pairs a new
+/// temperature with an old time or the other way round; [`GPU_TEMP_C`] stays the
+/// tooltip's lock-free copy.
+#[cfg(target_os = "windows")]
+static GPU_TEMP_SAMPLE: std::sync::Mutex<Option<(u32, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+fn store_gpu_temp(temp: u32) {
+    if let Ok(mut sample) = GPU_TEMP_SAMPLE.lock() {
+        *sample = Some((temp, std::time::Instant::now()));
+    }
+    GPU_TEMP_C.store(temp, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// No temperature now (the dGPU powered down, or telemetry gave up).
+#[cfg(target_os = "windows")]
+fn clear_gpu_temp() {
+    if let Ok(mut sample) = GPU_TEMP_SAMPLE.lock() {
+        *sample = None;
+    }
+    GPU_TEMP_C.store(GPU_UNAVAILABLE, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `Some(true)` when the dGPU is known to be powered down, `Some(false)` when known awake,
+/// `None` when the tray doesn't know (no NVIDIA dGPU, or its state unreadable).
+#[cfg(target_os = "windows")]
+pub fn dgpu_asleep() -> Option<bool> {
+    match DGPU_POWER.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn dgpu_asleep() -> Option<bool> {
+    None
+}
+
+/// The dGPU temperature from Windows and when it was taken, while there is one.
+#[cfg(target_os = "windows")]
+pub fn gpu_temperature_sample() -> Option<(u32, std::time::Instant)> {
+    *GPU_TEMP_SAMPLE.lock().ok()?
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn gpu_temperature_sample() -> Option<(u32, std::time::Instant)> {
+    None
+}
+
 /// The NVIDIA dGPU as the PnP manager sees it. Neither field is read from the GPU itself.
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -752,6 +809,14 @@ pub fn spawn_gpu_telemetry_monitor() {
         static FIRST_STATE: std::sync::Once = std::sync::Once::new();
         FIRST_STATE.call_once(|| log::info!("dGPU: {gpu:?}"));
         let asleep = gpu.is_some_and(|g| g.asleep);
+        DGPU_POWER.store(
+            match gpu {
+                Some(g) if g.asleep => 2,
+                Some(_) => 1,
+                None => 0,
+            },
+            Ordering::Relaxed,
+        );
         awake_polls = if asleep {
             0
         } else {
@@ -769,7 +834,7 @@ pub fn spawn_gpu_telemetry_monitor() {
             );
         }
         if asleep {
-            GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            clear_gpu_temp();
             GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
             last_watts = None;
             std::thread::sleep(GPU_POLL_INTERVAL);
@@ -786,7 +851,7 @@ pub fn spawn_gpu_telemetry_monitor() {
             static FIRST_KMT: std::sync::Once = std::sync::Once::new();
             FIRST_KMT
                 .call_once(|| log::info!("dGPU temperature from D3DKMT: first sample {temp} C"));
-            GPU_TEMP_C.store(temp, Ordering::Relaxed);
+            store_gpu_temp(temp);
         }
 
         let last = last_watts.map(|(at, temp)| (at.elapsed(), temp));
@@ -809,7 +874,7 @@ pub fn spawn_gpu_telemetry_monitor() {
                         );
                     });
                     let temp = kmt_temp.unwrap_or(smi_temp);
-                    GPU_TEMP_C.store(temp, Ordering::Relaxed);
+                    store_gpu_temp(temp);
                     GPU_POWER_CW.store(
                         watts
                             .map(|w| (w * 100.0).round() as u32)
@@ -842,7 +907,7 @@ pub fn spawn_gpu_telemetry_monitor() {
         // (a driver reset) doesn't end the session's telemetry.
         if smi_dropped && kmt_failures >= GPU_MAX_CONSECUTIVE_FAILURES {
             log::info!("dGPU telemetry unavailable (no D3DKMT reading, nvidia-smi dropped); not polling further");
-            GPU_TEMP_C.store(GPU_UNAVAILABLE, Ordering::Relaxed);
+            clear_gpu_temp();
             GPU_POWER_CW.store(GPU_UNAVAILABLE, Ordering::Relaxed);
             return;
         }
@@ -1568,6 +1633,98 @@ pub fn refresh_rates() -> Vec<u32> {
 #[cfg(not(target_os = "windows"))]
 pub fn refresh_rates() -> Vec<u32> {
     Vec::new()
+}
+
+/// The modes Windows offers on the laptop's own panel (width, height, refresh rate), or
+/// `None` when no active display is an internal one (lid closed with an external monitor,
+/// or the query failed). The internal panel is the active path whose output technology
+/// is internal or embedded DisplayPort/UDI, whichever display is primary. The Mini-LED
+/// panel offers different modes in each native mode, so this says which one Windows runs.
+#[cfg(target_os = "windows")]
+pub fn internal_panel_modes() -> Option<Vec<(u32, u32, u32)>> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED,
+        DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsW, DEVMODEW, ENUM_DISPLAY_SETTINGS_MODE,
+    };
+
+    let (mut n_paths, mut n_modes) = (0u32, 0u32);
+    // SAFETY: two out-pointers to locals.
+    if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut n_paths, &mut n_modes) }
+        != ERROR_SUCCESS
+    {
+        return None;
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); n_paths as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); n_modes as usize];
+    // SAFETY: the arrays hold the counts passed with them; no topology id wanted.
+    if unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut n_paths,
+            paths.as_mut_ptr(),
+            &mut n_modes,
+            modes.as_mut_ptr(),
+            None,
+        )
+    } != ERROR_SUCCESS
+    {
+        return None;
+    }
+    paths.truncate(n_paths as usize);
+    let internal = paths.iter().find(|p| {
+        let tech = p.targetInfo.outputTechnology;
+        tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+            || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+            || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+    })?;
+    let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+            size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+            adapterId: internal.sourceInfo.adapterId,
+            id: internal.sourceInfo.id,
+        },
+        ..Default::default()
+    };
+    // SAFETY: the header names its own struct's size and type.
+    if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0 {
+        return None;
+    }
+    let name = source.viewGdiDeviceName;
+    let mut out = Vec::new();
+    for i in 0.. {
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // SAFETY: `name` is the NUL-terminated GDI device name from the call above.
+        if !unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR(name.as_ptr()),
+                ENUM_DISPLAY_SETTINGS_MODE(i),
+                &mut mode,
+            )
+        }
+        .as_bool()
+        {
+            break;
+        }
+        out.push((mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency));
+    }
+    Some(out)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn internal_panel_modes() -> Option<Vec<(u32, u32, u32)>> {
+    None
 }
 
 /// Switch the primary display to `hz` at its current resolution. A no-op when it is

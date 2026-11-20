@@ -140,22 +140,45 @@ const GPU_HOT_C: u8 = 87;
 pub const FAN_GUARD_TRIGGER_MIN: u8 = 40;
 pub const FAN_GUARD_TRIGGER_MAX: u8 = 110;
 
-/// How long every reading must stay cool before the set point comes back. Long enough that
-/// one cool sample in a game's load does not drop the fans; blade-lite holds 60 s.
+/// How long the readings must stay cool before the set point comes back, measured between
+/// the observations themselves (when each was taken), not between looks at a cached one.
+/// Long enough that one cool sample in a game's load does not drop the fans; blade-lite
+/// holds 60 s.
 pub const FAN_GUARD_COOL_HOLD: Duration = Duration::from_secs(30);
 
-/// A reading older than this is no reading: the guard neither engages nor releases on it,
-/// and the cool hold starts over. The tray reads every 5 s while it watches, so this is
-/// about three missed reads (a failed read pauses them for 60 s).
+/// An observation older than this is no observation: the guard neither engages nor releases
+/// on it. Two cool observations further apart than this start the hold over. The tray reads
+/// every 5 s while it watches, so this is about three missed reads (a failed read pauses
+/// them for 60 s).
 pub const FAN_GUARD_STALE: Duration = Duration::from_secs(15);
 
-/// One reading for the guard: the CPU and GPU temperatures taken at `at`. A sensor that
-/// isn't there (a GPU asleep, a byte that isn't believable) is `None`.
+/// A sensor that read hot and then has no fresh observation for this long stops holding the
+/// guard, whether or not the other sensor still reports; with every sensor lost, that gives
+/// the set point back. Holding full fan on no evidence would turn a lost sensor (a bus fault, an EC
+/// that stopped answering `0x0d85`) into full fan until the user leaves Manual, with no sign
+/// of why. Ten minutes covers the reads' own 60 s pause many times over, and what protects
+/// the chips without the guard is still there: both throttle at their own limits, and on
+/// `0x029F` the EC itself lifted a 2000 RPM set point to 4500 under load (2026-11-19). The
+/// first fresh hot reading engages the guard again.
+pub const FAN_GUARD_BLIND_RELEASE: Duration = Duration::from_secs(600);
+
+/// One sensor's temperature and when it was taken (by the sensor read, not by whoever
+/// looked at it last).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GuardReading {
+pub struct Observation {
+    pub c: u8,
     pub at: Instant,
-    pub cpu_c: Option<u8>,
-    pub gpu_c: Option<u8>,
+}
+
+/// What the guard can know at one look. A sensor without an observation is `None`: a byte
+/// that isn't believable, a failed read, or a GPU that isn't there. `gpu_asleep` says the
+/// dGPU is known to be powered down, which counts as cool; an awake GPU without a reading
+/// is only missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GuardReading {
+    pub cpu: Option<Observation>,
+    pub gpu: Option<Observation>,
+    pub gpu_asleep: bool,
 }
 
 /// What [`FanGuard::update`] changed, for the log.
@@ -171,17 +194,102 @@ pub enum FanGuardChange {
         cpu_c: Option<u8>,
         gpu_c: Option<u8>,
     },
+    /// Engaged, and no fresh observation for [`FAN_GUARD_STALE`]: still holding. Once per
+    /// loss.
+    Blind,
+    /// No fresh observation for [`FAN_GUARD_BLIND_RELEASE`]: the set point comes back.
+    ReleasedBlind,
 }
 
-/// Whether the fans should be at full speed for the heat, with hysteresis.
+/// One sensor's history for the guard.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Track {
+    /// It read hot while the guard was engaged: only its own readings can say it cooled.
+    hot: bool,
+    /// The newest observation taken in. One seen again is not taken in twice.
+    last: Option<Observation>,
+    /// The observation time its current run of cool readings started at.
+    cool_since: Option<Instant>,
+    /// The time of the last cool observation in that run.
+    last_cool: Option<Instant>,
+}
+
+impl Track {
+    /// Take in `o` if it is fresh and newer than the last one. A cool one extends the run
+    /// of cool readings (a gap over [`FAN_GUARD_STALE`] starts it over); any other ends it.
+    fn see(&mut self, o: Option<Observation>, now: Instant, cool_line: u8) {
+        let Some(o) = fresh(o, now) else {
+            return;
+        };
+        if self.last.is_some_and(|last| o.at <= last.at) {
+            return;
+        }
+        if o.c < cool_line {
+            if self
+                .last_cool
+                .is_some_and(|last| o.at.saturating_duration_since(last) > FAN_GUARD_STALE)
+            {
+                self.cool_since = None;
+            }
+            self.cool_since.get_or_insert(o.at);
+            self.last_cool = Some(o.at);
+        } else {
+            self.cool_since = None;
+            self.last_cool = None;
+        }
+        self.last = Some(o);
+    }
+
+    /// Its newest temperature, if that is still fresh.
+    fn fresh_c(&self, now: Instant) -> Option<u8> {
+        fresh(self.last, now).map(|o| o.c)
+    }
+
+    /// How long since its newest observation was taken (forever if it never had one).
+    fn silent_for(&self, now: Instant) -> Duration {
+        self.last
+            .map_or(Duration::MAX, |o| now.saturating_duration_since(o.at))
+    }
+
+    /// Its own readings have been cool across [`FAN_GUARD_COOL_HOLD`], and the last of
+    /// them is still fresh.
+    fn cooled(&self, now: Instant) -> bool {
+        match (self.cool_since, self.last_cool) {
+            (Some(since), Some(last)) => {
+                now.saturating_duration_since(last) <= FAN_GUARD_STALE
+                    && last.saturating_duration_since(since) >= FAN_GUARD_COOL_HOLD
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What one sensor says about releasing the guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Cool,
+    /// It read hot and has been silent for [`FAN_GUARD_BLIND_RELEASE`].
+    GaveUp,
+    Hold,
+}
+
+/// Whether the fans should be at full speed for the heat, with hysteresis. Each sensor is
+/// tracked on its own: the hold that releases the guard is measured on the readings of the
+/// sensor that read hot, never advanced by the other's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FanGuard {
     engaged: bool,
-    /// Since when every fresh reading has been cool, while engaged.
-    cool_since: Option<Instant>,
-    /// The last cool reading counted toward the hold. A gap longer than
-    /// [`FAN_GUARD_STALE`] after it starts the hold over: 30 s of cool means 30 s of readings.
-    last_cool: Option<Instant>,
+    cpu: Track,
+    gpu: Track,
+    /// Since when the dGPU has been known asleep with no reading (counts as cool after
+    /// [`FAN_GUARD_COOL_HOLD`]).
+    gpu_asleep_since: Option<Instant>,
+    /// [`FanGuardChange::Blind`] was reported for this loss.
+    blind_logged: bool,
+}
+
+fn fresh(o: Option<Observation>, now: Instant) -> Option<Observation> {
+    o.filter(|o| now.saturating_duration_since(o.at) <= FAN_GUARD_STALE)
 }
 
 impl FanGuard {
@@ -195,54 +303,91 @@ impl FanGuard {
         std::mem::take(self).engaged
     }
 
-    /// Take a reading. Engages on any sensor at or above its hot line; releases once some
-    /// sensor is read and every one read is under its cool line, and has been for
-    /// [`FAN_GUARD_COOL_HOLD`]. No reading, or one older than [`FAN_GUARD_STALE`], changes
-    /// nothing, and the cool hold starts over.
+    /// Take a look at the sensors.
+    ///
+    /// - Engages on any fresh observation at or above its hot line.
+    /// - Releases when every sensor that read hot has its own cool readings (under its cool
+    ///   line) spanning [`FAN_GUARD_COOL_HOLD`], taken no more than [`FAN_GUARD_STALE`]
+    ///   apart, the last still fresh; a dGPU known asleep that long counts as cool. A sensor
+    ///   that didn't read hot only has to not read warm (at or above its cool line) now.
+    /// - An observation seen again counts once; one older than [`FAN_GUARD_STALE`] counts
+    ///   for nothing.
+    /// - A sensor that read hot and then went silent holds the guard, reported once
+    ///   ([`FanGuardChange::Blind`]), until [`FAN_GUARD_BLIND_RELEASE`] after its last
+    ///   observation; then it no longer holds it ([`FanGuardChange::ReleasedBlind`] when
+    ///   that is what lets the guard go). The same rule covers losing every sensor.
     pub fn update(
         &mut self,
         now: Instant,
-        reading: Option<GuardReading>,
+        reading: GuardReading,
         limits: FanGuardLimits,
     ) -> Option<FanGuardChange> {
-        let Some(r) = reading.filter(|r| now.saturating_duration_since(r.at) <= FAN_GUARD_STALE)
-        else {
-            self.cool_since = None;
-            self.last_cool = None;
-            return None;
-        };
-        let hot = r.cpu_c.is_some_and(|c| c >= limits.cpu_hot_c)
-            || r.gpu_c.is_some_and(|c| c >= limits.gpu_hot_c);
-        let cool = (r.cpu_c.is_some() || r.gpu_c.is_some())
-            && r.cpu_c.is_none_or(|c| c < limits.cpu_cool_c)
-            && r.gpu_c.is_none_or(|c| c < limits.gpu_cool_c);
-        let (cpu_c, gpu_c) = (r.cpu_c, r.gpu_c);
+        self.cpu.see(reading.cpu, now, limits.cpu_cool_c);
+        self.gpu.see(reading.gpu, now, limits.gpu_cool_c);
+        // A dGPU known asleep has no temperature, whatever was read before it slept.
+        let cpu_c = self.cpu.fresh_c(now);
+        let gpu_c = (!reading.gpu_asleep)
+            .then(|| self.gpu.fresh_c(now))
+            .flatten();
+        if reading.gpu_asleep {
+            self.gpu_asleep_since.get_or_insert(now);
+        } else {
+            self.gpu_asleep_since = None;
+        }
+        let hot_cpu = cpu_c.is_some_and(|c| c >= limits.cpu_hot_c);
+        let hot_gpu = gpu_c.is_some_and(|c| c >= limits.gpu_hot_c);
         if !self.engaged {
-            if hot {
-                *self = FanGuard {
-                    engaged: true,
-                    ..FanGuard::default()
-                };
+            if hot_cpu || hot_gpu {
+                self.engaged = true;
+                self.cpu.hot = hot_cpu;
+                self.gpu.hot = hot_gpu;
+                self.blind_logged = false;
                 return Some(FanGuardChange::Engaged { cpu_c, gpu_c });
             }
             return None;
         }
-        if !cool {
-            self.cool_since = None;
-            self.last_cool = None;
-            return None;
-        }
-        if self
-            .last_cool
-            .is_some_and(|last| r.at.saturating_duration_since(last) > FAN_GUARD_STALE)
-        {
-            self.cool_since = None;
-        }
-        self.last_cool = Some(r.at);
-        let since = *self.cool_since.get_or_insert(r.at);
-        if now.saturating_duration_since(since) >= FAN_GUARD_COOL_HOLD {
+        self.cpu.hot |= hot_cpu;
+        self.gpu.hot |= hot_gpu;
+
+        let verdict =
+            |track: &Track, c: Option<u8>, cool_line: u8, asleep_for: Option<Duration>| {
+                if !track.hot {
+                    return if c.is_some_and(|c| c >= cool_line) {
+                        Verdict::Hold
+                    } else {
+                        Verdict::Cool
+                    };
+                }
+                if track.cooled(now) || asleep_for.is_some_and(|d| d >= FAN_GUARD_COOL_HOLD) {
+                    Verdict::Cool
+                } else if track.silent_for(now) >= FAN_GUARD_BLIND_RELEASE {
+                    Verdict::GaveUp
+                } else {
+                    Verdict::Hold
+                }
+            };
+        let asleep_for = self
+            .gpu_asleep_since
+            .map(|since| now.saturating_duration_since(since));
+        let v_cpu = verdict(&self.cpu, cpu_c, limits.cpu_cool_c, None);
+        let v_gpu = verdict(&self.gpu, gpu_c, limits.gpu_cool_c, asleep_for);
+        if v_cpu != Verdict::Hold && v_gpu != Verdict::Hold {
+            let blind = v_cpu == Verdict::GaveUp || v_gpu == Verdict::GaveUp;
             *self = FanGuard::default();
-            return Some(FanGuardChange::Released { cpu_c, gpu_c });
+            return Some(if blind {
+                FanGuardChange::ReleasedBlind
+            } else {
+                FanGuardChange::Released { cpu_c, gpu_c }
+            });
+        }
+        // A sensor that read hot and has gone quiet (not a sleeping dGPU): say so once.
+        let silent = (self.cpu.hot && self.cpu.silent_for(now) > FAN_GUARD_STALE)
+            || (self.gpu.hot && asleep_for.is_none() && self.gpu.silent_for(now) > FAN_GUARD_STALE);
+        if !silent {
+            self.blind_logged = false;
+        } else if !self.blind_logged {
+            self.blind_logged = true;
+            return Some(FanGuardChange::Blind);
         }
         None
     }
@@ -330,12 +475,21 @@ mod tests {
         t0 + Duration::from_secs(secs)
     }
 
-    fn read(at: Instant, cpu: u8, gpu: Option<u8>) -> Option<GuardReading> {
-        Some(GuardReading {
-            at,
-            cpu_c: Some(cpu),
-            gpu_c: gpu,
-        })
+    fn obs(c: u8, at: Instant) -> Option<Observation> {
+        Some(Observation { c, at })
+    }
+
+    /// A CPU observation taken at `at`, and a GPU one at the same time when given.
+    fn read(at: Instant, cpu: u8, gpu: Option<u8>) -> GuardReading {
+        GuardReading {
+            cpu: obs(cpu, at),
+            gpu: gpu.and_then(|g| obs(g, at)),
+            gpu_asleep: false,
+        }
+    }
+
+    fn none() -> GuardReading {
+        GuardReading::default()
     }
 
     const L: FanGuardLimits = FanGuardLimits::DEFAULT;
@@ -344,13 +498,11 @@ mod tests {
     fn a_hot_cpu_or_gpu_engages_and_a_warm_one_does_not() {
         let t0 = Instant::now();
         let mut g = FanGuard::default();
-        assert_eq!(
-            g.update(t0, read(t0, L.cpu_hot_c - 1, Some(L.gpu_hot_c - 1)), L),
-            None
-        );
+        let warm = read(t0, L.cpu_hot_c - 1, Some(L.gpu_hot_c - 1));
+        assert_eq!(g.update(t0, warm, L), None);
         assert!(!g.engaged());
         assert!(matches!(
-            g.update(t0, read(t0, L.cpu_hot_c, None), L),
+            g.update(at(t0, 1), read(at(t0, 1), L.cpu_hot_c, None), L),
             Some(FanGuardChange::Engaged { .. })
         ));
         assert!(g.engaged());
@@ -368,13 +520,13 @@ mod tests {
         g.update(t0, read(t0, L.cpu_hot_c + 2, None), L);
         // Between the lines: held, and no cool time accrues.
         let band = L.cpu_cool_c + 1;
-        for s in [5, 10, 40, 80] {
+        for s in [5, 10, 15, 20] {
             assert_eq!(g.update(at(t0, s), read(at(t0, s), band, None), L), None);
             assert!(g.engaged());
         }
         // Cool, but not for long enough.
         let cool = L.cpu_cool_c - 1;
-        for s in [85, 95, 105, 114] {
+        for s in [25, 35, 45, 54] {
             assert_eq!(
                 g.update(at(t0, s), read(at(t0, s), cool, None), L),
                 None,
@@ -382,11 +534,8 @@ mod tests {
             );
         }
         // One warm reading starts the hold over.
-        assert_eq!(
-            g.update(at(t0, 116), read(at(t0, 116), band, None), L),
-            None
-        );
-        for s in [120, 130, 140] {
+        assert_eq!(g.update(at(t0, 56), read(at(t0, 56), band, None), L), None);
+        for s in [60, 70, 80] {
             assert_eq!(
                 g.update(at(t0, s), read(at(t0, s), cool, None), L),
                 None,
@@ -394,7 +543,7 @@ mod tests {
             );
         }
         assert_eq!(
-            g.update(at(t0, 150), read(at(t0, 150), cool, None), L),
+            g.update(at(t0, 90), read(at(t0, 90), cool, None), L),
             Some(FanGuardChange::Released {
                 cpu_c: Some(cool),
                 gpu_c: None
@@ -404,23 +553,200 @@ mod tests {
     }
 
     #[test]
-    fn a_warm_gpu_keeps_it_engaged_while_the_cpu_is_cool() {
+    fn a_reused_observation_counts_once() {
+        // The tray looks every second; the EC is read every 5 s. Looking at the same
+        // observation again must not move the hold along.
+        let t0 = Instant::now();
+        let mut g = FanGuard::default();
+        g.update(t0, read(t0, L.cpu_hot_c, None), L);
+        let cool = L.cpu_cool_c - 1;
+        for s in [5, 10] {
+            g.update(at(t0, s), read(at(t0, s), cool, None), L);
+        }
+        // Each observation looked at every second until the next one: at second 30 the
+        // newest observation is from 25, only 20 s after the first cool one, so no release
+        // (stamping a look with the time of the look would have released at 30).
+        for (taken, until) in [(16, 24), (25, 34)] {
+            let last = read(at(t0, taken), cool, None);
+            for s in taken..=until {
+                assert_eq!(g.update(at(t0, s), last, L), None, "{s}");
+            }
+        }
+        assert!(g.engaged());
+        // A new observation at 35 is 30 s after the first cool one at 5.
+        assert!(matches!(
+            g.update(at(t0, 35), read(at(t0, 35), cool, None), L),
+            Some(FanGuardChange::Released { .. })
+        ));
+    }
+
+    #[test]
+    fn the_other_sensors_readings_never_advance_the_hot_ones_hold() {
+        let t0 = Instant::now();
+        let mut g = FanGuard::default();
+        g.update(t0, read(t0, L.cpu_hot_c, Some(50)), L);
+        let cool = L.cpu_cool_c - 1;
+        // The CPU reads cool at 5 and 20 only; the GPU reports every 5 s.
+        for s in (5..=25).step_by(5) {
+            let cpu = [5, 20].contains(&s).then(|| Observation {
+                c: cool,
+                at: at(t0, s),
+            });
+            let r = GuardReading {
+                cpu,
+                gpu: obs(50, at(t0, s)),
+                gpu_asleep: false,
+            };
+            assert_eq!(g.update(at(t0, s), r, L), None, "{s}");
+        }
+        // At 35 the GPU is fresh and the CPU's 20 s reading still counts as fresh, but
+        // the CPU's own readings span only 15 s: no release.
+        let gpu_only = GuardReading {
+            gpu: obs(50, at(t0, 35)),
+            ..none()
+        };
+        assert_eq!(g.update(at(t0, 35), gpu_only, L), None);
+        assert!(g.engaged());
+        // CPU readings at 30 and 35 complete its own 30 s span.
+        g.update(at(t0, 36), read(at(t0, 30), cool, Some(50)), L);
+        assert!(matches!(
+            g.update(at(t0, 36), read(at(t0, 35), cool, Some(50)), L),
+            Some(FanGuardChange::Released { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hot_sensor_gone_quiet_stops_holding_after_ten_minutes() {
+        let t0 = Instant::now();
+        let mut g = FanGuard::default();
+        // The CPU triggers it, then only the GPU reports (cool) from then on.
+        g.update(t0, read(t0, L.cpu_hot_c, Some(50)), L);
+        let gpu_only = |s| GuardReading {
+            gpu: obs(50, at(t0, s)),
+            ..none()
+        };
+        let end = FAN_GUARD_BLIND_RELEASE.as_secs();
+        let mut blind = 0;
+        for s in (5..end).step_by(5) {
+            match g.update(at(t0, s), gpu_only(s), L) {
+                Some(FanGuardChange::Blind) => blind += 1,
+                None => {}
+                other => panic!("{s}: {other:?}"),
+            }
+        }
+        assert_eq!(blind, 1);
+        assert!(g.engaged());
+        assert_eq!(
+            g.update(at(t0, end), gpu_only(end), L),
+            Some(FanGuardChange::ReleasedBlind)
+        );
+        // A warm GPU at that point keeps it, though the CPU has given up.
+        let mut g = FanGuard::default();
+        g.update(t0, read(t0, L.cpu_hot_c, Some(50)), L);
+        let warm = GuardReading {
+            gpu: obs(L.gpu_cool_c, at(t0, end)),
+            ..none()
+        };
+        // (The CPU's silence is reported, once; nothing is released.)
+        assert_eq!(g.update(at(t0, end), warm, L), Some(FanGuardChange::Blind));
+        assert!(g.engaged());
+    }
+
+    #[test]
+    fn a_warm_gpu_keeps_it_engaged_and_a_sleeping_gpu_is_cool() {
         let t0 = Instant::now();
         let mut g = FanGuard::default();
         g.update(t0, read(t0, 60, Some(L.gpu_hot_c)), L);
-        for s in (5..=120).step_by(5) {
+        for s in (5..=60).step_by(5) {
             let r = read(at(t0, s), 50, Some(L.gpu_cool_c));
             assert_eq!(g.update(at(t0, s), r, L), None);
         }
         assert!(g.engaged());
-        // The GPU going to sleep (no reading) counts as cool.
-        for s in (125..=150).step_by(5) {
-            assert_eq!(g.update(at(t0, s), read(at(t0, s), 50, None), L), None);
+        // The dGPU powers down when the game ends: known asleep counts as cool.
+        let asleep = |s| GuardReading {
+            gpu_asleep: true,
+            ..read(at(t0, s), 50, None)
+        };
+        for s in (65..=90).step_by(5) {
+            assert_eq!(g.update(at(t0, s), asleep(s), L), None, "{s}");
         }
         assert!(matches!(
-            g.update(at(t0, 155), read(at(t0, 155), 50, None), L),
+            g.update(at(t0, 95), asleep(95), L),
             Some(FanGuardChange::Released { .. })
         ));
+    }
+
+    #[test]
+    fn the_other_sensor_alone_never_releases_it() {
+        let t0 = Instant::now();
+        let mut g = FanGuard::default();
+        // The GPU triggered it, then its reading is lost (not asleep: just missing).
+        g.update(t0, read(t0, 60, Some(L.gpu_hot_c + 1)), L);
+        for s in (5..=300).step_by(5) {
+            let change = g.update(at(t0, s), read(at(t0, s), 40, None), L);
+            assert!(
+                matches!(change, None | Some(FanGuardChange::Blind)),
+                "{s}: {change:?}"
+            );
+        }
+        assert!(g.engaged(), "a cool CPU is no news about the GPU");
+        // The GPU is read again, cool: the hold starts from there.
+        let both = |s| read(at(t0, s), 40, Some(L.gpu_cool_c - 1));
+        for s in (305..=330).step_by(5) {
+            assert_eq!(g.update(at(t0, s), both(s), L), None, "{s}");
+        }
+        assert!(g.update(at(t0, 335), both(335), L).is_some());
+
+        // The CPU triggered it and its byte goes away; a cool GPU doesn't release it.
+        let mut g = FanGuard::default();
+        g.update(t0, read(t0, L.cpu_hot_c, Some(50)), L);
+        for s in (5..=120).step_by(5) {
+            let r = GuardReading {
+                gpu: obs(50, at(t0, s)),
+                ..none()
+            };
+            let change = g.update(at(t0, s), r, L);
+            assert!(
+                matches!(change, None | Some(FanGuardChange::Blind)),
+                "{s}: {change:?}"
+            );
+        }
+        assert!(g.engaged());
+    }
+
+    #[test]
+    fn a_stale_reading_engages_nothing_and_a_lost_sensor_holds_then_gives_up() {
+        let t0 = Instant::now();
+        let mut g = FanGuard::default();
+        // Hot, but taken too long ago: no engage.
+        let later = t0 + FAN_GUARD_STALE + Duration::from_secs(1);
+        assert_eq!(g.update(later, read(t0, L.cpu_hot_c + 5, None), L), None);
+        assert!(!g.engaged());
+        assert_eq!(g.update(later, none(), L), None);
+        // Engaged, then the readings stop: held, reported once, released after
+        // FAN_GUARD_BLIND_RELEASE without an observation.
+        g.update(t0, read(t0, L.cpu_hot_c, None), L);
+        let mut blind = 0;
+        let mut s = 1;
+        let blind_end = FAN_GUARD_BLIND_RELEASE.as_secs();
+        while s < blind_end {
+            match g.update(at(t0, s), none(), L) {
+                Some(FanGuardChange::Blind) => blind += 1,
+                None => {}
+                other => panic!("{s}: {other:?}"),
+            }
+            assert!(g.engaged(), "{s}");
+            s += 7;
+        }
+        assert_eq!(blind, 1, "reported once");
+        assert_eq!(
+            g.update(at(t0, blind_end), none(), L),
+            Some(FanGuardChange::ReleasedBlind)
+        );
+        assert!(!g.engaged());
+        // A fresh hot reading engages again.
+        let back = at(t0, blind_end + 5);
+        assert!(g.update(back, read(back, L.cpu_hot_c, None), L).is_some());
     }
 
     #[test]
@@ -443,54 +769,6 @@ mod tests {
         assert!(g
             .update(at(t0, 66), read(at(t0, 66), cool, None), L)
             .is_some());
-    }
-
-    #[test]
-    fn a_stale_or_missing_reading_changes_nothing() {
-        let t0 = Instant::now();
-        let mut g = FanGuard::default();
-        // Hot, but read too long ago: no engage.
-        let old = read(t0, L.cpu_hot_c + 5, None);
-        let later = t0 + FAN_GUARD_STALE + Duration::from_secs(1);
-        assert_eq!(g.update(later, old, L), None);
-        assert!(!g.engaged());
-        assert_eq!(g.update(later, None, L), None);
-        // Engaged, then the readings stop: it stays engaged however long that lasts.
-        g.update(t0, read(t0, L.cpu_hot_c, None), L);
-        g.update(at(t0, 5), read(at(t0, 5), 40, None), L);
-        for s in [20, 60, 600] {
-            assert_eq!(g.update(at(t0, s), read(at(t0, 5), 40, None), L), None);
-            assert_eq!(g.update(at(t0, s), None, L), None);
-            assert!(g.engaged(), "{s}");
-        }
-        // And the hold starts over from the next fresh cool reading.
-        for s in [601, 611, 621] {
-            assert_eq!(
-                g.update(at(t0, s), read(at(t0, s), 40, None), L),
-                None,
-                "{s}"
-            );
-        }
-        assert!(g
-            .update(at(t0, 631), read(at(t0, 631), 40, None), L)
-            .is_some());
-    }
-
-    #[test]
-    fn no_sensor_at_all_is_not_cool() {
-        let t0 = Instant::now();
-        let mut g = FanGuard::default();
-        g.update(t0, read(t0, L.cpu_hot_c, None), L);
-        let blind = Some(GuardReading {
-            at: at(t0, 100),
-            cpu_c: None,
-            gpu_c: None,
-        });
-        for s in [100, 140, 200] {
-            let r = blind.map(|r| GuardReading { at: at(t0, s), ..r });
-            assert_eq!(g.update(at(t0, s), r, L), None);
-        }
-        assert!(g.engaged());
     }
 
     #[test]
