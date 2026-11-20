@@ -1578,6 +1578,8 @@ mod tests {
         .chain([
             json!({"command": "0x0d85", "support": "works", "evidence": "inferred: CLI test model", "reply": [2, 55, 45]}),
             json!({"command": "0x078c", "support": "works", "evidence": "inferred: CLI test model", "reply": [0x12, 0x12]}),
+            json!({"command": "0x0d8f", "support": "works", "evidence": "inferred: CLI test model", "reply": [0x03]}),
+            json!({"command": "0x0d8e", "support": "works", "evidence": "inferred: CLI test model", "reply": [0x00]}),
         ])
         .collect();
         json!({
