@@ -4,6 +4,20 @@ Release history for this fork: the README has current behavior, this file how it
 Hardware claims were checked on a Razer Blade 16 (2023), `RZ09-0483`, PID `0x029F`, Windows 11,
 unless a user report is cited.
 
+## Unreleased
+
+**New**
+- **Mini-LED panel mode.** On a Blade 16 (2023) with the dual-mode panel, "Panel mode" in the menu
+  and `razer-cli auto panel [set uhd|fhd]` pick 3840x2400 at 120 Hz or 1920x1200 at 240 Hz for the
+  next start (the BIOS "Max Refresh Rate Mode"). Offered only on `0x029F` with the panel bit
+  (`0x02`) in the SKU byte (`0x0d8f`). A write is confirmed by the getter (`0x0d8e`); then the tray
+  asks "Restart now?" with No as the default. Never written at startup, by a profile or by a reset.
+  Protocol from Paul Rodriguez's [razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). On
+  `0x029F` the SKU byte reads `0x03` and the mode `0x00` (UHD+); FHD+ read back `0x01` and UHD+
+  again `0x00`, without a restart (2026-11-19).
+
+- Versions: `librazer` gains `panel`.
+
 ## 0.9.8: game rules menu and window, CPU speed cap, app rules that end cleanly (2026-11-15)
 Built and tested on `0x029F` (2026-11-11 to 2026-11-15). The CPU cap ran in a test tray from
 2026-11-06 and the dGPU check from 2026-10-25. Five changes come from

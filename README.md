@@ -34,6 +34,11 @@ history and measurements; `README.upstream.md` covers the original project.
   the current profile and writes nothing; the other profile is read the first time the laptop runs
   on that source.
 - **Screen refresh rate** per profile. Default: "Leave as Windows has it".
+- **Panel mode** (Blade 16 2023 with the Mini-LED dual-mode panel): 3840x2400 at 120 Hz or
+  1920x1200 at 240 Hz, the BIOS "Max Refresh Rate Mode". Takes effect after a restart; after the
+  change is read back the tray asks whether to restart now (No is the default).
+  `razer-cli auto panel` prints it, `razer-cli auto panel set uhd|fhd` sets it. Shown only on
+  `0x029F` when the SKU byte has the panel bit. Never set at startup, by a profile or by a reset.
 - **Match Windows power to Razer performance mode** (off by default): Battery and Silent → Best power
   efficiency, Balanced → Balanced, the rest → Best performance. Turning it off restores each source's
   earlier mode.
@@ -176,6 +181,8 @@ GitHub Actions builds every release binary from a tag. None is uploaded by hand.
   until the new limit shows.
 - **The tooltip holds 63 characters, not 128** (`tray-icon` 0.19 leaves `cbSize` at 0). Less
   important fields drop out when a long `Custom (CPU …, GPU …)` label needs the room.
+- **Panel mode is firmware state.** Windows keeps the old resolution until the restart, and the
+  menu marks a pending choice "(after restart)".
 - **The tooltip refreshes on hover.** A background poll still drives "Undo changes made by Synapse"
   and picks up Fn brightness changes.
 
@@ -202,7 +209,9 @@ hand-maintained hardware data, and a wrong RPM range or init sequence is worse t
 Original by Tarek Dakhran ([tdakhran/razer-ctl](https://github.com/tdakhran/razer-ctl)), multi-model
 fork by blauzim ([blauzim/razer-ctl](https://github.com/blauzim/razer-ctl)). Both MIT; so is this
 fork. Protocol notes and fixes from Finesssee ([Finesssee/razer-ctl](https://github.com/Finesssee/razer-ctl),
-MIT). Maintained by sqmagellan, developed with Claude Opus 5.5.
+MIT). The Mini-LED panel protocol is from Paul Rodriguez's
+[razer-helper](https://github.com/Paulrod20/razer-helper) (MIT). Maintained by
+sqmagellan, developed with Claude Opus 5.5.
 
 Protocol facts (command IDs, the checksum, `0x0004` being device mode) came from reading
 [OpenRazer](https://github.com/openrazer/openrazer) and

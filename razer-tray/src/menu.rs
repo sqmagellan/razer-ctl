@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use strum::IntoEnumIterator;
 
 use librazer::keyboard::{KeyboardColor, KeyboardPreset};
+use librazer::panel::PanelMode;
 use librazer::types::{BatteryCare, CpuBoost, GpuBoost, KeyboardEffect, LightsAlwaysOn, LogoMode};
 use librazer::unsupported::{Optional, Unsupported};
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -53,6 +54,28 @@ pub struct MenuOptions<'a> {
     pub rules: &'a [AppProfile],
     /// The rule in force now (an index into `rules`), marked "(running)".
     pub running_rule: Option<usize>,
+    /// The Mini-LED panel's firmware selection, on a laptop with the dual-mode panel.
+    pub panel: Option<crate::program::PanelState>,
+}
+
+/// The menu id of a Mini-LED panel mode item.
+pub fn panel_id(mode: PanelMode) -> String {
+    format!("panel:{}", mode.name())
+}
+
+/// The panel mode a menu id picks, if it is one.
+pub fn panel_from_id(id: &str) -> Option<PanelMode> {
+    id.strip_prefix("panel:")?.parse().ok()
+}
+
+/// A panel mode item's label: resolution and rate, and "(after restart)" on a selection
+/// made since the tray started, which the panel does not run in yet.
+pub fn panel_label(mode: PanelMode, panel: crate::program::PanelState) -> String {
+    if mode == panel.selected && mode != panel.at_start {
+        format!("{} (after restart)", mode.label())
+    } else {
+        mode.label().to_string()
+    }
 }
 
 /// Build the full tray menu and its event-handler map. The menu reflects `dstate`
@@ -82,6 +105,7 @@ pub fn build(
         ac_power,
         rules,
         running_rule,
+        panel,
     } = *opts;
     // A setting this laptop lacks keeps its submenu, disabled, so the menu says why it
     // does nothing instead of hiding it.
@@ -340,6 +364,36 @@ pub fn build(
             &items
                 .iter()
                 .map(|i| i as &dyn IsMenuItem)
+                .collect::<Vec<_>>(),
+        )?)?;
+    }
+
+    // The Mini-LED dual-mode panel's native mode, on a laptop that has the panel. Not a
+    // profile setting: it is firmware state that takes effect at the next start, so the
+    // ids are handled in main.rs, which writes it, confirms it and offers a restart. Never
+    // written at startup, by a profile or by a reset.
+    if let Some(panel) = panel {
+        let items: Vec<CheckMenuItem> = PanelMode::ALL
+            .into_iter()
+            .map(|mode| {
+                let checked = panel.selected == mode;
+                CheckMenuItem::with_id(
+                    panel_id(mode),
+                    panel_label(mode, panel),
+                    !checked,
+                    checked,
+                    None,
+                )
+            })
+            .collect();
+        let note = MenuItem::new("Takes effect after a restart", false, None);
+        menu.append(&Submenu::with_items(
+            "Panel mode",
+            true,
+            &items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem)
+                .chain(std::iter::once(&note as &dyn IsMenuItem))
                 .collect::<Vec<_>>(),
         )?)?;
     }
@@ -744,6 +798,30 @@ mod tests {
 
     fn label(pid: u16, perf_mode: PerfMode, rpm: u16) -> String {
         label_with(pid, perf_mode, false, rpm)
+    }
+
+    #[test]
+    fn panel_ids_round_trip_and_a_new_selection_says_after_restart() {
+        for mode in PanelMode::ALL {
+            assert_eq!(panel_from_id(&panel_id(mode)), Some(mode));
+        }
+        assert_eq!(panel_from_id("panel:4k"), None);
+        assert_eq!(panel_from_id("fan_speeds:auto"), None);
+        let running = crate::program::PanelState {
+            at_start: PanelMode::Fhd240,
+            selected: PanelMode::Fhd240,
+        };
+        assert_eq!(panel_label(PanelMode::Fhd240, running), "1920x1200, 240 Hz");
+        assert_eq!(panel_label(PanelMode::Uhd120, running), "3840x2400, 120 Hz");
+        let pending = crate::program::PanelState {
+            selected: PanelMode::Uhd120,
+            ..running
+        };
+        assert_eq!(
+            panel_label(PanelMode::Uhd120, pending),
+            "3840x2400, 120 Hz (after restart)"
+        );
+        assert_eq!(panel_label(PanelMode::Fhd240, pending), "1920x1200, 240 Hz");
     }
 
     #[test]

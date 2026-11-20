@@ -275,6 +275,8 @@ fn main() -> Result<()> {
     state.refresh_rates = platform::refresh_rates();
     state.custom_colors = librazer::keyboard::supports_custom_frame(device.info().pid);
     state.pid = device.info().pid;
+    // Read only. The panel mode is never written at startup.
+    state.detect_panel(&device);
     state.rebuild_menu(Some(&tray_icon));
     if first_run {
         // confy used to create the file on first run; people look for it to add Actions.
@@ -419,6 +421,42 @@ fn main() -> Result<()> {
                     if !state.needs_sync {
                         state.needs_sync = true;
                         next_sync_at = now;
+                    }
+                } else if let Some(mode) = menu::panel_from_id(event.id.as_ref()) {
+                    // The firmware's panel mode: written only here, on the user's pick, and
+                    // confirmed by a read-back before a restart is offered (No by default).
+                    match state.select_panel_mode(&device, mode, &tray_icon) {
+                        Ok(true) => {
+                            let text = format!(
+                                "Panel mode set to {mode}.\n\nTakes effect after a restart. \
+                                 Restart now?"
+                            );
+                            std::thread::spawn(move || platform::offer_restart(&text));
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            // select_panel_mode re-read the firmware: say what it holds now.
+                            let now = state.panel.map(|p| p.selected);
+                            let text = if now == Some(mode) {
+                                format!(
+                                    "The panel mode reads {mode} now, but the write was not \
+                                     confirmed at the time:\n{e:#}\n\nCheck the BIOS Max \
+                                     Refresh Rate Mode before restarting."
+                                )
+                            } else {
+                                format!(
+                                    "The panel mode may not have changed (it reads {}):\n{e:#}",
+                                    now.map_or("unknown".to_string(), |m| m.to_string())
+                                )
+                            };
+                            std::thread::spawn(move || {
+                                let _ = native_dialog::MessageDialog::new()
+                                    .set_type(native_dialog::MessageType::Warning)
+                                    .set_title("razer-tray")
+                                    .set_text(&text)
+                                    .show_alert();
+                            });
+                        }
                     }
                 } else if event.id == MenuId("dgpu_sleep_check".to_string()) {
                     // Its own thread: the dialog is modal and would stall the tray loop.

@@ -200,6 +200,45 @@ pub fn open_in_editor(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Ask whether to restart Windows now, Yes/No with **No** the default (Enter or a stray
+/// click on the default keeps working), and restart on Yes. Blocks: call it off the tray's
+/// event loop. For the Mini-LED panel mode, which the firmware applies only at a start.
+/// The restart is `shutdown /r /t 0`: programs are asked to close, not killed.
+#[cfg(target_os = "windows")]
+pub fn offer_restart(text: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO,
+    };
+    // SAFETY: two owned, NUL-terminated wide strings that outlive the call; no owner window.
+    let answer = unsafe {
+        MessageBoxW(
+            HWND(0),
+            &HSTRING::from(text),
+            &HSTRING::from("razer-tray"),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        )
+    };
+    if answer != IDYES {
+        log::info!("restart offer: declined; the change waits for the next restart");
+        return;
+    }
+    log::info!("restart offer: accepted; restarting Windows");
+    if let Err(e) = std::process::Command::new("shutdown")
+        .args(["/r", "/t", "0"])
+        .spawn()
+    {
+        log::warn!("restart: could not run shutdown: {e:?}");
+    }
+}
+
+/// Off Windows the tray never restarts the machine; the change waits for the next start.
+#[cfg(not(target_os = "windows"))]
+pub fn offer_restart(text: &str) {
+    log::info!("{text} (not restarting: Windows only)");
+}
+
 #[cfg(target_os = "windows")]
 pub fn gpu_taskkill() -> Result<()> {
     use std::os::windows::process::CommandExt;

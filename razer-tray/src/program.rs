@@ -10,6 +10,7 @@ use librazer::command;
 use librazer::cpu_cap::{self, CpuCap};
 use librazer::device;
 use librazer::keyboard::{Frame, KeyboardPreset};
+use librazer::panel::PanelMode;
 use librazer::types::BatteryCare;
 use librazer::unsupported::{Optional, Unsupported};
 use tray_icon::menu::Menu;
@@ -107,6 +108,16 @@ const EC_TEMP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 const EC_TEMP_PAUSE: std::time::Duration = FAN_READ_PAUSE;
 /// Older than this, an EC temperature is left out of the tooltip rather than shown stale.
 const EC_TEMP_STALE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The Mini-LED panel's firmware selection (see `librazer::panel`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelState {
+    /// What the firmware had selected when the tray started: the mode the panel runs in,
+    /// unless something changed it earlier in this boot.
+    pub at_start: PanelMode,
+    /// What it has selected now, for the next start.
+    pub selected: PanelMode,
+}
 
 /// Resyncs for a perf/fan mode the EC acknowledged and didn't take, before the tray gives
 /// up until the next change. On the resync backoff they come about 2, 4 and 8 s apart:
@@ -216,6 +227,8 @@ pub struct ProgramState {
     /// forces the next paint. Frames cannot be read back, so this is the only record.
     painted: Option<Frame>,
     config_file: ConfigFile,
+    /// The Mini-LED dual-mode panel, on a laptop that has one; set by `main`.
+    pub panel: Option<PanelState>,
 }
 
 impl ProgramState {
@@ -251,6 +264,7 @@ impl ProgramState {
                 ac_power,
                 rules: &config.app_profiles,
                 running_rule: None,
+                panel: None,
             },
         )?;
         let cpu_cap = CpuCap::open(config_file.path().with_file_name(cpu_cap::BASELINE_FILE));
@@ -293,6 +307,7 @@ impl ProgramState {
             battery_bar: config.keyboard_battery_bar,
             painted: None,
             config_file,
+            panel: None,
         })
     }
 
@@ -318,6 +333,7 @@ impl ProgramState {
             ac_power: self.ac_power,
             rules: &self.app_profiles,
             running_rule: self.action.map(|a| a.rule),
+            panel: self.panel,
         }
     }
 
@@ -477,6 +493,70 @@ impl ProgramState {
         // Whatever produced it, never aim at a state the EC cannot hold: that never
         // converges, and the loop would re-apply it every tick.
         .normalized(self.fan_rpm_range)
+    }
+
+    // ---- Mini-LED panel ------------------------------------------------------------
+
+    /// Read the panel's firmware selection at startup, on a laptop that has the panel. Reads
+    /// only: the tray never writes the panel mode by itself.
+    pub fn detect_panel(&mut self, device: &device::Device) {
+        match librazer::panel::get_panel_mode(device, self.pid) {
+            Ok(Some(mode)) => {
+                log::info!("Mini-LED panel: the firmware has {mode} selected");
+                self.panel = Some(PanelState {
+                    at_start: mode,
+                    selected: mode,
+                });
+            }
+            Ok(None) => self.panel = None,
+            Err(e) => log::warn!("Mini-LED panel: could not read the selection ({e:#}); no menu"),
+        }
+    }
+
+    /// The user picked a panel mode in the menu: select it in the firmware, confirmed by a
+    /// read-back. `Ok(true)` when it changed (the caller offers a restart), `Ok(false)`
+    /// when it was already selected. On an error the menu shows what the firmware reads.
+    pub fn select_panel_mode(
+        &mut self,
+        device: &device::Device,
+        mode: PanelMode,
+        tray_icon: &tray_icon::TrayIcon,
+    ) -> Result<bool> {
+        let Some(panel) = self.panel else {
+            anyhow::bail!("this laptop has no Mini-LED dual-mode panel");
+        };
+        let result = librazer::panel::set_panel_mode(device, self.pid, mode);
+        match &result {
+            Ok(librazer::panel::PanelWrite::Changed) => {
+                log::info!(
+                    "Mini-LED panel: {mode} selected and read back; takes effect after a restart"
+                );
+                self.panel = Some(PanelState {
+                    selected: mode,
+                    ..panel
+                });
+            }
+            Ok(librazer::panel::PanelWrite::AlreadySelected) => {
+                // Set elsewhere (the CLI) since the tray read it.
+                log::info!("Mini-LED panel: {mode} was already selected; nothing written");
+                self.panel = Some(PanelState {
+                    selected: mode,
+                    ..panel
+                });
+            }
+            Err(e) => {
+                log::warn!("Mini-LED panel: selecting {mode} failed: {e:#}");
+                if let Ok(Some(read)) = librazer::panel::get_panel_mode(device, self.pid) {
+                    self.panel = Some(PanelState {
+                        selected: read,
+                        ..panel
+                    });
+                }
+            }
+        }
+        // The clicked item toggled itself; the rebuilt menu shows the firmware's selection.
+        self.rebuild_menu(Some(tray_icon));
+        result.map(|w| w == librazer::panel::PanelWrite::Changed)
     }
 
     /// Bring the Windows CPU frequency settings in line with the running Action. Runs

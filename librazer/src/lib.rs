@@ -17,6 +17,7 @@ pub mod hid_lock;
 pub mod keyboard;
 pub mod matching;
 pub mod observe;
+pub mod panel;
 pub mod probe;
 pub mod process_guard;
 pub mod retry;

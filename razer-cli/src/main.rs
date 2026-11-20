@@ -310,6 +310,78 @@ impl Cli for CustomCommand {
     }
 }
 
+/// `panel`: the Blade 16 (2023)'s Mini-LED dual-mode panel (see `librazer::panel`). Not a
+/// descriptor feature: the PID alone doesn't say whether the panel is there, so every model
+/// gets the command and it answers "not supported" where the panel is absent.
+struct Panel;
+
+impl Feature for Panel {
+    fn name(&self) -> &'static str {
+        "panel"
+    }
+}
+
+impl Cli for Panel {
+    fn cmd(&self) -> Option<Command> {
+        Some(
+            clap::Command::new(self.name())
+                .about(
+                    "Mini-LED dual-mode panel (Blade 16 2023): print the mode the firmware \
+                     starts the panel in",
+                )
+                .subcommand(
+                    clap::Command::new("set")
+                        .about(
+                            "Select the panel's mode for the next start (uhd = 3840x2400 \
+                             120 Hz, fhd = 1920x1200 240 Hz); takes effect after a restart",
+                        )
+                        .arg(arg!(<MODE> "uhd or fhd").value_parser(["uhd", "fhd"]))
+                        .arg_required_else_help(true),
+                ),
+        )
+    }
+
+    fn handle(&self, device: &Laptop, matches: &clap::ArgMatches) -> Result<()> {
+        use librazer::panel::{self, PanelMode, PanelWrite};
+        let pid = device.info.pid;
+        match matches.subcommand() {
+            Some((ident, sub)) if ident == self.name() => match sub.subcommand() {
+                Some(("set", m)) => {
+                    let mode: PanelMode = m.get_one::<String>("MODE").unwrap().parse()?;
+                    match panel::set_panel_mode(device, pid, mode)? {
+                        PanelWrite::AlreadySelected => {
+                            println!("Panel mode is already {mode}; nothing written")
+                        }
+                        PanelWrite::Changed => println!(
+                            "Panel mode set to {mode} (read back). It takes effect after a \
+                             Windows restart."
+                        ),
+                    }
+                    Ok(())
+                }
+                _ => {
+                    match panel::get_panel_mode(device, pid)? {
+                        Some(mode) => println!("Panel mode: {mode} ({})", mode.name()),
+                        None => println!("Panel mode: not supported (no Mini-LED dual-mode panel)"),
+                    }
+                    Ok(())
+                }
+            },
+            Some(("info", _)) => {
+                // Only where the panel can be: no exchange at all on another model.
+                if pid == panel::MINI_LED_PID {
+                    match panel::get_panel_mode(device, pid)? {
+                        Some(mode) => println!("{}: {mode}", self.name()),
+                        None => println!("{}: not supported", self.name()),
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The line `fan rpm` and `info` print when this laptop runs a manual fan faster than `rpm`
 /// in `perf_mode` (measured per model: `librazer::unsupported::MANUAL_FLOOR_BY_PERF`). The
 /// set point still reads back as written, so without this line the CLI would show only a
@@ -1240,6 +1312,7 @@ fn real_main(args: Vec<OsString>) -> Result<()> {
     };
 
     let mut cli_features: Vec<Box<dyn Cli>> = gen_cli_features(feature_list);
+    cli_features.push(Box::new(Panel));
     cli_features.push(Box::new(CustomCommand));
 
     let cmd = build_cli(&cli_features);
@@ -1327,6 +1400,7 @@ mod tests {
 
     fn cli() -> Command {
         let mut features = gen_cli_features(feature::ALL_FEATURES);
+        features.push(Box::new(Panel));
         features.push(Box::new(CustomCommand));
         build_cli(&features)
     }
@@ -1385,6 +1459,12 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_mode_other_than_uhd_or_fhd_is_a_usage_error() {
+        assert!(!parses(&["auto", "panel", "set", "4k"]));
+        assert!(!parses(&["auto", "panel", "set"]));
+    }
+
+    #[test]
     fn fan_rpm_below_every_known_floor_is_a_usage_error() {
         assert!(!parses(&["auto", "fan", "rpm", "1800"]));
         assert!(parses(&["auto", "fan", "rpm", "3000"]));
@@ -1399,6 +1479,9 @@ mod tests {
             &["auto", "fan", "auto"],
             &["auto", "perf", "mode", "balanced"],
             &["auto", "battery-care", "set", "80"],
+            &["auto", "panel"],
+            &["auto", "panel", "set", "uhd"],
+            &["auto", "panel", "set", "fhd"],
             &["manual", "--pid", "0x029f", "json"],
             &["enumerate", "--json"],
             &["probe"],

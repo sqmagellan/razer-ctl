@@ -242,14 +242,23 @@ impl Packet {
         }
 
         // 0x0792 (battery health optimizer), 0x078f (max fan speed mode), 0x0d85 (EC
-        // temperatures) and 0x078c (power source) legitimately answer with a different
+        // temperatures), 0x078c (power source) and the Mini-LED panel commands (0x0d8f,
+        // 0x0d8e, 0x0d0e; see `crate::panel`) legitimately answer with a different
         // remaining_packets than they were asked with. On `0x029F` 0x0d85 answers wire bytes
-        // [0x00, 0x03] there and 0x078c [0x00, 0x02].
+        // [0x00, 0x03] there, 0x078c [0x00, 0x02], and 0x0d8f and 0x0d8e [0x00, 0x01]
+        // (2026-11-19). The setter 0x0d0e is listed with its getters: nobody has seen its
+        // header, and Synapse does not check the field.
         let remaining_ok = self.remaining_packets == report.remaining_packets
-            || (self.command_class, self.command_id) == (0x07, 0x92)
-            || (self.command_class, self.command_id) == (0x07, 0x8f)
-            || (self.command_class, self.command_id) == (0x0d, 0x85)
-            || (self.command_class, self.command_id) == (0x07, 0x8c);
+            || matches!(
+                (self.command_class, self.command_id),
+                (0x07, 0x92)
+                    | (0x07, 0x8f)
+                    | (0x0d, 0x85)
+                    | (0x07, 0x8c)
+                    | (0x0d, 0x8f)
+                    | (0x0d, 0x8e)
+                    | (0x0d, 0x0e)
+            );
         if !remaining_ok {
             return Err(ResponseError::Mismatch);
         }
@@ -540,6 +549,14 @@ mod tests {
         let mut resp = response_to(&req, 0x02);
         resp.remaining_packets = u16::from_le_bytes([0x00, 0x02]);
         assert_eq!(resp.classify_response(&req), Ok(()));
+
+        // The Mini-LED panel getters answer [0x00, 0x01] on 0x029F (2026-11-19).
+        for command in [0x0d8f, 0x0d8e, 0x0d0e] {
+            let req = Packet::new(command, &[0]);
+            let mut resp = response_to(&req, 0x02);
+            resp.remaining_packets = u16::from_le_bytes([0x00, 0x01]);
+            assert_eq!(resp.classify_response(&req), Ok(()), "{command:#06x}");
+        }
 
         // Other getters still have to match.
         let req = Packet::new(0x0d82, &[0, 1, 0, 0]);
